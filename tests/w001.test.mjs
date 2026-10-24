@@ -108,3 +108,35 @@ test('still flags a test when the only expect is in beforeEach', () => {
     ['after hook only'],
   );
 });
+
+test('flags an extended test that has no assertion', () => {
+  const findings = findingsFor(path.join(parserDir, 'extend.spec.ts'), emptyConfig());
+  assert.deepEqual(
+    findings.map((entry) => entry.testTitle),
+    ['chained extend without assertion'],
+  );
+});
+
+test('does not flag condition annotations, and still flags an empty test.fail and an in-body skip', () => {
+  const findings = findingsFor(path.join(parserDir, 'annotations.spec.ts'), emptyConfig());
+  assert.deepEqual(
+    findings.map((entry) => entry.testTitle),
+    ['annotations > failing and empty', 'annotations > skips inside the body'],
+  );
+});
+
+test('flags a generated test that has no assertion', () => {
+  const findings = findingsFor(path.join(parserDir, 'generated.spec.ts'), emptyConfig());
+  assert.deepEqual(
+    findings.map((entry) => entry.testTitle),
+    ['generated > mapped ${name}'],
+  );
+});
+
+test('does not flag inline or aliased expect.configure', () => {
+  const findings = findingsFor(path.join(parserDir, 'configure.spec.ts'), emptyConfig());
+  assert.deepEqual(
+    findings.map((entry) => entry.testTitle),
+    ['still empty'],
+  );
+});

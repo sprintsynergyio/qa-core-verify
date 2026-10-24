@@ -78,7 +78,10 @@ const HOOKS = new Set([
  * Read one spec with the TypeScript parser. The file is not executed.
  * `test` and `expect` must be imported. Named imports may come from
  * `@playwright/test`, `playwright`, `playwright/test`, or a relative fixture
- * file. The import is not loaded or followed.
+ * file. The import is not loaded or followed. A call to `extend` on a known
+ * test binding, and `expect.configure`, become bindings too. Condition-only
+ * `skip`, `fixme`, `fail`, and `slow` calls are annotations. At suite level,
+ * callbacks passed to other calls are searched so data-driven tests are found.
  */
 export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInventory {
   const absolute = path.resolve(filePath);
@@ -130,6 +133,16 @@ function walkSuite(
       recordTest(node, kind.modifiers, ctx, sourceFile, bindings, config, tests);
       return;
     }
+    if (kind?.type === 'annotation') return;
+    // Data-driven tests: forEach, map, and other callbacks at suite level.
+    for (const arg of node.arguments) {
+      if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) {
+        walkSuite(arg.body, ctx, sourceFile, bindings, config, tests);
+      } else {
+        walkSuite(arg, ctx, sourceFile, bindings, config, tests);
+      }
+    }
+    return;
   }
   if (isNestedFunction(node)) return;
   ts.forEachChild(node, (child) => walkSuite(child, ctx, sourceFile, bindings, config, tests));
@@ -196,7 +209,7 @@ function collectBody(
         if (callback) walk(callback.body);
         return;
       }
-      if (kind?.type === 'test' || kind?.type === 'describe') return;
+      if (kind?.type === 'test' || kind?.type === 'describe' || kind?.type === 'annotation') return;
 
       const expectCall = asExpectMatcher(node, bindings, sourceFile);
       if (expectCall) {
@@ -245,6 +258,9 @@ function expectShape(expr: ts.Expression, bindings: Bindings): ExpectShape | nul
     return { ...inner, not: true };
   }
   if (!ts.isCallExpression(unwrapped)) return null;
+  if (isExpectConfigure(unwrapped.expression, bindings)) {
+    return { not: false, soft: false, poll: false, subject: unwrapped.arguments[0] };
+  }
   const chain = propertyChain(unwrapped.expression);
   if (!chain) return null;
   const canon = canonical(chain, bindings);
@@ -302,7 +318,8 @@ function isLocatorMethod(name: string): boolean {
 type SuiteCall =
   | { type: 'test'; modifiers: TestModifier[] }
   | { type: 'describe'; modifiers: TestModifier[] }
-  | { type: 'step' };
+  | { type: 'step' }
+  | { type: 'annotation' };
 
 function classifyCall(call: ts.CallExpression, bindings: Bindings): SuiteCall | null {
   const chain = propertyChain(call.expression);
@@ -321,9 +338,27 @@ function classifyCall(call: ts.CallExpression, bindings: Bindings): SuiteCall | 
     return { type: 'describe', modifiers };
   }
   if (second === 'expect' || HOOKS.has(second)) return null;
+  // test.slow never declares a test. skip, fixme, and fail do only when the first argument is a title.
+  if (second === 'slow') return { type: 'annotation' };
+  if (second === 'skip' || second === 'fixme' || second === 'fail') {
+    if (!isDeclaredTest(call)) return { type: 'annotation' };
+    if (second === 'skip' || second === 'fixme') return { type: 'test', modifiers: [second] };
+    return { type: 'test', modifiers: [] };
+  }
   if (canon.length === 2 && isModifier(second)) return { type: 'test', modifiers: [second] };
-  if (canon.length === 2) return { type: 'test', modifiers: [] };
+  if (canon.length === 2) {
+    if (!isDeclaredTest(call)) return null;
+    return { type: 'test', modifiers: [] };
+  }
   return null;
+}
+
+/** A declared test has a title first and a body function. A condition callback is not a title. */
+function isDeclaredTest(call: ts.CallExpression): boolean {
+  const first = call.arguments[0];
+  if (!first) return false;
+  if (ts.isArrowFunction(first) || ts.isFunctionExpression(first)) return false;
+  return callbackOf(call) !== undefined;
 }
 
 function canonical(chain: readonly string[], bindings: Bindings): string[] | null {
@@ -384,7 +419,13 @@ function readTitle(call: ts.CallExpression, sourceFile: ts.SourceFile): string {
   const arg = call.arguments[0];
   if (!arg) return '';
   if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return arg.text;
+  if (ts.isTemplateExpression(arg)) return stripWrappingBackticks(arg.getText(sourceFile));
   return arg.getText(sourceFile);
+}
+
+function stripWrappingBackticks(text: string): string {
+  if (text.startsWith('`') && text.endsWith('`') && text.length >= 2) return text.slice(1, -1);
+  return text;
 }
 
 function isAwaited(node: ts.Node): boolean {
@@ -444,19 +485,70 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   const testLocals = new Set<string>();
   const expectLocals = new Set<string>();
   const namespaces = new Set<string>();
+  const bindings: Bindings = { testLocals, expectLocals, namespaces };
 
-  for (const statement of sourceFile.statements) {
-    if (ts.isImportDeclaration(statement) && statement.importClause && isTestSpecifier(statement.moduleSpecifier)) {
-      const playwright = isPlaywrightSpecifier(statement.moduleSpecifier);
-      bindImport(statement.importClause, playwright, testLocals, expectLocals, namespaces);
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
+      bindImport(node.importClause, isPlaywrightSpecifier(node.moduleSpecifier), testLocals, expectLocals, namespaces);
     }
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        bindRequire(declaration, testLocals, expectLocals, namespaces);
+    if (ts.isVariableDeclaration(node)) {
+      bindRequire(node, testLocals, expectLocals, namespaces);
+      if (ts.isIdentifier(node.name) && node.initializer) {
+        if (isTestExtend(node.initializer, bindings)) testLocals.add(node.name.text);
+        if (isExpectConfigure(node.initializer, bindings)) expectLocals.add(node.name.text);
       }
     }
-  }
-  return { testLocals, expectLocals, namespaces };
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left)
+    ) {
+      if (isTestExtend(node.right, bindings)) testLocals.add(node.left.text);
+      if (isExpectConfigure(node.right, bindings)) expectLocals.add(node.left.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return bindings;
+}
+
+function isTestExtend(expr: ts.Expression, bindings: Bindings): boolean {
+  const unwrapped = unwrapExpression(expr);
+  if (!ts.isCallExpression(unwrapped)) return false;
+  const callee = unwrapExpression(unwrapped.expression);
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'extend') return false;
+  return isTestReceiver(callee.expression, bindings);
+}
+
+function isTestReceiver(expr: ts.Expression, bindings: Bindings): boolean {
+  const unwrapped = unwrapExpression(expr);
+  if (ts.isIdentifier(unwrapped) && bindings.testLocals.has(unwrapped.text)) return true;
+  if (ts.isCallExpression(unwrapped) && isTestExtend(unwrapped, bindings)) return true;
+  const chain = propertyChain(unwrapped);
+  if (!chain) return false;
+  const canon = canonical(chain, bindings);
+  return canon?.[0] === 'test' && canon.length === 1;
+}
+
+function isExpectConfigure(expr: ts.Expression, bindings: Bindings): boolean {
+  const unwrapped = unwrapExpression(expr);
+  return ts.isCallExpression(unwrapped) && isConfigureCall(unwrapped, bindings);
+}
+
+function isConfigureCall(expr: ts.CallExpression, bindings: Bindings): boolean {
+  const callee = unwrapExpression(expr.expression);
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'configure') return false;
+  return isExpectReceiver(callee.expression, bindings);
+}
+
+function isExpectReceiver(expr: ts.Expression, bindings: Bindings): boolean {
+  const unwrapped = unwrapExpression(expr);
+  if (ts.isIdentifier(unwrapped) && bindings.expectLocals.has(unwrapped.text)) return true;
+  if (ts.isCallExpression(unwrapped) && isConfigureCall(unwrapped, bindings)) return true;
+  const chain = propertyChain(unwrapped);
+  if (!chain) return false;
+  const canon = canonical(chain, bindings);
+  return canon?.[0] === 'expect' && canon.length === 1;
 }
 
 function bindImport(

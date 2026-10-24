@@ -70,12 +70,15 @@ export function run(argv: readonly string[], cwd = process.cwd()): number {
       tests.push(...parseSpecFile(file, config).tests);
     }
     const findings = findTestsWithNoAssertion(tests).map((finding) => displayFinding(finding, cwd));
+    const emptyNotice = emptySuiteNotice(discovery.files.length, tests.length);
 
     if (options.json) {
       console.error(discovery.method);
+      if (emptyNotice) console.error(emptyNotice);
       console.log(JSON.stringify(findings, null, 2));
     } else {
       console.log(discovery.method);
+      if (emptyNotice) console.error(emptyNotice);
       console.log(formatConsoleReport(findings, tests.length));
     }
     return exitCodeFor(findings, options.failOn);
@@ -121,6 +124,12 @@ function parseCli(argv: readonly string[]): CliOptions {
     projectDir,
     specArgs: positionals.slice(1),
   };
+}
+
+function emptySuiteNotice(specFileCount: number, testCount: number): string | undefined {
+  if (specFileCount === 0) return 'No tests found. No spec files matched.';
+  if (testCount === 0) return 'No tests found.';
+  return undefined;
 }
 
 function displayFinding(finding: Finding, cwd: string): Finding {

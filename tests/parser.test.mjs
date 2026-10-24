@@ -204,3 +204,62 @@ test('reports a syntax error instead of executing the file', () => {
   fs.writeFileSync(file, "import { test } from '@playwright/test';\ntest('broken', async () => { const = ; });\n");
   assert.throws(() => parseSpecFile(file, config), /Parse error/);
 });
+
+test('binds test created with extend, including a chained extend', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'extend.spec.ts'), config);
+  assert.deepEqual(
+    inventory.tests.map((entry) => entry.title),
+    ['uses extended test', 'chained extend without assertion'],
+  );
+  assert.equal(byTitle(inventory, 'uses extended test').expects[0].matcher, 'toHaveURL');
+  assert.equal(byTitle(inventory, 'chained extend without assertion').expects.length, 0);
+});
+
+test('treats condition, boolean, and no-arg skip, fail, fixme, and slow as annotations', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'annotations.spec.ts'), config);
+  assert.deepEqual(
+    inventory.tests.map((entry) => ({ title: entry.title, modifiers: entry.modifiers })),
+    [
+      { title: 'skipped declaration', modifiers: ['skip'] },
+      { title: 'expected fail', modifiers: [] },
+      { title: 'failing and empty', modifiers: [] },
+      { title: 'real test', modifiers: [] },
+      { title: 'skips inside the body', modifiers: [] },
+    ],
+  );
+  assert.equal(byTitle(inventory, 'expected fail').expects[0].matcher, 'toHaveTitle');
+  assert.equal(byTitle(inventory, 'failing and empty').expects.length, 0);
+  assert.equal(byTitle(inventory, 'skips inside the body').expects.length, 0);
+  const titles = inventory.tests.map((entry) => entry.title);
+  assert.equal(titles.includes('boolean skip'), false);
+  assert.equal(titles.includes('not today'), false);
+});
+
+test('finds tests created inside forEach and map, and strips template backticks', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'generated.spec.ts'), config);
+  assert.deepEqual(
+    inventory.tests.map((entry) => entry.title),
+    ['for each ${name}', 'mapped ${name}', 'plain template'],
+  );
+  assert.deepEqual(byTitle(inventory, 'for each ${name}').titlePath, ['generated', 'for each ${name}']);
+  assert.equal(byTitle(inventory, 'for each ${name}').expects[0].matcher, 'toHaveURL');
+  assert.equal(byTitle(inventory, 'mapped ${name}').expects.length, 0);
+  assert.equal(inventory.tests.some((entry) => entry.title.includes('`')), false);
+  assert.equal(inventory.tests.some((entry) => entry.title === 'inside a function declaration'), false);
+});
+
+test('accepts inline expect.configure and an expect.configure alias', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'configure.spec.ts'), config);
+  const inline = byTitle(inventory, 'inline configure').expects[0];
+  assert.equal(inline.matcher, 'toHaveURL');
+  assert.equal(inline.subjectSource, 'page');
+  assert.equal(inline.awaited, true);
+  assert.equal(inline.not, false);
+  assert.equal(inline.soft, false);
+  assert.equal(inline.poll, false);
+  const alias = byTitle(inventory, 'aliased configure').expects[0];
+  assert.equal(alias.matcher, 'toBeVisible');
+  assert.equal(alias.subjectSource, 'page');
+  assert.equal(alias.awaited, true);
+  assert.equal(byTitle(inventory, 'still empty').expects.length, 0);
+});

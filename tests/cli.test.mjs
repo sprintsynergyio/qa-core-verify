@@ -54,6 +54,7 @@ test('exit 1 for the bad fixture and exit 0 for the good fixture', () => {
   assert.match(bad.stdout, /QCV-W001/);
   assert.doesNotMatch(bad.stdout, /expect in the body/);
   assert.match(bad.stdout, /Summary: 3 errors, 0 warnings, 0 info findings\. 3 tests scanned\./);
+  assert.doesNotMatch(bad.stderr, /No tests found/);
 
   const good = runCli([w001Dir, path.join(w001Dir, 'good.spec.ts')]);
   assert.equal(good.status, 0);
@@ -139,4 +140,43 @@ test('does not modify the project files', () => {
   const result = runCli([w001Dir]);
   assert.equal(result.status, 1);
   assert.equal(hashTree(w001Dir), before);
+});
+
+test('prints No tests found when no spec files match, and keeps exit 0', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-empty-'));
+  const result = runCli([dir]);
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /No tests found\. No spec files matched\./);
+  assert.match(result.stdout, /0 tests scanned/);
+  assert.doesNotMatch(result.stdout, /QCV-W001/);
+
+  const json = runCli(['--json', dir]);
+  assert.equal(json.status, 0);
+  assert.deepEqual(JSON.parse(json.stdout), []);
+  assert.match(json.stderr, /Discovery:/);
+  assert.match(json.stderr, /No tests found\. No spec files matched\./);
+});
+
+test('prints No tests found when spec files contain no tests, and keeps exit 0', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-annot-'));
+  fs.writeFileSync(
+    path.join(dir, 'slow.spec.ts'),
+    "import { test } from '@playwright/test';\ntest.slow(({ browserName }) => browserName === 'webkit');\n",
+  );
+  const result = runCli([dir]);
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /No tests found\./);
+  assert.doesNotMatch(result.stderr, /No spec files matched/);
+  assert.match(result.stdout, /0 tests scanned/);
+  assert.doesNotMatch(result.stdout, /QCV-W001/);
+});
+
+test('an extended test with no assertion exits 1', () => {
+  const file = path.join(repoRoot, 'tests/fixtures/parser/extend.spec.ts');
+  const result = runCli([path.dirname(file), file]);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /chained extend without assertion/);
+  assert.match(result.stdout, /1 error/);
+  assert.match(result.stdout, /2 tests scanned/);
+  assert.doesNotMatch(result.stderr, /No tests found/);
 });
