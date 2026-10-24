@@ -1,0 +1,206 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { emptyConfig } from '../dist/config.js';
+import { parseSpecFile } from '../dist/inventory/parse.js';
+import { byTitle, lineAndColumn } from './support.mjs';
+
+const parserDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/parser');
+const config = emptyConfig();
+
+test('records nested describe title paths', () => {
+  const file = path.join(parserDir, 'nested.spec.ts');
+  const inventory = parseSpecFile(file, config);
+  const leaf = byTitle(inventory, 'leaf');
+  assert.deepEqual(leaf.titlePath, ['outer', 'inner', 'leaf']);
+  const parallel = byTitle(inventory, 'inside parallel');
+  assert.deepEqual(parallel.titlePath, ['parallel suite', 'inside parallel']);
+  assert.deepEqual(parallel.modifiers, []);
+  assert.equal(inventory.tests.length, 2);
+});
+
+test('records only, skip, and fixme modifiers, including describe modifiers', () => {
+  const file = path.join(parserDir, 'modifiers.spec.ts');
+  const inventory = parseSpecFile(file, config);
+  assert.deepEqual(byTitle(inventory, 'focused without assertion').modifiers, ['only']);
+  assert.deepEqual(byTitle(inventory, 'skipped without assertion').modifiers, ['skip']);
+  assert.deepEqual(byTitle(inventory, 'fixme without assertion').modifiers, ['fixme']);
+  assert.deepEqual(byTitle(inventory, 'inside skipped describe').modifiers, ['skip']);
+  assert.deepEqual(byTitle(inventory, 'inside fixme describe').modifiers, ['fixme']);
+  assert.deepEqual(byTitle(inventory, 'plain with assertion').modifiers, []);
+});
+
+test('uses the test call line and column', () => {
+  const file = path.join(parserDir, 'modifiers.spec.ts');
+  const inventory = parseSpecFile(file, config);
+  const focused = byTitle(inventory, 'focused without assertion');
+  const expected = lineAndColumn(file, 'test.only(\'focused without assertion\'');
+  assert.equal(focused.line, expected.line);
+  assert.equal(focused.column, expected.column);
+  assert.equal(focused.file, path.resolve(file));
+});
+
+test('reads expect metadata for not, soft, poll, and await', () => {
+  const file = path.join(parserDir, 'expects.spec.ts');
+  const found = byTitle(parseSpecFile(file, config), 'expect metadata');
+  assert.deepEqual(
+    found.expects.map((call) => ({
+      matcher: call.matcher,
+      not: call.not,
+      soft: call.soft,
+      poll: call.poll,
+      awaited: call.awaited,
+      subjectSource: call.subjectSource,
+    })),
+    [
+      {
+        matcher: 'toBeVisible',
+        not: false,
+        soft: false,
+        poll: false,
+        awaited: true,
+        subjectSource: 'page.getByTestId(\'title\')',
+      },
+      {
+        matcher: 'toBeHidden',
+        not: true,
+        soft: false,
+        poll: false,
+        awaited: false,
+        subjectSource: 'page.getByText(\'Hello\')',
+      },
+      {
+        matcher: 'toHaveURL',
+        not: false,
+        soft: true,
+        poll: false,
+        awaited: true,
+        subjectSource: 'page',
+      },
+      {
+        matcher: 'toBeDisabled',
+        not: true,
+        soft: true,
+        poll: false,
+        awaited: true,
+        subjectSource: 'page.getByRole(\'button\')',
+      },
+      {
+        matcher: 'toBe',
+        not: false,
+        soft: false,
+        poll: true,
+        awaited: true,
+        subjectSource: 'async () => page.getByTestId(\'count\').textContent()',
+      },
+    ],
+  );
+  const first = found.expects[0];
+  const expected = lineAndColumn(file, 'expect(page.getByTestId(\'title\')).toBeVisible()');
+  assert.equal(first.line, expected.line);
+  assert.equal(first.column, expected.column);
+});
+
+test('records locator factories and chains, including a locator saved in a const', () => {
+  const file = path.join(parserDir, 'locators.spec.ts');
+  const found = byTitle(parseSpecFile(file, config), 'locator chains');
+  const sources = found.locators.map((locator) => locator.source);
+  assert.ok(sources.includes('page.locator(\'.inventory_list\')'));
+  assert.ok(sources.includes('page.locator(\'.inventory_list\').locator(\'.inventory_item\')'));
+  assert.ok(
+    sources.includes('page.locator(\'.inventory_list\').locator(\'.inventory_item\').filter({ hasText: \'Bike\' })'),
+  );
+  assert.ok(
+    sources.includes(
+      'page.locator(\'.inventory_list\').locator(\'.inventory_item\').filter({ hasText: \'Bike\' }).first()',
+    ),
+  );
+  assert.ok(sources.includes('page.getByRole(\'listitem\')'));
+  assert.ok(sources.includes('page.getByRole(\'listitem\').nth(0)'));
+  assert.ok(sources.includes('page.getByRole(\'listitem\').last()'));
+  assert.equal(sources.some((source) => source.includes('.click(')), false);
+});
+
+test('parses arrow and function bodies in TypeScript and JavaScript', () => {
+  const tsFile = path.join(parserDir, 'bodies.spec.ts');
+  const tsInventory = parseSpecFile(tsFile, config);
+  assert.equal(byTitle(tsInventory, 'arrow body').expects[0].matcher, 'toHaveURL');
+  assert.equal(byTitle(tsInventory, 'function body').expects[0].matcher, 'toHaveURL');
+
+  const jsFile = path.join(parserDir, 'plain.spec.js');
+  const jsInventory = parseSpecFile(jsFile, config);
+  const arrow = byTitle(jsInventory, 'js arrow');
+  assert.deepEqual(arrow.titlePath, ['js suite', 'js arrow']);
+  assert.equal(arrow.expects[0].matcher, 'toHaveTitle');
+  assert.equal(arrow.expects[0].awaited, true);
+  const fn = byTitle(jsInventory, 'js function');
+  assert.equal(fn.expects[0].matcher, 'toBeVisible');
+  assert.equal(fn.expects[0].awaited, false);
+  assert.equal(fn.expects[0].subjectSource, 'page.locator(\'#login\')');
+});
+
+test('follows renamed imports, namespace imports, default imports, and require', () => {
+  const aliases = parseSpecFile(path.join(parserDir, 'aliases.spec.ts'), config);
+  const alias = byTitle(aliases, 'alias test');
+  assert.deepEqual(alias.titlePath, ['alias suite', 'alias test']);
+  assert.equal(alias.expects.length, 2);
+  assert.equal(alias.expects[0].matcher, 'toHaveURL');
+  assert.equal(alias.expects[1].soft, true);
+  assert.equal(alias.expects[1].matcher, 'toBeVisible');
+  const namespace = byTitle(aliases, 'namespace test');
+  assert.equal(namespace.expects[0].matcher, 'toBeVisible');
+  assert.equal(namespace.expects[0].subjectSource, 'page.locator(\'#login\')');
+
+  const imported = byTitle(parseSpecFile(path.join(parserDir, 'default-import.spec.ts'), config), 'default import');
+  assert.equal(imported.expects[0].matcher, 'toBe');
+  assert.equal(imported.expects[0].awaited, true);
+
+  const required = parseSpecFile(path.join(parserDir, 'require-call.spec.js'), config);
+  assert.equal(byTitle(required, 'require default call').expects[0].matcher, 'toBe');
+  assert.deepEqual(byTitle(required, 'require skip').modifiers, ['skip']);
+});
+
+test('counts expect inside test.step as part of the test', () => {
+  const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/w001/good.spec.ts');
+  const inventory = parseSpecFile(file, config);
+  const step = byTitle(inventory, 'expect inside a step');
+  assert.equal(step.expects.length, 1);
+  assert.equal(step.expects[0].matcher, 'toHaveTitle');
+  assert.equal(inventory.tests.some((entry) => entry.title === 'check title'), false);
+});
+
+test('does not treat a hook expect as the test assertion', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'hooks.spec.ts'), config);
+  assert.equal(inventory.tests.length, 1);
+  assert.equal(byTitle(inventory, 'after hook only').expects.length, 0);
+});
+
+test('reads test and expect imported from a relative fixture without loading it', () => {
+  const file = path.join(parserDir, 'relative-import.spec.ts');
+  assert.equal(fs.existsSync(path.join(parserDir, 'local-fixtures.ts')), false);
+  const inventory = parseSpecFile(file, config);
+  const good = byTitle(inventory, 'relative good');
+  assert.deepEqual(good.titlePath, ['relative', 'relative good']);
+  assert.equal(good.expects[0].matcher, 'toHaveTitle');
+  assert.equal(byTitle(inventory, 'relative bad').expects.length, 0);
+});
+
+test('does not treat an unbound test function as a Playwright test', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'not-playwright.spec.ts'), config);
+  assert.equal(inventory.tests.length, 0);
+});
+
+test('does not execute spec source', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'side-effect.spec.ts'), config);
+  assert.equal(byTitle(inventory, 'parsed without running').title, 'parsed without running');
+});
+
+test('reports a syntax error instead of executing the file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-parse-'));
+  const file = path.join(dir, 'broken.spec.ts');
+  fs.writeFileSync(file, "import { test } from '@playwright/test';\ntest('broken', async () => { const = ; });\n");
+  assert.throws(() => parseSpecFile(file, config), /Parse error/);
+});
