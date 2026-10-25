@@ -19,27 +19,15 @@
   },
   {
     "file": "tests/ai-style/locators.spec.ts",
-    "line": 17,
+    "line": 16,
     "ruleId": "QCV-L003",
     "status": "pending"
   },
   {
     "file": "tests/ai-style/locators.spec.ts",
-    "line": 17,
-    "ruleId": "QCV-W006",
-    "status": "active"
-  },
-  {
-    "file": "tests/ai-style/locators.spec.ts",
-    "line": 25,
+    "line": 23,
     "ruleId": "QCV-L004",
     "status": "pending"
-  },
-  {
-    "file": "tests/ai-style/locators.spec.ts",
-    "line": 25,
-    "ruleId": "QCV-W006",
-    "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
@@ -55,74 +43,62 @@
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 19,
+    "line": 18,
     "ruleId": "QCV-W003",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 19,
-    "ruleId": "QCV-W006",
-    "status": "active"
-  },
-  {
-    "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 21,
+    "line": 20,
     "ruleId": "QCV-W010",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 27,
+    "line": 26,
     "ruleId": "QCV-W004",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 34,
+    "line": 33,
     "ruleId": "QCV-W005",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 45,
+    "line": 44,
     "ruleId": "QCV-W006",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 53,
+    "line": 52,
     "ruleId": "QCV-W007",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 62,
-    "ruleId": "QCV-W006",
-    "status": "active"
-  },
-  {
-    "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 62,
+    "line": 60,
     "ruleId": "QCV-W008",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 69,
+    "line": 67,
     "ruleId": "QCV-W009",
     "status": "active",
     "reason": "Playwright skips this test, so the run does not count it as passed."
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 74,
+    "line": 72,
     "ruleId": "QCV-W001",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 77,
+    "line": 75,
     "ruleId": "QCV-W010",
     "status": "active"
   }

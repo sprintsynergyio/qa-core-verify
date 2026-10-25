@@ -1,5 +1,5 @@
 import type { InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W001_RULE_ID = 'QCV-W001';
 
@@ -26,6 +26,7 @@ export function findTestsWithNoAssertion(tests: readonly InventoryTest[]): Findi
       evidence: 'No expect call and no configured assertion helper in this test.',
       fixHint: 'Add an expect assertion, or call a helper named in qa-core-verify.config.json.',
       relatedLintRule: 'expect-expect',
+      ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
     });
   }
   return findings;

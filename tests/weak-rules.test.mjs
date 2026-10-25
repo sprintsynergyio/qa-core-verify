@@ -10,7 +10,8 @@ import { lineAndColumn } from './support.mjs';
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 function findingsIn(file) {
-  return collectFindings(parseSpecFile(file, emptyConfig()).tests);
+  const inventory = parseSpecFile(file, emptyConfig());
+  return collectFindings(inventory.tests, inventory.skippedDescribes);
 }
 
 function titlesFor(findings, ruleId) {
@@ -33,6 +34,7 @@ const cases = [
     severity: 'error',
     relatedLintRule: 'missing-playwright-await',
     titles: [
+      'alias not awaited',
       'closure call',
       'contain class',
       'fixture locator',
@@ -43,6 +45,11 @@ const cases = [
       'response ok',
       'soft text',
       'to pass',
+      'unawaited imported helper',
+      'unawaited local helper',
+      'unawaited rejects',
+      'unawaited resolves',
+      'unawaited step block',
     ],
     needle: 'expect(page).toHaveURL',
     evidence: 'expect(page).toHaveURL(\'/inventory.html\')',
@@ -67,7 +74,7 @@ const cases = [
     dir: 'w006',
     ruleId: 'QCV-W006',
     severity: 'warn',
-    titles: ['attached and in viewport', 'presence after the last click', 'visible after click', 'visible after goto'],
+    titles: ['attached and in viewport', 'presence after the last click', 'visible after click'],
     needle: 'await expect(page.getByTestId(\'inventory-list\')).toBeVisible()',
     evidence: 'await expect(page.getByTestId(\'inventory-list\')).toBeVisible()',
   },
@@ -84,7 +91,7 @@ const cases = [
     dir: 'w008',
     ruleId: 'QCV-W008',
     severity: 'error',
-    titles: ['empty catch', 'logs and continues'],
+    titles: ['empty catch', 'logs and continues', 'rethrows only inside if'],
     needle: 'await expect(page.locator(\'#login-error-banner\')).toBeVisible()',
     evidence: 'await expect(page.locator(\'#login-error-banner\')).toBeVisible()',
   },
@@ -93,12 +100,13 @@ const cases = [
     ruleId: 'QCV-W009',
     severity: 'info',
     titles: [
+      'empty skipped suite',
       'fixme',
       'fixme suite > inside fixme',
       'focused',
       'focused suite > inside only',
       'skipped',
-      'skipped suite > inside skip',
+      'skipped suite',
     ],
     needle: 'test.skip(\'skipped\'',
     evidence: 'test.skip',
@@ -147,14 +155,38 @@ test('QCV-W003 does not flag an assertion returned from the test', () => {
   assert.deepEqual(findings, []);
 });
 
+test('QCV-W003 message says the async assertion is not awaited', () => {
+  const findings = findingsIn(path.join(fixtures, 'w003/bad.spec.ts'));
+  assert.equal(findings.every((finding) => finding.message === 'Async assertion is not awaited.'), true);
+  const step = findings.find((finding) => finding.testTitle === 'unawaited step block');
+  assert.match(step.evidence, /test\.step/);
+  const helper = findings.find((finding) => finding.testTitle === 'unawaited imported helper');
+  assert.equal(helper.evidence, 'checkTitle(page)');
+  const resolves = findings.find((finding) => finding.testTitle === 'unawaited resolves');
+  assert.match(resolves.evidence, /\.resolves\.toBe/);
+});
+
+test('a const alias of expect counts, and a let alias does not', () => {
+  const file = path.join(fixtures, 'w003/alias.spec.ts');
+  const findings = findingsIn(file);
+  assert.deepEqual(
+    findings.map((finding) => `${finding.ruleId} ${finding.testTitle}`).sort(),
+    ['QCV-W001 let alias is not seen', 'QCV-W003 alias not awaited'],
+  );
+});
+
 test('QCV-W009 uses the focused lint rule for test.only and the skipped lint rule for test.skip', () => {
   const findings = findingsIn(path.join(fixtures, 'w009/bad.spec.ts'));
   const focused = findings.find((finding) => finding.testTitle === 'focused');
-  const skipped = findings.find((finding) => finding.testTitle === 'skipped suite > inside skip');
+  const skipped = findings.find((finding) => finding.testTitle === 'skipped suite');
   assert.equal(focused.relatedLintRule, 'no-focused-test');
   assert.equal(focused.evidence, 'test.only');
   assert.equal(skipped.relatedLintRule, 'no-skipped-test');
   assert.equal(skipped.evidence, 'test.describe.skip');
+  assert.equal(skipped.message, 'Describe block is skipped.');
+  assert.equal(findings.filter((finding) => finding.testTitle === 'skipped suite').length, 1);
+  assert.equal(findings.some((finding) => finding.testTitle === 'skipped suite > inside skip'), false);
+  assert.equal(findings.some((finding) => finding.testTitle === 'skipped suite > also inside skip'), false);
 });
 
 test('a helper imported one level counts as the test assertion', () => {

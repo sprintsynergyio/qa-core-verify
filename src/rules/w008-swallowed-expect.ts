@@ -1,5 +1,5 @@
 import type { InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W008_RULE_ID = 'QCV-W008';
 
@@ -20,6 +20,7 @@ export function findSwallowedExpects(tests: readonly InventoryTest[]): Finding[]
         message: 'Try catch swallows the assertion failure.',
         evidence: expect.evidence,
         fixHint: 'Remove the catch, or rethrow the error.',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

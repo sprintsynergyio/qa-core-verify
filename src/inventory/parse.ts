@@ -3,6 +3,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import { matchesAssertionHelper, type VerifyConfig } from '../config.js';
 import { analyzeBody } from './body.js';
+import { isAwaited } from './settled.js';
 import { ToolError } from '../tool-error.js';
 
 export type TestModifier = 'only' | 'skip' | 'fixme';
@@ -23,6 +24,10 @@ export interface ExpectCall {
   not: boolean;
   soft: boolean;
   poll: boolean;
+  /** True for `expect(promise).resolves`. Every matcher on it returns a promise. */
+  resolves: boolean;
+  /** True for `expect(promise).rejects`. Every matcher on it returns a promise. */
+  rejects: boolean;
   awaited: boolean;
   /** True when the test or the current helper returns this expect call. */
   returned: boolean;
@@ -95,10 +100,25 @@ export interface InventoryTest {
   helpers: HelperCall[];
   events: BodyEvent[];
   unresolved: UnresolvedHelper[];
+  /**
+   * An unawaited `test.step` with a block body that contains an assertion,
+   * or an unawaited call to an async helper that contains an assertion.
+   */
+  floatingCalls: SourceFact[];
+}
+
+/** One `test.describe.skip` block. The finding is on the block, not on each inner test. */
+export interface SkippedDescribe {
+  titlePath: string[];
+  file: string;
+  line: number;
+  column: number;
+  source: string;
 }
 
 export interface SuiteInventory {
   tests: InventoryTest[];
+  skippedDescribes: SkippedDescribe[];
 }
 
 interface Bindings {
@@ -111,12 +131,15 @@ interface SuiteContext {
   titles: string[];
   modifiers: TestModifier[];
   modifierSites: ModifierSite[];
+  expectAliases: Set<string>;
 }
 
 interface ExpectShape {
   not: boolean;
   soft: boolean;
   poll: boolean;
+  resolves: boolean;
+  rejects: boolean;
   subject: ts.Expression | undefined;
 }
 
@@ -171,8 +194,17 @@ export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInve
 
   const bindings = collectBindings(sourceFile);
   const tests: InventoryTest[] = [];
-  walkSuite(sourceFile, { titles: [], modifiers: [], modifierSites: [] }, sourceFile, bindings, config, tests);
-  return { tests };
+  const skippedDescribes: SkippedDescribe[] = [];
+  walkSuite(
+    sourceFile,
+    { titles: [], modifiers: [], modifierSites: [], expectAliases: new Set() },
+    sourceFile,
+    bindings,
+    config,
+    tests,
+    skippedDescribes,
+  );
+  return { tests, skippedDescribes };
 }
 
 function walkSuite(
@@ -182,17 +214,33 @@ function walkSuite(
   bindings: Bindings,
   config: VerifyConfig,
   tests: InventoryTest[],
+  skippedDescribes: SkippedDescribe[],
 ): void {
+  if (ts.isVariableStatement(node)) noteSuiteAliases(node, ctx, bindings);
   if (ts.isCallExpression(node)) {
     const kind = classifyCall(node, bindings);
     if (kind?.type === 'describe') {
       const callback = callbackOf(node);
+      const titlePath = [...ctx.titles, readTitle(node, sourceFile)];
+      const sites = sitesFor(node, kind.modifiers, sourceFile);
+      if (kind.modifiers.includes('skip')) {
+        const pos = positionOf(node, sourceFile);
+        skippedDescribes.push({
+          titlePath,
+          file: sourceFile.fileName,
+          line: pos.line,
+          column: pos.column,
+          source: node.expression.getText(sourceFile),
+        });
+      }
       const next: SuiteContext = {
-        titles: [...ctx.titles, readTitle(node, sourceFile)],
+        titles: titlePath,
         modifiers: dedupeModifiers([...ctx.modifiers, ...kind.modifiers]),
-        modifierSites: [...ctx.modifierSites, ...sitesFor(node, kind.modifiers, sourceFile)],
+        // describe.skip is reported once on the block. only and fixme still apply to each test.
+        modifierSites: [...ctx.modifierSites, ...sites.filter((site) => site.modifier !== 'skip')],
+        expectAliases: new Set(ctx.expectAliases),
       };
-      if (callback) walkSuite(callback.body, next, sourceFile, bindings, config, tests);
+      if (callback) walkSuite(callback.body, next, sourceFile, bindings, config, tests, skippedDescribes);
       return;
     }
     if (kind?.type === 'test') {
@@ -204,15 +252,27 @@ function walkSuite(
     if (isSuiteHookCall(node) || isTimerCall(node)) return;
     for (const arg of node.arguments) {
       if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) {
-        walkSuite(arg.body, ctx, sourceFile, bindings, config, tests);
+        walkSuite(arg.body, ctx, sourceFile, bindings, config, tests, skippedDescribes);
       } else {
-        walkSuite(arg, ctx, sourceFile, bindings, config, tests);
+        walkSuite(arg, ctx, sourceFile, bindings, config, tests, skippedDescribes);
       }
     }
     return;
   }
   if (isNestedFunction(node)) return;
-  ts.forEachChild(node, (child) => walkSuite(child, ctx, sourceFile, bindings, config, tests));
+  ts.forEachChild(node, (child) => walkSuite(child, ctx, sourceFile, bindings, config, tests, skippedDescribes));
+}
+
+function noteSuiteAliases(statement: ts.VariableStatement, ctx: SuiteContext, bindings: Bindings): void {
+  if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return;
+  for (const declaration of statement.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+    const init = unwrapExpression(declaration.initializer);
+    if (!ts.isIdentifier(init)) continue;
+    if (bindings.expectLocals.has(init.text) || ctx.expectAliases.has(init.text)) {
+      ctx.expectAliases.add(declaration.name.text);
+    }
+  }
 }
 
 function callCalleeName(call: ts.CallExpression): string | undefined {
@@ -258,8 +318,9 @@ function recordTest(
     helpers: [],
     events: [],
     unresolved: [],
+    floatingCalls: [],
   };
-  collectBody(callback, test, sourceFile, bindings, config);
+  collectBody(callback, test, sourceFile, bindings, config, ctx.expectAliases);
   tests.push(test);
 }
 
@@ -269,6 +330,7 @@ function collectBody(
   sourceFile: ts.SourceFile,
   bindings: Bindings,
   config: VerifyConfig,
+  expectAliases: ReadonlySet<string>,
 ): void {
   const analyzed = analyzeBody({
     body: callback.body,
@@ -286,12 +348,23 @@ function collectBody(
     isLocatorCall: (call, names) => isLocatorCall(call, names),
     isLocatorExpression: (expr, names) => isLocatorExpression(expr, names),
     readHelper: (call, active, file) => asHelper(call, active, config, file),
+    expectAliases,
+    isExpectName: (name, active) => active.expectLocals.has(name),
+    withExpectAliases: (active, aliases) => withExpectAliases(active, aliases),
   });
   test.expects = analyzed.expects;
   test.locators = analyzed.locators;
   test.helpers = analyzed.helpers;
   test.events = analyzed.events;
   test.unresolved = analyzed.unresolved;
+  test.floatingCalls = analyzed.floatingCalls;
+}
+
+function withExpectAliases(bindings: Bindings, aliases: ReadonlySet<string>): Bindings {
+  if (aliases.size === 0) return bindings;
+  const expectLocals = new Set(bindings.expectLocals);
+  for (const name of aliases) expectLocals.add(name);
+  return { testLocals: bindings.testLocals, expectLocals, namespaces: bindings.namespaces };
 }
 
 function readExpectParts(
@@ -333,6 +406,8 @@ function asExpectMatcher(
     not: shape.not,
     soft: shape.soft,
     poll: shape.poll,
+    resolves: shape.resolves,
+    rejects: shape.rejects,
     awaited: isAwaited(call),
     returned: false,
     subjectSource: shape.subject ? shape.subject.getText(sourceFile) : '',
@@ -355,9 +430,15 @@ function expectShape(expr: ts.Expression, bindings: Bindings): ExpectShape | nul
     if (!inner || inner.not) return null;
     return { ...inner, not: true };
   }
+  if (ts.isPropertyAccessExpression(unwrapped) && (unwrapped.name.text === 'resolves' || unwrapped.name.text === 'rejects')) {
+    const inner = expectShape(unwrapped.expression, bindings);
+    if (!inner || inner.resolves || inner.rejects) return null;
+    if (unwrapped.name.text === 'resolves') return { ...inner, resolves: true };
+    return { ...inner, rejects: true };
+  }
   if (!ts.isCallExpression(unwrapped)) return null;
   if (isExpectConfigure(unwrapped.expression, bindings)) {
-    return { not: false, soft: false, poll: false, subject: unwrapped.arguments[0] };
+    return { not: false, soft: false, poll: false, resolves: false, rejects: false, subject: unwrapped.arguments[0] };
   }
   const chain = propertyChain(unwrapped.expression);
   if (!chain) return null;
@@ -365,9 +446,13 @@ function expectShape(expr: ts.Expression, bindings: Bindings): ExpectShape | nul
   if (!canon || canon[0] !== 'expect') return null;
   const form = canon[1];
   const subject = unwrapped.arguments[0];
-  if (canon.length === 1) return { not: false, soft: false, poll: false, subject };
-  if (canon.length === 2 && form === 'soft') return { not: false, soft: true, poll: false, subject };
-  if (canon.length === 2 && form === 'poll') return { not: false, soft: false, poll: true, subject };
+  if (canon.length === 1) return { not: false, soft: false, poll: false, resolves: false, rejects: false, subject };
+  if (canon.length === 2 && form === 'soft') {
+    return { not: false, soft: true, poll: false, resolves: false, rejects: false, subject };
+  }
+  if (canon.length === 2 && form === 'poll') {
+    return { not: false, soft: false, poll: true, resolves: false, rejects: false, subject };
+  }
   return null;
 }
 
@@ -543,20 +628,6 @@ function evidenceText(call: ts.CallExpression, sourceFile: ts.SourceFile): strin
   return call.getText(sourceFile);
 }
 
-function isAwaited(node: ts.Node): boolean {
-  let parent = node.parent;
-  while (
-    parent &&
-    (ts.isParenthesizedExpression(parent) ||
-      ts.isAsExpression(parent) ||
-      ts.isSatisfiesExpression(parent) ||
-      ts.isNonNullExpression(parent))
-  ) {
-    parent = parent.parent;
-  }
-  return !!parent && ts.isAwaitExpression(parent);
-}
-
 function unwrapExpression(expr: ts.Expression): ts.Expression {
   let current = expr;
   while (
@@ -611,6 +682,12 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
       if (ts.isIdentifier(node.name) && node.initializer) {
         if (isTestExtend(node.initializer, bindings)) testLocals.add(node.name.text);
         if (isExpectConfigure(node.initializer, bindings)) expectLocals.add(node.name.text);
+        const init = unwrapExpression(node.initializer);
+        const list = node.parent;
+        const isConst = ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
+        if (isConst && isFileScope(node) && ts.isIdentifier(init) && expectLocals.has(init.text)) {
+          expectLocals.add(node.name.text);
+        }
       }
     }
     if (
@@ -625,6 +702,25 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   };
   visit(sourceFile);
   return bindings;
+}
+
+function isFileScope(node: ts.Node): boolean {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessor(current) ||
+      ts.isSetAccessor(current)
+    ) {
+      return false;
+    }
+    current = current.parent;
+  }
+  return true;
 }
 
 function isTestExtend(expr: ts.Expression, bindings: Bindings): boolean {

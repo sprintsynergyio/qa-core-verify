@@ -103,13 +103,20 @@ error
 
 `no-unnecessary-assertions`
 
-## QCV-W003 Web-First Assertion Not Awaited
+## QCV-W003 Async Assertion Not Awaited
 
 ### What
 
-A matcher that returns a promise is neither awaited nor returned from the test. `expect.poll` returns a promise for every matcher, including `toBe`. The subject can be a locator, a page, or any other value.
+A matcher that returns a promise is neither awaited nor returned from the test. `expect.poll`, `expect(promise).resolves`, and `expect(promise).rejects` return a promise for every matcher, including `toBe`. The subject can be a locator, a page, or any other value.
 
 `await Promise.all`, `await Promise.allSettled`, and a returned `Promise.all` or `Promise.allSettled` count as waiting. An array element or a `.map` callback passed to that call is included. A value returned from a `test.step` callback counts when that step is awaited or returned.
+
+An awaited `.then`, `.catch`, or `.finally` chain on the matcher counts as waiting. The same is true when the test returns that chain.
+
+Two calls are flagged even when the assertion inside them is awaited:
+
+- `test.step(...)` is not awaited or returned, its callback has a block body, and that body contains an assertion.
+- A call to a local or imported `async` function is not awaited or returned, and that function contains an assertion that stays tied to the function's promise. A bare `check();` is the usual case.
 
 ### Why
 
@@ -138,6 +145,9 @@ These are awaited too:
 ```ts
 await Promise.all([expect(a).toHaveText('A'), expect(b).toHaveText('B')]);
 await test.step('x', () => expect(page.getByTestId('title')).toHaveText('Products'));
+await expect(page).toHaveTitle('Swag Labs').then(() => undefined);
+await expect(Promise.resolve(1)).resolves.toBe(1);
+await checkTitle(page);
 ```
 
 ### Severity
@@ -215,7 +225,7 @@ None.
 
 ### What
 
-After the last action, every assertion is `toBeVisible`, `toBeAttached`, or `toBeInViewport`. Actions include `goto`, `reload`, `goBack`, `goForward`, and interactions such as `click` and `fill`.
+After the last action, every assertion is `toBeVisible`, `toBeAttached`, or `toBeInViewport`. Actions include interactions such as `click` and `fill`, and the navigation calls `reload`, `goBack`, and `goForward`. `page.goto` is navigation, not a user action, so it does not count as the last action. A test whose only navigation is `page.goto` is not flagged.
 
 ### Why
 
@@ -283,7 +293,11 @@ warn
 
 ### What
 
-A `try` block contains `expect`, and the `catch` does not throw.
+A `try` block contains `expect`, and the `catch` does not throw on every path.
+
+A `throw` directly in the catch, or in a nested block, rethrows. `if` counts only when both the `then` branch and the `else` branch throw. `catch (e) { if (x) throw e; }` still swallows the failure when `x` is false, so the expect is flagged. `catch (e) { if (x) throw e; else throw e; }` rethrows on every path, so it is not flagged.
+
+A `switch` counts as an always-rethrow only when it has a `default` clause and every clause throws on its own. A clause that only falls through to a later `throw` is not treated as a rethrow.
 
 ### Why
 
@@ -321,7 +335,9 @@ None.
 
 ### What
 
-`test.skip`, `test.fixme`, `test.only`, `describe.skip`, `describe.only`, or `describe.fixme`.
+`test.skip`, `test.fixme`, `test.only`, `describe.only`, or `describe.fixme` on each test those modifiers apply to.
+
+`test.describe.skip` is one finding for the describe block, including when the block contains no tests. The tests inside that block are not each flagged for the describe.
 
 ### Why
 
@@ -394,4 +410,4 @@ Imports are followed one level, into a helper or a page object in a local file. 
 
 A method stored on an object literal is not followed. Name it in `qa-core-verify.config.json` if it is the assertion, or move it to a function the spec imports.
 
-`const e = expect` inside a test is not treated as `expect`. `e(locator).toBeVisible()` is not seen. Call `expect` by that name, or use `expect.configure`, which is recognized.
+A `const` alias of `expect` is treated as `expect` when it is declared in the file, in a `describe` callback, or in the same test: `const e = expect` then `await e(locator).toBeVisible()`. The initializer must be `expect` or another `const` alias already in scope. `let` and `var` aliases are not followed, because they can be reassigned. `expect.configure` is recognized for `const` and for assignment.

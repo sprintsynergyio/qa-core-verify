@@ -12,6 +12,8 @@ export interface FunctionBody {
   filePath: string;
   parameters: readonly ts.ParameterDeclaration[];
   body: ts.ConciseBody;
+  /** True when the function is declared `async`. */
+  isAsync: boolean;
   exported: boolean;
   thisPage: boolean;
   ownerClass?: ClassBody;
@@ -120,7 +122,15 @@ function collectImports(statement: ts.Statement, index: FileIndex): void {
 
 function collectFunctions(statement: ts.Statement, index: FileIndex): void {
   if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
-    addFunction(index, statement.name.text, statement.parameters, statement.body, isExported(statement), false);
+    addFunction(
+      index,
+      statement.name.text,
+      statement.parameters,
+      statement.body,
+      isExported(statement),
+      functionIsAsync(statement),
+      false,
+    );
   }
   if (!ts.isVariableStatement(statement)) return;
   const exported = isExported(statement);
@@ -128,7 +138,15 @@ function collectFunctions(statement: ts.Statement, index: FileIndex): void {
     if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
     const initializer = unwrap(declaration.initializer);
     if (!isFunctionLike(initializer) || !initializer.body) continue;
-    addFunction(index, declaration.name.text, initializer.parameters, initializer.body, exported, false);
+    addFunction(
+      index,
+      declaration.name.text,
+      initializer.parameters,
+      initializer.body,
+      exported,
+      functionIsAsync(initializer),
+      false,
+    );
   }
 }
 
@@ -151,7 +169,16 @@ function collectClasses(statement: ts.Statement, index: FileIndex): void {
   const buckets = new Map<string, FieldBucket>();
   for (const member of statement.members) {
     if (ts.isMethodDeclaration(member) && member.body && ts.isIdentifier(member.name)) {
-      const method = addFunction(index, member.name.text, member.parameters, member.body, exported, thisPage, classBody);
+      const method = addFunction(
+        index,
+        member.name.text,
+        member.parameters,
+        member.body,
+        exported,
+        functionIsAsync(member),
+        thisPage,
+        classBody,
+      );
       classBody.methods.set(member.name.text, method);
     }
     if (ts.isPropertyDeclaration(member) && member.initializer && ts.isIdentifier(member.name)) {
@@ -215,12 +242,18 @@ function returnExprs(body: ts.ConciseBody): ts.Expression[] {
   return found;
 }
 
+export function functionIsAsync(node: ts.Node): boolean {
+  if (!ts.canHaveModifiers(node)) return false;
+  return (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+}
+
 function addFunction(
   index: FileIndex,
   name: string,
   parameters: readonly ts.ParameterDeclaration[],
   body: ts.ConciseBody,
   exported: boolean,
+  isAsync: boolean,
   thisPage: boolean,
   ownerClass?: ClassBody,
 ): FunctionBody {
@@ -230,6 +263,7 @@ function addFunction(
     filePath: index.filePath,
     parameters,
     body,
+    isAsync,
     exported,
     thisPage,
     index,

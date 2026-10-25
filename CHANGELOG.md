@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A row is trusted when it has no warn or error finding. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
+- Report paths are relative to the project folder. `project.dir` is the folder's base name.
+- Markdown escapes titles, file names, and messages. Timestamps use local time and its offset. Reports name the checks that ran.
+- Write a console report, a JSON report with schemaVersion 1, a Markdown report, and a single-file HTML report.
+- QCV-W003 flags an unawaited async helper and an unawaited test.step block that contain an assertion, and it flags unawaited resolves and rejects matchers. An awaited then, catch, or finally chain is waiting. The message says the async assertion is not awaited.
+- A const alias of expect in the file, a describe callback, or the test is treated as expect.
+- QCV-W008 treats a catch that throws only inside one branch of an if as swallowing the other path.
+- page.goto is not a user action for QCV-W006.
+- test.describe.skip produces one finding for the block, including when the block has no tests.
 - Treat an awaited or returned Promise.all, Promise.allSettled, and test.step as waiting for the assertion inside it.
 - Follow locator and page read fields on a page object, including constructor assignments, initializers, and getters.
 - Flag every unawaited async matcher, including expect.poll, without requiring the subject to be a locator or a page.

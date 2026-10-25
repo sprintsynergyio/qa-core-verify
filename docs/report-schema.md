@@ -1,0 +1,54 @@
+# Report Schema
+
+The checker writes one report in four forms. The JSON file and `--json` use this schema, `schema/report.schema.json`, JSON Schema draft 2020-12. `schemaVersion` is 1.
+
+## Tool
+
+`tool.name` is the package name. `tool.version` is the package version. Both are read from `package.json`.
+
+`startedAt` and `finishedAt` are ISO 8601 timestamps in local time. The offset is the offset of that local time, for example `+05:00` when the machine is five hours ahead of UTC.
+
+## Project
+
+`project.dir` is the base name of the project folder. It is `.` when that name is empty, which is the filesystem root. It is never an absolute path, and it does not change with the current working directory.
+
+`project.configFile` is the Playwright config file when one is present, and `null` when it is not. Every other file path in the report is also relative to the project folder and uses `/` separators. That includes each test `file`, each finding `file`, the file portion of `id`, and the report paths on the console.
+
+`project.specCount` is the number of spec files that were scanned. `project.testCount` is the number of `test()` calls. A `test.describe.skip` block is not a test, so it is not included in `testCount`.
+
+## Checks Run
+
+`checksRun` lists the checks that ran. This version runs `weak-assertion`. `locator` and `cannot-fail` are in the schema for later checks and are not run yet.
+
+The console prints `Checks run:` with that list. The Markdown report lists it under Checks Run. The HTML report prints it in the header. The console summary, the Markdown summary, and the HTML header also name the `locator` and `cannot-fail` checks that did not run. When neither ran, that sentence is: Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run. When only one of them ran, the sentence names the other check.
+
+## Tests
+
+Each entry in `tests` is one `test()` or one `test.describe.skip` block.
+
+`id` is the display path, line, column, and title path joined by ` > `. `titlePath` is the describe titles plus the test title. For a skipped describe, it is the describe titles only.
+
+`findings` holds the findings for that row. A finding has the rule, the check, the severity, the file, the line, the column, the message, the evidence, the fix hint, and `relatedLintRule` when a lint rule is related.
+
+A `test.describe.skip` row exists so its single finding has a place in `tests`. Summary counts are computed from `tests`, including those rows.
+
+## Summary
+
+`summary.severity` counts findings. `summary.verdict` counts rows in `tests`. Both are computed from `tests`. Neither count is written by hand.
+
+## Verdict
+
+Each row gets one verdict:
+
+- `trusted` when the row has no finding at warn level or above. Info findings, including QCV-W000, QCV-W009, and QCV-W010, stay `trusted`.
+- `review` when the row has at least one warn finding and no error finding.
+- `untrusted` when the row has at least one error finding.
+- `baseline-red` and `not-run` are for tests a runtime check could not evaluate. This static checker does not assign `baseline-red`, so that count stays 0.
+
+`not-run` is extended here for rows the static checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
+
+## Files
+
+The default directory is `<project>/.qa-core/verify`. `--out <dir>` changes that directory. The file names are `report.json`, `report.md`, and `report.html`.
+
+`--format console,json,md,html` chooses outputs. The default is all four. `console` is printed. The other three are files. `--json` prints the JSON report to stdout and does not also print the console report.

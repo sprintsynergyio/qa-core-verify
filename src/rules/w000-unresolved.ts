@@ -1,5 +1,5 @@
 import type { InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W000_RULE_ID = 'QCV-W000';
 
@@ -19,6 +19,7 @@ export function findUnresolvedHelpers(tests: readonly InventoryTest[]): Finding[
         message: 'Could Not Resolve Helper',
         evidence: helper.source,
         fixHint: `Move the assertion or locator out of ${helper.name} into the test, or into a helper the spec imports directly.`,
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

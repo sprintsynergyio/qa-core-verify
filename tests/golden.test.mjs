@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -99,10 +100,13 @@ function runPipeline() {
   const discovery = discoverSpecs(projectDir, []);
   const config = loadVerifyConfig(projectDir);
   const tests = [];
+  const skippedDescribes = [];
   for (const file of discovery.files) {
-    tests.push(...parseSpecFile(file, config).tests);
+    const inventory = parseSpecFile(file, config);
+    tests.push(...inventory.tests);
+    skippedDescribes.push(...inventory.skippedDescribes);
   }
-  return { discovery, tests, findings: collectFindings(tests) };
+  return { discovery, tests, skippedDescribes, findings: collectFindings(tests, skippedDescribes) };
 }
 
 function findingKey(file, line, ruleId) {
@@ -117,7 +121,7 @@ function hashTree(dir) {
   const files = [];
   const walk = (current) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === 'test-results' || entry.name === 'playwright-report') continue;
+      if (entry.name === 'node_modules' || entry.name === 'test-results' || entry.name === 'playwright-report' || entry.name === '.qa-core') continue;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
       else files.push(full);
@@ -162,6 +166,7 @@ test('reports every active expected finding and no findings under tests/good', (
   };
   for (const finding of findings) {
     assert.equal(finding.severity, severityByRule[finding.ruleId], `${finding.ruleId} ${finding.file}:${finding.line}`);
+    if (finding.ruleId === 'QCV-W003') assert.equal(finding.message, 'Async assertion is not awaited.');
   }
 });
 
@@ -201,32 +206,58 @@ test('QCV-W001 through QCV-W010 are active, and the skipped test records why it 
   assert.match(withReason[0].reason, /skips this test/);
 });
 
-test('the demo config is read and the cli agrees with the static pipeline', () => {
-  const { discovery, tests, findings } = runPipeline();
+test('the demo config is read and the cli agrees with the static pipeline', (t) => {
+  const { discovery, tests, skippedDescribes, findings } = runPipeline();
   assert.match(discovery.method, /Playwright config playwright\.config\.ts/);
   assert.match(discovery.method, /testDir '\.\/tests'/);
   const before = hashTree(projectDir);
-  const result = spawnSync(process.execPath, ['dist/cli.js', 'example-project/saucedemo'], {
+  const hadRuntimeDir = fs.existsSync(path.join(projectDir, '.qa-core'));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-golden-'));
+  t.after(() => fs.rmSync(out, { recursive: true, force: true }));
+  const result = spawnSync(process.execPath, ['dist/cli.js', 'example-project/saucedemo', '--out', out], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
   assert.equal(hashTree(projectDir), before);
+  assert.equal(fs.existsSync(path.join(projectDir, '.qa-core')), hadRuntimeDir);
+  assert.equal(fs.existsSync(path.join(out, 'report.json')), true);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /opens the login page and stops/);
   assert.match(result.stdout, /waits and then ends/);
-  assert.doesNotMatch(result.stdout, /login lands on the inventory page/);
-  assert.doesNotMatch(result.stdout, /add to cart updates the cart badge/);
-  assert.doesNotMatch(result.stdout, /locked out user sees the error/);
-  assert.doesNotMatch(result.stdout, /checkout overview shows the backpack item total/);
+  assert.match(result.stdout, /trusted[^\n]*login lands on the inventory page/);
+  assert.match(result.stdout, /trusted[^\n]*add to cart updates the cart badge/);
+  assert.match(result.stdout, /trusted[^\n]*locked out user sees the error/);
+  assert.match(result.stdout, /trusted[^\n]*checkout overview shows the backpack item total/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*login lands on the inventory page/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*add to cart updates the cart badge/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*locked out user sees the error/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*checkout overview shows the backpack item total/);
+  assert.equal(result.stdout.includes(projectDir), false);
+  const reportRel = path.relative(projectDir, path.join(out, 'report.json')).split(path.sep).join('/');
+  assert.match(result.stdout, new RegExp(`Reports: ${reportRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const counts = { error: 0, warn: 0, info: 0 };
+  const verdicts = { trusted: 0, review: 0, untrusted: 0, 'baseline-red': 0, 'not-run': 0 };
   for (const finding of findings) counts[finding.severity] += 1;
+  for (const entry of tests) {
+    const owned = findings.filter((finding) => finding.testTitle === entry.titlePath.join(' > ') && finding.file === entry.file);
+    if (entry.modifiers.includes('skip') || entry.modifiers.includes('fixme')) verdicts['not-run'] += 1;
+    else if (owned.some((finding) => finding.severity === 'error')) verdicts.untrusted += 1;
+    else if (owned.some((finding) => finding.severity === 'warn')) verdicts.review += 1;
+    else verdicts.trusted += 1;
+  }
+  verdicts['not-run'] += skippedDescribes.length;
   const summary = [
     'Summary:',
+    `${verdicts.trusted} trusted,`,
+    `${verdicts.review} review,`,
+    `${verdicts.untrusted} untrusted,`,
+    `${verdicts['baseline-red']} baseline-red,`,
+    `${verdicts['not-run']} not-run.`,
     countLabel(counts.error, 'error', 'errors') + ',',
     countLabel(counts.warn, 'warning', 'warnings') + ',',
     countLabel(counts.info, 'info finding', 'info findings') + '.',
-    countLabel(tests.length, 'test', 'tests') + ' scanned.',
   ].join(' ');
   assert.ok(result.stdout.includes(summary), result.stdout);
+  assert.match(result.stdout, /Checks run: weak-assertion\./);
   assert.doesNotMatch(result.stderr, /No tests found/);
 });

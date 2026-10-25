@@ -5,8 +5,9 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { discoverSpecs, globToRegExp } from '../dist/inventory/discover.js';
 
-function makeProject() {
+function makeProject(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-discover-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 
@@ -24,8 +25,8 @@ test('the Playwright default testMatch glob matches spec and test files', () => 
   assert.equal(expression.test('foo.spec.txt'), false);
 });
 
-test('uses default globs when no Playwright config exists, and skips node_modules', () => {
-  const dir = makeProject();
+test('uses default globs when no Playwright config exists, and skips node_modules', (t) => {
+  const dir = makeProject(t);
   write(path.join(dir, 'a.spec.ts'), '');
   write(path.join(dir, 'nested/b.spec.js'), '');
   write(path.join(dir, 'nested/c.test.ts'), '');
@@ -41,8 +42,8 @@ test('uses default globs when no Playwright config exists, and skips node_module
   );
 });
 
-test('reads testDir and testMatch from the object passed to defineConfig', () => {
-  const dir = makeProject();
+test('reads testDir and testMatch from the object passed to defineConfig', (t) => {
+  const dir = makeProject(t);
   write(
     path.join(dir, 'playwright.config.ts'),
     "import { defineConfig } from '@playwright/test';\nexport default defineConfig({\n  testDir: './specs',\n  testMatch: '**/*.spec.ts',\n});\n",
@@ -62,8 +63,8 @@ test('reads testDir and testMatch from the object passed to defineConfig', () =>
   );
 });
 
-test('reads a module.exports object and a regular expression testMatch', () => {
-  const dir = makeProject();
+test('reads a module.exports object and a regular expression testMatch', (t) => {
+  const dir = makeProject(t);
   write(
     path.join(dir, 'playwright.config.js'),
     "module.exports = {\n  testDir: './specs',\n  testMatch: /login\\.spec\\.js/,\n};\n",
@@ -75,8 +76,8 @@ test('reads a module.exports object and a regular expression testMatch', () => {
   assert.deepEqual(found.files.map((file) => path.relative(dir, file)), ['specs/login.spec.js']);
 });
 
-test('uses the config directory and Playwright default testMatch when those fields are omitted', () => {
-  const dir = makeProject();
+test('uses the config directory and Playwright default testMatch when those fields are omitted', (t) => {
+  const dir = makeProject(t);
   write(path.join(dir, 'playwright.config.ts'), 'export default {};\n');
   write(path.join(dir, 'a.spec.ts'), '');
   write(path.join(dir, 'nested/b.test.tsx'), '');
@@ -91,8 +92,8 @@ test('uses the config directory and Playwright default testMatch when those fiel
   );
 });
 
-test('falls back when the config is not a plain object literal', () => {
-  const dir = makeProject();
+test('falls back when the config is not a plain object literal', (t) => {
+  const dir = makeProject(t);
   write(
     path.join(dir, 'playwright.config.ts'),
     "const testDir = './specs';\nexport default { testDir };\n",
@@ -107,8 +108,8 @@ test('falls back when the config is not a plain object literal', () => {
   );
 });
 
-test('reads testDir from each plain project entry', () => {
-  const dir = makeProject();
+test('reads testDir from each plain project entry', (t) => {
+  const dir = makeProject(t);
   write(
     path.join(dir, 'playwright.config.ts'),
     "export default {\n  projects: [\n    { name: 'a', testDir: './specs-a', testMatch: '**/*.spec.ts' },\n    { name: 'b', testDir: './specs-b', testMatch: '**/*.test.js' },\n  ],\n};\n",
@@ -125,8 +126,8 @@ test('reads testDir from each plain project entry', () => {
   );
 });
 
-test('uses spec paths from the command line', () => {
-  const dir = makeProject();
+test('uses spec paths from the command line', (t) => {
+  const dir = makeProject(t);
   write(path.join(dir, 'keep.spec.ts'), 'export {}\n');
   write(path.join(dir, 'skip.spec.ts'), 'export {}\n');
   const found = discoverSpecs(dir, ['keep.spec.ts'], dir);
@@ -134,7 +135,7 @@ test('uses spec paths from the command line', () => {
   assert.deepEqual(found.files.map((file) => path.relative(dir, file)), ['keep.spec.ts']);
 });
 
-test('fails when a spec path does not exist', () => {
-  const dir = makeProject();
+test('fails when a spec path does not exist', (t) => {
+  const dir = makeProject(t);
   assert.throws(() => discoverSpecs(dir, ['missing.spec.ts'], dir), /Spec path does not exist/);
 });

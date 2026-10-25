@@ -16,4 +16,16 @@ export interface Finding {
   fixHint: string;
   /** Set when eslint-plugin-playwright has the same or a close rule. eslint is not a dependency. */
   relatedLintRule?: string;
+  /** Groups a finding under one test or one describe block in the report. */
+  ownerId: string;
+}
+
+export function ownerIdFor(
+  kind: 'test' | 'describe',
+  file: string,
+  line: number,
+  column: number,
+  titlePath: readonly string[],
+): string {
+  return [kind, file, String(line), String(column), titlePath.join(' > ')].join('\0');
 }

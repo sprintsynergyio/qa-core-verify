@@ -12,7 +12,27 @@ npm run build
 node dist/cli.js <project-dir>
 ```
 
-`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the scan. `--json` prints the raw findings array. That JSON format is unstable.
+`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the scan. `--json` prints the JSON report and nothing else on stdout. The report uses `schemaVersion: 1`. See [docs/report-schema.md](docs/report-schema.md).
+
+## Output
+
+A default run prints one line per test, indented findings, a summary, the checks that ran, and the report paths. Paths are relative to the project folder. This sample is copied from `node dist/cli.js example-project/saucedemo` in this repository. Other test lines from that run are left out. The summary line is the full run.
+
+```text
+trusted  tests/good/shopping.spec.ts:5  login lands on the inventory page
+
+untrusted  tests/ai-style/weak-assertions.spec.ts:5  opens the login page and stops
+  QCV-W001  error  5:1  Test has no assertion.
+    Evidence: No expect call and no configured assertion helper in this test.
+    Fix: Add an expect assertion, or call a helper named in qa-core-verify.config.json.
+
+Summary: 9 trusted, 3 review, 6 untrusted, 0 baseline-red, 1 not-run. 6 errors, 3 warnings, 3 info findings.
+Checks run: weak-assertion.
+Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
+Reports: .qa-core/verify/report.json, .qa-core/verify/report.md, .qa-core/verify/report.html.
+```
+
+That run writes `example-project/saucedemo/.qa-core/verify/report.json`, `report.md`, and `report.html`. `.qa-core/` is gitignored. `--out <dir>` writes the files in another directory. The console still prints those paths relative to the project folder. `--format console,json,md,html` chooses which reports to produce. The default is all four. `--format console` writes no files.
 
 An optional `qa-core-verify.config.json` in the project directory can name assertion helpers. A call that matches `assertFunctionNames` or `assertFunctionPatterns` counts as an assertion for QCV-W001. Patterns are regular expressions, the same idea as eslint-plugin-playwright `expect-expect`.
 
@@ -30,7 +50,7 @@ The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](
 - QCV-W000 Could Not Resolve Helper (info)
 - QCV-W001 Test Has No Assertion (error)
 - QCV-W002 Generic Matcher On A Locator (error)
-- QCV-W003 Web-First Assertion Not Awaited (error)
+- QCV-W003 Async Assertion Not Awaited (error)
 - QCV-W004 Value Compared With Itself (error)
 - QCV-W005 Existence Check On A Page Read (warn)
 - QCV-W006 Presence Only After The Last Action (warn)
