@@ -206,13 +206,14 @@ test('QCV-W001 through QCV-W010 are active, and the skipped test records why it 
   assert.match(withReason[0].reason, /skips this test/);
 });
 
-test('the demo config is read and the cli agrees with the static pipeline', () => {
+test('the demo config is read and the cli agrees with the static pipeline', (t) => {
   const { discovery, tests, skippedDescribes, findings } = runPipeline();
   assert.match(discovery.method, /Playwright config playwright\.config\.ts/);
   assert.match(discovery.method, /testDir '\.\/tests'/);
   const before = hashTree(projectDir);
   const hadRuntimeDir = fs.existsSync(path.join(projectDir, '.qa-core'));
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-golden-'));
+  t.after(() => fs.rmSync(out, { recursive: true, force: true }));
   const result = spawnSync(process.execPath, ['dist/cli.js', 'example-project/saucedemo', '--out', out], {
     cwd: repoRoot,
     encoding: 'utf8',

@@ -1,6 +1,6 @@
 import type { Report, ReportFinding, ReportTest } from './model.js';
 import { trustNote } from './model.js';
-import { collapseNewlines } from './paths.js';
+import { collapseNewlines, displayText } from './paths.js';
 
 export function formatMarkdown(report: Report): string {
   const lines: string[] = [];
@@ -12,8 +12,8 @@ export function formatMarkdown(report: Report): string {
   lines.push('');
   lines.push('## Project');
   lines.push('');
-  lines.push(`- Directory: ${inline(report.project.dir)}`);
-  lines.push(`- Config: ${report.project.configFile === null ? 'none' : inline(report.project.configFile)}`);
+  lines.push(`- Directory: ${inline(displayText(report.project.dir))}`);
+  lines.push(`- Config: ${report.project.configFile === null ? 'none' : inline(displayText(report.project.configFile))}`);
   lines.push(`- Specs: ${report.project.specCount}`);
   lines.push(`- Tests: ${report.project.testCount}`);
   lines.push('');
@@ -56,9 +56,9 @@ export function formatMarkdown(report: Report): string {
 
 function formatTest(test: ReportTest): string[] {
   const lines: string[] = [];
-  lines.push(`### ${inline(test.titlePath.join(' > '))}`);
+  lines.push(`### ${inline(test.titlePath.map((part) => displayText(part)).join(' > '))}`);
   lines.push('');
-  lines.push(`- File: ${inline(test.file)}:${test.line}`);
+  lines.push(`- File: ${inline(displayText(test.file))}:${test.line}`);
   lines.push(`- Verdict: ${test.verdict}`);
   if (test.findings.length === 0) {
     lines.push('- Findings: none');
@@ -76,7 +76,7 @@ function formatFinding(finding: ReportFinding): string[] {
     '',
     `- Severity: ${finding.severity}`,
     `- Check: ${inline(finding.check)}`,
-    `- Location: ${inline(finding.file)}:${finding.line}:${finding.column}`,
+    `- Location: ${inline(displayText(finding.file))}:${finding.line}:${finding.column}`,
     `- Message: ${inline(finding.message)}`,
   ];
   if (finding.relatedLintRule) lines.push(`- Related Lint Rule: ${inline(finding.relatedLintRule)}`);
@@ -95,7 +95,7 @@ function fence(text: string): string {
 /** Collapse newlines, then escape Markdown and HTML specials so user text cannot change the document. */
 function inline(value: string): string {
   const collapsed = collapseNewlines(value);
-  const marked = collapsed.replace(/[\\`*_{}[\]()#+!|]/g, (char) => `\\${char}`);
+  const marked = collapsed.replace(/[\\`*_{}[\]()#+!|~]/g, (char) => `\\${char}`);
   return marked
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')

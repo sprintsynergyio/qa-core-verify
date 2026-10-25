@@ -28,6 +28,7 @@ untrusted  tests/ai-style/weak-assertions.spec.ts:5  opens the login page and st
 
 Summary: 9 trusted, 3 review, 6 untrusted, 0 baseline-red, 1 not-run. 6 errors, 3 warnings, 3 info findings.
 Checks run: weak-assertion.
+Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
 Reports: .qa-core/verify/report.json, .qa-core/verify/report.md, .qa-core/verify/report.html.
 ```
 

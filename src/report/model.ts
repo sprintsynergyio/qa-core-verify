@@ -54,14 +54,23 @@ export interface Report {
   tests: ReportTest[];
 }
 
-export const TRUST_NOTE =
-  'Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.';
+const LIMITED_CHECKS = [
+  { id: 'locator', alone: 'Locator', together: 'Locator' },
+  { id: 'cannot-fail', alone: 'Cannot-fail', together: 'cannot-fail' },
+] as const;
 
-/** Shown while locator or cannot-fail is absent. Omitted once both have run. */
+/**
+ * Names the locator and cannot-fail checks that did not run.
+ * Omitted once both have run.
+ */
 export function trustNote(checksRun: readonly string[]): string | undefined {
   const ran = new Set(checksRun);
-  if (ran.has('locator') && ran.has('cannot-fail')) return undefined;
-  return TRUST_NOTE;
+  const missing = LIMITED_CHECKS.filter((check) => !ran.has(check.id));
+  if (missing.length === 0) return undefined;
+  const only = missing.length === 1 ? missing[0] : undefined;
+  const names = only ? only.alone : missing.map((check) => check.together).join(' and ');
+  const noun = only ? 'check' : 'checks';
+  return `Trusted means no warn or error findings from the checks that ran. ${names} ${noun} did not run.`;
 }
 
 export interface ReportInput {
@@ -120,9 +129,10 @@ export function readToolIdentity(): { name: string; version: string } {
 }
 
 /**
- * Verdicts from PLAN section 4. `baseline-red` is reserved for a later runtime check, so this
- * function does not return it. `not-run` is the static extension for skip, fixme, and describe.skip.
- * Info findings do not lower a test that ran: trusted means nothing at warn or above.
+ * `trusted` means no warn or error finding. `review` means at least one warn and no error.
+ * `untrusted` means at least one error. `baseline-red` is reserved for a later runtime check,
+ * so this function does not return it. `not-run` covers skip, fixme, and describe.skip.
+ * Info findings do not lower a test that ran.
  */
 export function verdictFor(
   kind: 'test' | 'describe',

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Verdicts follow PLAN section 4. Info findings stay trusted. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
+- A row is trusted when it has no warn or error finding. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
 - Report paths are relative to the project folder. `project.dir` is the folder's base name.
 - Markdown escapes titles, file names, and messages. Timestamps use local time and its offset. Reports name the checks that ran.
 - Write a console report, a JSON report with schemaVersion 1, a Markdown report, and a single-file HTML report.

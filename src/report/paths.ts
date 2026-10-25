@@ -17,3 +17,9 @@ export function toProjectPath(file: string, projectDir: string): string {
 export function collapseNewlines(value: string): string {
   return value.replace(/(?:\r\n|[\n\r])+/g, ' ').trim();
 }
+
+/** Collapse newlines and remove other control characters, including ESC. */
+export function displayText(value: string): string {
+  const collapsed = value.replace(/(?:\r\n|[\n\r])+/g, ' ');
+  return collapsed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
+}

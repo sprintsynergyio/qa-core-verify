@@ -11,6 +11,12 @@ import { exitCodeFor } from '../dist/exit-code.js';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const w001Dir = path.join(repoRoot, 'tests/fixtures/w001');
 
+function tempDir(t, prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 function runCli(args, cwd = repoRoot) {
   return spawnSync(process.execPath, ['dist/cli.js', ...args], {
     cwd,
@@ -84,8 +90,8 @@ test('exit 2 for a path that does not exist', () => {
   assert.equal(result.stdout, '');
 });
 
-test('exit 2 for a spec that does not parse', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-cli-'));
+test('exit 2 for a spec that does not parse', (t) => {
+  const dir = tempDir(t, 'qa-core-verify-cli-');
   fs.writeFileSync(path.join(dir, 'broken.spec.ts'), "import { test } from '@playwright/test';\ntest('broken', () => { const = ; });\n");
   const result = runCli([dir]);
   assert.equal(result.status, 2);
@@ -129,8 +135,8 @@ test('exit code follows the fail-on threshold', () => {
   assert.equal(exitCodeFor([], 'info'), 0);
 });
 
-test('a bad config file is a tool error', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-config-'));
+test('a bad config file is a tool error', (t) => {
+  const dir = tempDir(t, 'qa-core-verify-config-');
   fs.writeFileSync(path.join(dir, 'qa-core-verify.config.json'), '{');
   fs.writeFileSync(path.join(dir, 'empty.spec.ts'), "import { test } from '@playwright/test';\ntest('empty', async () => {});\n");
   const invalid = runCli([dir]);
@@ -150,8 +156,8 @@ test('does not modify the project files', () => {
   assert.equal(hashTree(w001Dir), before);
 });
 
-test('prints No tests found when no spec files match, and keeps exit 0', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-empty-'));
+test('prints No tests found when no spec files match, and keeps exit 0', (t) => {
+  const dir = tempDir(t, 'qa-core-verify-empty-');
   const result = runCli([dir]);
   assert.equal(result.status, 0);
   assert.match(result.stderr, /No tests found\. No spec files matched\./);
@@ -168,8 +174,8 @@ test('prints No tests found when no spec files match, and keeps exit 0', () => {
   assert.match(json.stderr, /No tests found\. No spec files matched\./);
 });
 
-test('prints No tests found when spec files contain no tests, and keeps exit 0', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-annot-'));
+test('prints No tests found when spec files contain no tests, and keeps exit 0', (t) => {
+  const dir = tempDir(t, 'qa-core-verify-annot-');
   fs.writeFileSync(
     path.join(dir, 'slow.spec.ts'),
     "import { test } from '@playwright/test';\ntest.slow(({ browserName }) => browserName === 'webkit');\n",

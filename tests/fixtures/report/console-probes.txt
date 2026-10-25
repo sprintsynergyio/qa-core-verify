@@ -9,6 +9,9 @@ untrusted  link.spec.ts:4  [link](javascript:...)
     Evidence: seen ``` and ````` here
     Fix: fix ```` hint
 
-Summary: 3 trusted, 0 review, 1 untrusted, 0 baseline-red, 0 not-run. 1 error, 0 warnings, 0 info findings.
+trusted  esc/name~.spec.ts:5  bell and [31mred[0m ~tilde
+
+Summary: 4 trusted, 0 review, 1 untrusted, 0 baseline-red, 0 not-run. 1 error, 0 warnings, 0 info findings.
 Checks run: weak-assertion.
+Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
 Reports: .qa-core/verify/report.md.

@@ -9,7 +9,7 @@
 - Directory: probes
 - Config: playwright.config.ts
 - Specs: 1
-- Tests: 4
+- Tests: 5
 
 ## Summary
 
@@ -25,7 +25,7 @@
 
 | Verdict | Count |
 | --- | --- |
-| trusted | 3 |
+| trusted | 4 |
 | review | 0 |
 | untrusted | 1 |
 | baseline-red | 0 |
@@ -79,3 +79,9 @@ seen ``` and ````` here
 `````
 fix ```` hint
 `````
+
+### bell and \[31mred\[0m \~tilde
+
+- File: esc/name\~.spec.ts:5
+- Verdict: trusted
+- Findings: none

@@ -20,7 +20,7 @@ The checker writes one report in four forms. The JSON file and `--json` use this
 
 `checksRun` lists the checks that ran. This version runs `weak-assertion`. `locator` and `cannot-fail` are in the schema for later checks and are not run yet.
 
-The console prints `Checks run:` with that list. The Markdown report lists it under Checks Run. The HTML report prints it in the header. While `locator` or `cannot-fail` is absent, the Markdown summary and the HTML header also say: Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
+The console prints `Checks run:` with that list. The Markdown report lists it under Checks Run. The HTML report prints it in the header. The console summary, the Markdown summary, and the HTML header also name the `locator` and `cannot-fail` checks that did not run. When neither ran, that sentence is: Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run. When only one of them ran, the sentence names the other check.
 
 ## Tests
 
@@ -38,7 +38,7 @@ A `test.describe.skip` row exists so its single finding has a place in `tests`. 
 
 ## Verdict
 
-PLAN section 4 assigns one verdict to each test:
+Each row gets one verdict:
 
 - `trusted` when the row has no finding at warn level or above. Info findings, including QCV-W000, QCV-W009, and QCV-W010, stay `trusted`.
 - `review` when the row has at least one warn finding and no error finding.

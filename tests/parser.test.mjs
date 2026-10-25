@@ -198,8 +198,9 @@ test('does not execute spec source', () => {
   assert.equal(byTitle(inventory, 'parsed without running').title, 'parsed without running');
 });
 
-test('reports a syntax error instead of executing the file', () => {
+test('reports a syntax error instead of executing the file', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-parse-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'broken.spec.ts');
   fs.writeFileSync(file, "import { test } from '@playwright/test';\ntest('broken', async () => { const = ; });\n");
   assert.throws(() => parseSpecFile(file, config), /Parse error/);
