@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ToolError } from '../tool-error.js';
 
-const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git']);
+const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git', '.qcv-tmp']);
 
 interface ActiveWorkspace {
   keep: boolean;
@@ -328,8 +328,9 @@ function runPlaywright(
   const outputDir = path.join(workspaceDir, 'test-results');
   // A signal kills Chromium before it can remove its profile. Keep that profile, and any
   // .org.chromium.Chromium.* file, inside the workspace this process deletes after the child exits.
-  const browserTmp = path.join(workspaceDir, '.qcv-tmp');
-  fs.mkdirSync(browserTmp);
+  // mkdtemp avoids EEXIST when the copied project already contains a browser temp directory.
+  // .qcv-tmp is not copied, so a user's directory of that name is left untouched.
+  const browserTmp = fs.mkdtempSync(path.join(workspaceDir, '.qcv-browser-'));
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...extraEnv,

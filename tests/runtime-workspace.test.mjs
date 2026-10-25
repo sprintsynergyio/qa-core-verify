@@ -22,6 +22,151 @@ function privateTempEnv(dir) {
   return { ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir };
 }
 
+// node:test runs t.after hooks in registration order. One hook, registered first,
+// stops processes and then removes directories. QCV_INJECT_FAIL is a test-only
+// switch: after-spawn, after-profile, browser-up, after-signal.
+function injectFailure(stage) {
+  if (process.env.QCV_INJECT_FAIL === stage) throw new Error(`injected failure at ${stage}`);
+}
+
+function bindCleanup(t) {
+  const stops = [];
+  const removals = [];
+  t.after(() => {
+    const steps = [...stops, ...removals];
+    if (process.env.QCV_INJECT_TEARDOWN === '1') {
+      steps.unshift(async () => {
+        throw new Error('injected teardown failure');
+      });
+    }
+    return runSteps(steps);
+  });
+  return {
+    stop(fn) {
+      stops.push(fn);
+    },
+    dir(prefix) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+      removals.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+      return dir;
+    },
+  };
+}
+
+async function runSteps(steps) {
+  let failure;
+  let index = 0;
+  const next = async () => {
+    if (index >= steps.length) return;
+    const step = steps[index];
+    index += 1;
+    try {
+      await step();
+    } catch (error) {
+      failure ??= error;
+    } finally {
+      await next();
+    }
+  };
+  await next();
+  if (failure) throw failure;
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalTree(pid, signal) {
+  if (!pid) return;
+  const members = new Set([pid, ...listDescendantPids(pid)]);
+  for (const member of members) {
+    try {
+      process.kill(member, signal);
+    } catch {
+      // already gone
+    }
+  }
+  for (const member of members) {
+    try {
+      process.kill(-member, signal);
+    } catch {
+      // not a process group leader
+    }
+  }
+}
+
+function killSurvivors(pids) {
+  for (const member of pids) {
+    if (pidAlive(member)) signalTree(member, 'SIGKILL');
+  }
+}
+
+async function stopCli(child) {
+  const pid = child.pid;
+  const early = pid ? [pid, ...listDescendantPids(pid)] : [];
+  if (child.exitCode === null && child.signalCode === null) {
+    try {
+      child.kill('SIGINT');
+    } catch {
+      // already gone
+    }
+    let exited = await waitForExitQuiet(child, 5_000);
+    if (!exited && pid) {
+      signalTree(pid, 'SIGTERM');
+      exited = await waitForExitQuiet(child, 2_000);
+    }
+    if (!exited && pid) {
+      signalTree(pid, 'SIGKILL');
+      await waitForExitQuiet(child, 2_000);
+    }
+  }
+  const late = pid ? listDescendantPids(pid) : [];
+  killSurvivors([...early, ...late]);
+}
+
+async function stopHelper(child, timeoutMs) {
+  const pid = child.pid;
+  const early = pid ? [pid, ...listDescendantPids(pid)] : [];
+  if (child.exitCode === null && child.signalCode === null) {
+    try {
+      child.stdin.write('close\n');
+      child.stdin.end();
+    } catch {
+      // stdin may already be closed
+    }
+    const exited = await waitForExitQuiet(child, timeoutMs);
+    if (!exited && pid) {
+      signalTree(pid, 'SIGKILL');
+      await waitForExitQuiet(child, 2_000);
+    }
+  }
+  const late = pid ? listDescendantPids(pid) : [];
+  killSurvivors([...early, ...late]);
+}
+
+function waitForExitQuiet(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
 async function withPrivateTemp(t, run) {
   const dir = tempDir(t, 'qcv-sig-');
   const saved = {
@@ -604,75 +749,128 @@ test('record order does not follow action matchCount', (t) => {
   );
 });
 
+test('an existing .qcv-tmp is left in place and a kept workspace can be the next project', (t) => {
+  const project = tempDir(t, 'qcv-existing-tmp-');
+  const scratch = tempDir(t, 'qcv-sig-');
+  const out = tempDir(t, 'qcv-signal-out-');
+  const planted = path.join(project, '.qcv-tmp');
+  fs.mkdirSync(planted);
+  const marker = path.join(planted, 'keep.txt');
+  fs.writeFileSync(marker, 'user-owned');
+  writeProject(project);
+  const cli = path.join(repoRoot, 'dist/cli.js');
+  const first = spawnSync(
+    process.execPath,
+    [cli, project, '--only', 'locator-evidence', '--keep-workspace', '--out', out],
+    { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(scratch) },
+  );
+  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  assert.equal(first.stderr.includes('EEXIST'), false);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'user-owned');
+  assert.deepEqual(fs.readdirSync(planted), ['keep.txt']);
+  const keptMatch = /Workspace: (\S+)/.exec(first.stdout);
+  assert.ok(keptMatch, first.stdout);
+  const kept = keptMatch[1];
+  assert.equal(kept.startsWith(`${scratch}${path.sep}`), true, kept);
+  assert.equal(fs.existsSync(path.join(kept, '.qcv-tmp')), false);
+  const browserTemps = fs.readdirSync(kept).filter((name) => name.startsWith('.qcv-browser-'));
+  assert.equal(browserTemps.length, 1, browserTemps.join(','));
+
+  const keptPlanted = path.join(kept, '.qcv-tmp');
+  fs.mkdirSync(keptPlanted);
+  fs.writeFileSync(path.join(keptPlanted, 'keep.txt'), 'kept-user');
+  const scratchAgain = tempDir(t, 'qcv-sig-');
+  const outAgain = tempDir(t, 'qcv-signal-out-');
+  const again = spawnSync(
+    process.execPath,
+    [cli, kept, '--only', 'locator-evidence', '--keep-workspace', '--out', outAgain],
+    { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(scratchAgain) },
+  );
+  assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+  assert.equal(again.stderr.includes('EEXIST'), false);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'user-owned');
+  assert.deepEqual(fs.readdirSync(planted), ['keep.txt']);
+  assert.equal(fs.readFileSync(path.join(keptPlanted, 'keep.txt'), 'utf8'), 'kept-user');
+  assert.deepEqual(fs.readdirSync(keptPlanted), ['keep.txt']);
+  assert.equal(fs.existsSync(path.join(kept, browserTemps[0])), true);
+  const againMatch = /Workspace: (\S+)/.exec(again.stdout);
+  assert.ok(againMatch, again.stdout);
+  const keptAgain = againMatch[1];
+  assert.equal(fs.existsSync(path.join(keptAgain, '.qcv-tmp')), false);
+  assert.equal(fs.readdirSync(keptAgain).some((name) => name.startsWith('.qcv-browser-')), true);
+});
+
 test(
   'SIGINT, a second SIGINT, SIGTERM, and SIGHUP leave the private temp directory empty',
   { skip: process.platform !== 'linux' && 'needs /proc', timeout: 120_000 },
   async (t) => {
-  const project = tempDir(t, 'qcv-signal-project-');
-  const token = `qcv-signal-marker-${process.pid}.txt`;
-  fs.writeFileSync(path.join(project, token), 'marker');
-  writeProject(project, {
-    spec: `import { test } from '@playwright/test';
+    const cleanup = bindCleanup(t);
+    const project = cleanup.dir('qcv-signal-project-');
+    const token = `qcv-signal-marker-${process.pid}.txt`;
+    fs.writeFileSync(path.join(project, token), 'marker');
+    writeProject(project, {
+      spec: `import { test } from '@playwright/test';
 test('hang', async ({ page }) => {
   await page.setContent('<p>x</p>');
   await new Promise(() => {});
 });
 `,
-  });
-  const cli = path.join(repoRoot, 'dist/cli.js');
-  const cases = [
-    { signal: 'SIGINT', code: 130, again: false },
-    { signal: 'SIGINT', code: 130, again: true },
-    { signal: 'SIGTERM', code: 143, again: false },
-    { signal: 'SIGHUP', code: 129, again: false },
-  ];
-  for (const item of cases) {
-    const scratch = tempDir(t, 'qcv-sig-');
-    const out = tempDir(t, 'qcv-signal-out-');
-    const child = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
-      stdio: 'ignore',
-      env: privateTempEnv(scratch),
     });
-    t.after(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // The CLI may already have exited.
+    const cli = path.join(repoRoot, 'dist/cli.js');
+    const cases = [
+      { signal: 'SIGINT', code: 130, again: false },
+      { signal: 'SIGINT', code: 130, again: true },
+      { signal: 'SIGTERM', code: 143, again: false },
+      { signal: 'SIGHUP', code: 129, again: false },
+    ];
+    for (const item of cases) {
+      const scratch = cleanup.dir('qcv-sig-');
+      const out = cleanup.dir('qcv-signal-out-');
+      const child = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
+        stdio: 'ignore',
+        env: privateTempEnv(scratch),
+      });
+      cleanup.stop(() => stopCli(child));
+      injectFailure('after-spawn');
+      const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
+      assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
+      const profile = await waitForUserDataDir(scratch, 20_000);
+      assert.equal(profile.startsWith(`${scratch}${path.sep}`), true, profile);
+      injectFailure('after-profile');
+      const browserUp = await waitForBrowser(child.pid, 20_000);
+      assert.equal(browserUp, true, `${item.signal} browser did not start`);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      injectFailure('browser-up');
+      const exitedPromise = waitForExitCode(child, 15_000);
+      child.kill(item.signal);
+      if (item.again) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        try {
+          child.kill(item.signal);
+        } catch {
+          // The first signal may already have exited the CLI.
+        }
       }
-    });
-    const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
-    assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
-    const browserUp = await waitForBrowser(child.pid, 20_000);
-    assert.equal(browserUp, true, `${item.signal} browser did not start`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const exitedPromise = waitForExit(child, 15_000);
-    child.kill(item.signal);
-    if (item.again) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      try {
-        child.kill(item.signal);
-      } catch {
-        // The first signal may already have exited the CLI.
-      }
+      const exited = await exitedPromise;
+      const label = item.again ? `${item.signal} twice` : item.signal;
+      assert.equal(exited.code, item.code, `${label} exited ${exited.code} signal ${exited.signal}`);
+      injectFailure('after-signal');
+      assert.equal(fs.existsSync(workspace), false, workspace);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const left = fs.readdirSync(scratch);
+      assert.deepEqual(left, [], `${label} left ${left.join(', ')} in ${scratch}`);
     }
-    const exited = await exitedPromise;
-    const label = item.again ? `${item.signal} twice` : item.signal;
-    assert.equal(exited.code, item.code, `${label} exited ${exited.code} signal ${exited.signal}`);
-    assert.equal(fs.existsSync(workspace), false, workspace);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const left = fs.readdirSync(scratch);
-    assert.deepEqual(left, [], `${label} left ${left.join(', ')} in ${scratch}`);
-  }
-});
+  },
+);
 
 test(
   'an outside Chromium profile and a decoy folder survive signal cleanup',
   { skip: process.platform !== 'linux' && 'needs /proc', timeout: 90_000 },
   async (t) => {
-    const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'playwright_chromiumdev_profile-'));
+    const cleanup = bindCleanup(t);
+    const decoy = cleanup.dir('playwright_chromiumdev_profile-');
     fs.writeFileSync(path.join(decoy, 'keep.txt'), 'decoy');
-    t.after(() => fs.rmSync(decoy, { recursive: true, force: true }));
-    const holder = tempDir(t, 'qcv-outside-browser-');
+    const holder = cleanup.dir('qcv-outside-browser-');
     const playwright = pathToFileURL(path.join(repoRoot, 'node_modules/@playwright/test/index.js')).href;
     const script = path.join(holder, 'hold.mjs');
     fs.writeFileSync(
@@ -697,7 +895,8 @@ await new Promise((resolve) => {
     child.stderr.on('data', (chunk) => {
       holderErr += chunk.toString('utf8');
     });
-    t.after(() => closeChild(child, 5_000));
+    cleanup.stop(() => stopHelper(child, 5_000));
+    injectFailure('after-spawn');
     await readLine(child.stdout, 20_000).catch((error) => {
       throw new Error(`${error.message}\n${holderErr}`);
     });
@@ -706,8 +905,9 @@ await new Promise((resolve) => {
     assert.equal(profile === decoy, false);
     assert.equal(fs.existsSync(path.join(decoy, 'keep.txt')), true);
     assert.equal(commandUsesPath(profile), true, 'outside browser was not using its profile');
+    injectFailure('after-profile');
 
-    const project = tempDir(t, 'qcv-signal-project-');
+    const project = cleanup.dir('qcv-signal-project-');
     const token = `qcv-signal-marker-${process.pid}-decoy.txt`;
     fs.writeFileSync(path.join(project, token), 'marker');
     writeProject(project, {
@@ -718,36 +918,32 @@ test('hang', async ({ page }) => {
 });
 `,
     });
-    const scratch = tempDir(t, 'qcv-sig-');
-    const out = tempDir(t, 'qcv-signal-out-');
+    const scratch = cleanup.dir('qcv-sig-');
+    const out = cleanup.dir('qcv-signal-out-');
     const cli = path.join(repoRoot, 'dist/cli.js');
     const cliChild = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
       stdio: 'ignore',
       env: privateTempEnv(scratch),
     });
-    t.after(() => {
-      try {
-        cliChild.kill('SIGKILL');
-      } catch {
-        // The CLI may already have exited.
-      }
-    });
+    cleanup.stop(() => stopCli(cliChild));
     const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
     assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
     const browserUp = await waitForBrowser(cliChild.pid, 20_000);
     assert.equal(browserUp, true, 'signal browser did not start');
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const exitedPromise = waitForExit(cliChild, 15_000);
+    injectFailure('browser-up');
+    const exitedPromise = waitForExitCode(cliChild, 15_000);
     cliChild.kill('SIGINT');
     const exited = await exitedPromise;
     assert.equal(exited.code, 130, `SIGINT exited ${exited.code} signal ${exited.signal}`);
+    injectFailure('after-signal');
     await new Promise((resolve) => setTimeout(resolve, 1000));
     const left = fs.readdirSync(scratch);
     assert.deepEqual(left, [], `SIGINT left ${left.join(', ')} in ${scratch}`);
     assert.equal(fs.existsSync(path.join(decoy, 'keep.txt')), true, 'decoy profile was removed');
     assert.equal(fs.existsSync(profile), true, 'outside Chromium profile was removed');
     assert.equal(commandUsesPath(profile), true, 'outside browser died');
-    await closeChild(child, 15_000);
+    await stopHelper(child, 15_000);
   },
 );
 
@@ -845,18 +1041,26 @@ function waitForBrowser(rootPid, timeoutMs) {
   });
 }
 
-function closeChild(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  try {
-    child.stdin.write('close\n');
-    child.stdin.end();
-  } catch {
-    // stdin may already be closed.
+function waitForExitCode(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
   }
-  return waitForExit(child, timeoutMs).then(
-    () => {},
-    () => {},
-  );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      fn();
+    };
+    const onExit = (code, signal) => finish(() => resolve({ code, signal }));
+    const timer = setTimeout(() => finish(() => reject(new Error('child did not exit'))), timeoutMs);
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish(() => resolve({ code: child.exitCode, signal: child.signalCode }));
+    }
+  });
 }
 
 function waitForUserDataDir(prefix, timeoutMs) {
@@ -898,26 +1102,6 @@ function readUserDataDir(prefix) {
     if (dir && (dir === prefix || dir.startsWith(`${prefix}${path.sep}`))) return dir;
   }
   return '';
-}
-
-function waitForExit(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
-  }
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // The process may already have exited.
-      }
-      reject(new Error('child did not exit'));
-    }, timeoutMs);
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal });
-    });
-  });
 }
 
 function hashTree(dir) {
