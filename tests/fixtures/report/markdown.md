@@ -31,6 +31,8 @@
 | baseline-red | 0 |
 | not-run | 0 |
 
+Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
+
 ## Checks Run
 
 - weak-assertion

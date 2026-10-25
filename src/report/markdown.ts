@@ -1,4 +1,6 @@
 import type { Report, ReportFinding, ReportTest } from './model.js';
+import { trustNote } from './model.js';
+import { collapseNewlines } from './paths.js';
 
 export function formatMarkdown(report: Report): string {
   const lines: string[] = [];
@@ -10,8 +12,8 @@ export function formatMarkdown(report: Report): string {
   lines.push('');
   lines.push('## Project');
   lines.push('');
-  lines.push(`- Directory: ${report.project.dir}`);
-  lines.push(`- Config: ${report.project.configFile ?? 'none'}`);
+  lines.push(`- Directory: ${inline(report.project.dir)}`);
+  lines.push(`- Config: ${report.project.configFile === null ? 'none' : inline(report.project.configFile)}`);
   lines.push(`- Specs: ${report.project.specCount}`);
   lines.push(`- Tests: ${report.project.testCount}`);
   lines.push('');
@@ -35,6 +37,11 @@ export function formatMarkdown(report: Report): string {
   lines.push(`| baseline-red | ${report.summary.verdict['baseline-red']} |`);
   lines.push(`| not-run | ${report.summary.verdict['not-run']} |`);
   lines.push('');
+  const note = trustNote(report.checksRun);
+  if (note) {
+    lines.push(note);
+    lines.push('');
+  }
   lines.push('## Checks Run');
   lines.push('');
   if (report.checksRun.length === 0) lines.push('None.');
@@ -49,9 +56,9 @@ export function formatMarkdown(report: Report): string {
 
 function formatTest(test: ReportTest): string[] {
   const lines: string[] = [];
-  lines.push(`### ${test.titlePath.join(' > ')}`);
+  lines.push(`### ${inline(test.titlePath.join(' > '))}`);
   lines.push('');
-  lines.push(`- File: ${test.file}:${test.line}`);
+  lines.push(`- File: ${inline(test.file)}:${test.line}`);
   lines.push(`- Verdict: ${test.verdict}`);
   if (test.findings.length === 0) {
     lines.push('- Findings: none');
@@ -65,19 +72,34 @@ function formatTest(test: ReportTest): string[] {
 
 function formatFinding(finding: ReportFinding): string[] {
   const lines = [
-    `#### ${finding.ruleId}`,
+    `#### ${inline(finding.ruleId)}`,
     '',
     `- Severity: ${finding.severity}`,
-    `- Check: ${finding.check}`,
-    `- Location: ${finding.file}:${finding.line}:${finding.column}`,
-    `- Message: ${finding.message}`,
+    `- Check: ${inline(finding.check)}`,
+    `- Location: ${inline(finding.file)}:${finding.line}:${finding.column}`,
+    `- Message: ${inline(finding.message)}`,
   ];
-  if (finding.relatedLintRule) lines.push(`- Related Lint Rule: ${finding.relatedLintRule}`);
+  if (finding.relatedLintRule) lines.push(`- Related Lint Rule: ${inline(finding.relatedLintRule)}`);
   lines.push('- Evidence:', '', fence(finding.evidence), '', '- Fix:', '', fence(finding.fixHint), '');
   return lines;
 }
 
+/** One backtick longer than the longest backtick run in `text`, and at least three. */
 function fence(text: string): string {
-  const marker = text.includes('```') ? '````' : '```';
+  const runs = text.match(/`+/g);
+  const longest = runs ? Math.max(...runs.map((run) => run.length)) : 0;
+  const marker = '`'.repeat(Math.max(3, longest + 1));
   return `${marker}\n${text}\n${marker}`;
+}
+
+/** Collapse newlines, then escape Markdown and HTML specials so user text cannot change the document. */
+function inline(value: string): string {
+  const collapsed = collapseNewlines(value);
+  const marked = collapsed.replace(/[\\`*_{}[\]()#+!|]/g, (char) => `\\${char}`);
+  return marked
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }

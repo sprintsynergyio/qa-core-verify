@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { InventoryTest, SkippedDescribe, TestModifier } from '../inventory/parse.js';
 import type { Finding, Severity } from '../rules/types.js';
 import { ownerIdFor } from '../rules/types.js';
-import { toDisplayPath } from './console.js';
+import { projectDirLabel, toProjectPath } from './paths.js';
 import { ToolError } from '../tool-error.js';
 
 export type Verdict = 'trusted' | 'review' | 'untrusted' | 'baseline-red' | 'not-run';
@@ -54,8 +54,17 @@ export interface Report {
   tests: ReportTest[];
 }
 
+export const TRUST_NOTE =
+  'Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.';
+
+/** Shown while locator or cannot-fail is absent. Omitted once both have run. */
+export function trustNote(checksRun: readonly string[]): string | undefined {
+  const ran = new Set(checksRun);
+  if (ran.has('locator') && ran.has('cannot-fail')) return undefined;
+  return TRUST_NOTE;
+}
+
 export interface ReportInput {
-  cwd: string;
   projectDir: string;
   configFile: string | undefined;
   specCount: number;
@@ -78,12 +87,16 @@ interface Row {
   findings: Finding[];
 }
 
-/** ISO 8601 in UTC with a numeric offset. */
+/** ISO 8601 in local time, with the offset of `date` (for example `+05:00`). */
 export function formatIsoOffset(date: Date): string {
-  const pad = (value: number, width = 2): string => String(value).padStart(width, '0');
+  const pad = (value: number, width = 2): string => String(Math.trunc(Math.abs(value))).padStart(width, '0');
+  const offsetMinutesTotal = -date.getTimezoneOffset();
+  const sign = offsetMinutesTotal >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutesTotal);
   return (
-    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
-    `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.${pad(date.getUTCMilliseconds(), 3)}+00:00`
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}` +
+    `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`
   );
 }
 
@@ -107,10 +120,9 @@ export function readToolIdentity(): { name: string; version: string } {
 }
 
 /**
- * Verdicts for a static run. `baseline-red` is reserved for a later check that the test
- * already fails on the unchanged app, so this function does not return it.
- * A skipped or fixme test, and a `test.describe.skip` block, are `not-run` even when they also have findings.
- * Any error finding makes a test that does run `untrusted`. Warn and info findings make it `review`.
+ * Verdicts from PLAN section 4. `baseline-red` is reserved for a later runtime check, so this
+ * function does not return it. `not-run` is the static extension for skip, fixme, and describe.skip.
+ * Info findings do not lower a test that ran: trusted means nothing at warn or above.
  */
 export function verdictFor(
   kind: 'test' | 'describe',
@@ -119,7 +131,7 @@ export function verdictFor(
 ): Verdict {
   if (kind === 'describe' || modifiers.includes('skip') || modifiers.includes('fixme')) return 'not-run';
   if (findings.some((finding) => finding.severity === 'error')) return 'untrusted';
-  if (findings.length > 0) return 'review';
+  if (findings.some((finding) => finding.severity === 'warn')) return 'review';
   return 'trusted';
 }
 
@@ -143,7 +155,7 @@ export function buildReport(input: ReportInput): Report {
   const tool = readToolIdentity();
   const rows = rowsFor(input);
   const tests = rows
-    .map((row) => toReportTest(row, input.cwd))
+    .map((row) => toReportTest(row, input.projectDir))
     .sort((left, right) => {
       const byFile = left.file.localeCompare(right.file);
       if (byFile !== 0) return byFile;
@@ -156,8 +168,8 @@ export function buildReport(input: ReportInput): Report {
     startedAt: formatIsoOffset(input.startedAt),
     finishedAt: formatIsoOffset(input.finishedAt),
     project: {
-      dir: toDisplayPath(input.projectDir, input.cwd),
-      configFile: input.configFile ? toDisplayPath(input.configFile, input.cwd) : null,
+      dir: projectDirLabel(input.projectDir),
+      configFile: input.configFile ? toProjectPath(input.configFile, input.projectDir) : null,
       specCount: input.specCount,
       testCount: input.tests.length,
     },
@@ -201,24 +213,24 @@ function rowsFor(input: ReportInput): Row[] {
   return rows;
 }
 
-function toReportTest(row: Row, cwd: string): ReportTest {
-  const file = toDisplayPath(row.file, cwd);
+function toReportTest(row: Row, projectDir: string): ReportTest {
+  const file = toProjectPath(row.file, projectDir);
   return {
     id: `${file}:${row.line}:${row.column}:${row.titlePath.join(' > ')}`,
     file,
     line: row.line,
     titlePath: [...row.titlePath],
     verdict: verdictFor(row.kind, row.modifiers, row.findings),
-    findings: row.findings.map((finding) => toReportFinding(finding, cwd)),
+    findings: row.findings.map((finding) => toReportFinding(finding, projectDir)),
   };
 }
 
-function toReportFinding(finding: Finding, cwd: string): ReportFinding {
+function toReportFinding(finding: Finding, projectDir: string): ReportFinding {
   const report: ReportFinding = {
     ruleId: finding.ruleId,
     check: finding.check,
     severity: finding.severity,
-    file: toDisplayPath(finding.file, cwd),
+    file: toProjectPath(finding.file, projectDir),
     line: finding.line,
     column: finding.column,
     message: finding.message,

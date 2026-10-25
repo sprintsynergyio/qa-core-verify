@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Verdicts follow PLAN section 4. Info findings stay trusted. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
+- Report paths are relative to the project folder. `project.dir` is the folder's base name.
+- Markdown escapes titles, file names, and messages. Timestamps use local time and its offset. Reports name the checks that ran.
 - Write a console report, a JSON report with schemaVersion 1, a Markdown report, and a single-file HTML report.
 - QCV-W003 flags an unawaited async helper and an unawaited test.step block that contain an assertion, and it flags unawaited resolves and rejects matchers. An awaited then, catch, or finally chain is waiting. The message says the async assertion is not awaited.
 - A const alias of expect in the file, a describe callback, or the test is treated as expect.

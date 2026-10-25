@@ -1,18 +1,20 @@
-import path from 'node:path';
 import type { Report, ReportSummary } from './model.js';
+import { collapseNewlines } from './paths.js';
 
 export function formatConsoleReport(report: Report, reportPaths: readonly string[]): string {
   const lines: string[] = [];
   for (const test of report.tests) {
-    lines.push(`${test.verdict}  ${test.file}:${test.line}  ${test.titlePath.join(' > ')}`);
+    const title = test.titlePath.map((part) => collapseNewlines(part)).join(' > ');
+    lines.push(`${test.verdict}  ${collapseNewlines(test.file)}:${test.line}  ${title}`);
     for (const finding of test.findings) {
-      lines.push(`  ${finding.ruleId}  ${finding.severity}  ${finding.line}:${finding.column}  ${finding.message}`);
+      lines.push(`  ${finding.ruleId}  ${finding.severity}  ${finding.line}:${finding.column}  ${collapseNewlines(finding.message)}`);
       lines.push(`    Evidence: ${oneLine(finding.evidence)}`);
       lines.push(`    Fix: ${oneLine(finding.fixHint)}`);
     }
     lines.push('');
   }
   lines.push(summaryLine(report.summary));
+  lines.push(checksLine(report.checksRun));
   lines.push(reportsLine(reportPaths));
   return lines.join('\n');
 }
@@ -33,15 +35,14 @@ export function summaryLine(summary: ReportSummary): string {
   ].join(' ');
 }
 
-export function reportsLine(reportPaths: readonly string[]): string {
-  if (reportPaths.length === 0) return 'Reports: none.';
-  return `Reports: ${reportPaths.map((file) => file.split(path.sep).join('/')).join(', ')}.`;
+export function checksLine(checksRun: readonly string[]): string {
+  if (checksRun.length === 0) return 'Checks run: none.';
+  return `Checks run: ${checksRun.join(', ')}.`;
 }
 
-export function toDisplayPath(file: string, cwd: string): string {
-  const relative = path.relative(cwd, file);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) return file.split(path.sep).join('/');
-  return relative.split(path.sep).join('/');
+export function reportsLine(reportPaths: readonly string[]): string {
+  if (reportPaths.length === 0) return 'Reports: none.';
+  return `Reports: ${reportPaths.map((file) => collapseNewlines(file)).join(', ')}.`;
 }
 
 function oneLine(text: string): string {

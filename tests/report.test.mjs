@@ -5,10 +5,12 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { run } from '../dist/cli.js';
 import { formatConsoleReport } from '../dist/report/console.js';
 import { formatHtml } from '../dist/report/html.js';
 import { formatMarkdown } from '../dist/report/markdown.js';
-import { verdictFor } from '../dist/report/model.js';
+import { TRUST_NOTE, formatIsoOffset, verdictFor } from '../dist/report/model.js';
+import { projectDirLabel } from '../dist/report/paths.js';
 import { validateSchema } from './schema-validate.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -65,22 +67,23 @@ const fixedReport = {
 
 test('verdict mapping follows severity and skip', () => {
   assert.equal(verdictFor('test', [], []), 'trusted');
-  assert.equal(verdictFor('test', [], [{ severity: 'info' }]), 'review');
+  assert.equal(verdictFor('test', [], [{ severity: 'info' }]), 'trusted');
   assert.equal(verdictFor('test', [], [{ severity: 'warn' }]), 'review');
+  assert.equal(verdictFor('test', [], [{ severity: 'warn' }, { severity: 'info' }]), 'review');
   assert.equal(verdictFor('test', [], [{ severity: 'error' }]), 'untrusted');
-  assert.equal(verdictFor('test', [], [{ severity: 'error' }, { severity: 'info' }]), 'untrusted');
+  assert.equal(verdictFor('test', [], [{ severity: 'error' }, { severity: 'warn' }]), 'untrusted');
   assert.equal(verdictFor('test', ['skip'], [{ severity: 'error' }]), 'not-run');
   assert.equal(verdictFor('test', ['fixme'], []), 'not-run');
-  assert.equal(verdictFor('test', ['only'], [{ severity: 'info' }]), 'review');
+  assert.equal(verdictFor('test', ['only'], [{ severity: 'info' }]), 'trusted');
   assert.equal(verdictFor('describe', ['skip'], [{ severity: 'info' }]), 'not-run');
   assert.equal(verdictFor('test', [], [{ severity: 'error' }]) === 'baseline-red', false);
 });
 
 test('console and markdown snapshots stay fixed', () => {
   const consoleText = formatConsoleReport(fixedReport, [
-    'fixture/.qa-core/verify/report.json',
-    'fixture/.qa-core/verify/report.md',
-    'fixture/.qa-core/verify/report.html',
+    '.qa-core/verify/report.json',
+    '.qa-core/verify/report.md',
+    '.qa-core/verify/report.html',
   ]);
   const markdown = formatMarkdown(fixedReport);
   assert.equal(consoleText, fs.readFileSync(path.join(repoRoot, 'tests/fixtures/report/console.txt'), 'utf8'));
@@ -151,6 +154,9 @@ test('the saucedemo run writes three files and the json matches the schema', () 
   assert.deepEqual(validateSchema(schema, report), []);
   assert.deepEqual(report.summary, recomputed(report));
   assert.equal(report.summary.verdict['baseline-red'], 0);
+  assert.equal(report.project.dir, 'saucedemo');
+  assert.equal(report.project.configFile, 'playwright.config.ts');
+  assert.equal(report.tests.every((entry) => entry.file.startsWith('tests/')), true);
   assert.equal(report.checksRun.includes('weak-assertion'), true);
   assert.equal(report.project.testCount, report.tests.filter((entry) => !entry.findings.some((finding) => finding.message === 'Describe block is skipped.')).length);
   const html = fs.readFileSync(path.join(dir, 'report.html'), 'utf8');
@@ -187,3 +193,259 @@ test('the schema rejects a report with an extra field', () => {
   const errors = validateSchema(schema, broken);
   assert.equal(errors.some((error) => error.includes('extra')), true);
 });
+
+test('describe.only with only an info finding is trusted', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-only-'));
+  fs.writeFileSync(
+    path.join(dir, 'only.spec.ts'),
+    [
+      "import { test, expect } from '@playwright/test';",
+      "test.describe.only('b', () => {",
+      "  test('t', async ({ page }) => {",
+      "    await expect(page).toHaveTitle('x');",
+      '  });',
+      '});',
+      '',
+    ].join('\n'),
+  );
+  const result = runCli(['--json', '--format', 'json', dir]);
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.tests.length, 1);
+  assert.deepEqual(report.tests[0].titlePath, ['b', 't']);
+  assert.equal(report.tests[0].verdict, 'trusted');
+  assert.equal(report.tests[0].findings.length, 1);
+  assert.equal(report.tests[0].findings[0].ruleId, 'QCV-W009');
+  assert.equal(report.tests[0].findings[0].severity, 'info');
+  assert.equal(report.summary.verdict.trusted, 1);
+  assert.equal(report.summary.verdict.review, 0);
+});
+
+test('reports name the checks that ran', () => {
+  const markdown = formatMarkdown(fixedReport);
+  const html = formatHtml(fixedReport);
+  const consoleText = formatConsoleReport(fixedReport, []);
+  assert.match(markdown, /## Checks Run\n\n- weak-assertion/);
+  assert.equal(markdown.includes(TRUST_NOTE), true);
+  assert.equal(html.includes('Checks run: weak-assertion.'), true);
+  assert.equal(html.includes(TRUST_NOTE), true);
+  assert.match(html, /<header>[\s\S]*Checks run:[\s\S]*<\/header>/);
+  assert.match(consoleText, /Checks run: weak-assertion\./);
+  const full = { ...fixedReport, checksRun: ['weak-assertion', 'locator', 'cannot-fail'] };
+  assert.equal(formatMarkdown(full).includes(TRUST_NOTE), false);
+  assert.equal(formatHtml(full).includes(TRUST_NOTE), false);
+  assert.match(formatConsoleReport(full, []), /Checks run: weak-assertion, locator, cannot-fail\./);
+  const locatorOnly = { ...fixedReport, checksRun: ['weak-assertion', 'locator'] };
+  assert.equal(formatMarkdown(locatorOnly).includes(TRUST_NOTE), true);
+});
+
+test('timestamps use local time and a +05:00 offset', () => {
+  const date = new Date(2026, 0, 15, 5, 30, 9, 8);
+  const text = formatIsoOffset(date);
+  assert.equal(text.slice(0, 23), '2026-01-15T05:30:09.008');
+  const offset = -date.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const absolute = Math.abs(offset);
+  const hours = String(Math.floor(absolute / 60)).padStart(2, '0');
+  const minutes = String(absolute % 60).padStart(2, '0');
+  assert.equal(text.slice(23), `${sign}${hours}:${minutes}`);
+
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      "import { formatIsoOffset } from './dist/report/model.js'; process.stdout.write(formatIsoOffset(new Date('2026-01-15T00:00:00.000Z')));",
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, TZ: 'Asia/Karachi' },
+    },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, '2026-01-15T05:00:00.000+05:00');
+});
+
+test('the project directory label is the base name', () => {
+  assert.equal(projectDirLabel('/'), '.');
+  assert.equal(projectDirLabel('/tmp/saucedemo/'), 'saucedemo');
+});
+
+const probeReport = {
+  schemaVersion: 1,
+  tool: { name: 'qa-core-verify', version: '0.0.1' },
+  startedAt: '2026-01-15T05:00:00.000+05:00',
+  finishedAt: '2026-01-15T05:00:01.000+05:00',
+  project: {
+    dir: 'probes',
+    configFile: 'playwright.config.ts',
+    specCount: 1,
+    testCount: 4,
+  },
+  checksRun: ['weak-assertion'],
+  summary: {
+    severity: { error: 1, warn: 0, info: 0 },
+    verdict: { trusted: 3, review: 0, untrusted: 1, 'baseline-red': 0, 'not-run': 0 },
+  },
+  tests: [
+    {
+      id: 'img',
+      file: 'bad/<img>.spec.ts',
+      line: 1,
+      titlePath: ['<img src=x onerror=alert(4)>'],
+      verdict: 'trusted',
+      findings: [],
+    },
+    {
+      id: 'lines',
+      file: 'dir/file\nname.spec.ts',
+      line: 2,
+      titlePath: ['line one\nline two'],
+      verdict: 'trusted',
+      findings: [],
+    },
+    {
+      id: 'marks',
+      file: 'pipe.spec.ts',
+      line: 3,
+      titlePath: ['a | b', '<b>bold</b>'],
+      verdict: 'trusted',
+      findings: [],
+    },
+    {
+      id: 'link',
+      file: 'link.spec.ts',
+      line: 4,
+      titlePath: ['[link](javascript:...)'],
+      verdict: 'untrusted',
+      findings: [
+        {
+          ruleId: 'QCV-W001',
+          check: 'weak-assertion',
+          severity: 'error',
+          file: 'link.spec.ts',
+          line: 4,
+          column: 1,
+          message: 'sees <b> and | and [link](javascript:...)',
+          evidence: 'seen ``` and ````` here',
+          fixHint: 'fix ```` hint',
+        },
+      ],
+    },
+  ],
+};
+
+test('markdown escapes titles, paths, and messages', () => {
+  const markdown = formatMarkdown(probeReport);
+  const consoleText = formatConsoleReport(probeReport, ['.qa-core/verify/report.md']);
+  assert.equal(markdown, fs.readFileSync(path.join(repoRoot, 'tests/fixtures/report/markdown-probes.md'), 'utf8'));
+  assert.equal(consoleText, fs.readFileSync(path.join(repoRoot, 'tests/fixtures/report/console-probes.txt'), 'utf8'));
+  assert.equal(markdown.includes('<img'), false);
+  assert.equal(markdown.includes('<b>'), false);
+  assert.equal(markdown.includes('[link](javascript:'), false);
+  assert.equal(markdown.includes('\nline two'), false);
+  assert.match(markdown, /^``````$/m);
+  assert.equal(consoleText.includes('\nline two'), false);
+  assert.match(consoleText, /line one line two/);
+  assert.match(consoleText, /dir\/file name\.spec\.ts/);
+});
+
+test('report paths stay relative to the project from any working directory', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-paths-'));
+  fs.mkdirSync(path.join(project, 'nested'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: '.' });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'a.spec.ts'),
+    "import { test, expect } from '@playwright/test';\ntest('kept', async ({ page }) => { await expect(page).toHaveTitle('x'); });\n",
+  );
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-path-out-'));
+  const started = new Date(2026, 0, 15, 1, 2, 3, 4);
+  const finished = new Date(2026, 0, 15, 1, 2, 8, 9);
+  const clock = () => {
+    const times = [started, finished];
+    let index = 0;
+    return () => {
+      const value = times[Math.min(index, times.length - 1)];
+      index += 1;
+      return value;
+    };
+  };
+  const args = (projectArg) => ['--format', 'console,json,md,html', '--out', out, projectArg];
+  const inside = captureRun(args('.'), project, clock());
+  const insideFiles = readReports(out);
+  const nested = captureRun(args('..'), path.join(project, 'nested'), clock());
+  const nestedFiles = readReports(out);
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-outside-'));
+  const outside = captureRun(args(project), outsideDir, clock());
+  const outsideFiles = readReports(out);
+
+  assert.equal(inside.status, 0, inside.err);
+  assert.equal(nested.status, 0, nested.err);
+  assert.equal(outside.status, 0, outside.err);
+  assert.equal(nested.out, inside.out);
+  assert.equal(outside.out, inside.out);
+  assert.equal(nested.err, inside.err);
+  assert.equal(outside.err, inside.err);
+  assert.deepEqual(nestedFiles, insideFiles);
+  assert.deepEqual(outsideFiles, insideFiles);
+
+  const report = JSON.parse(insideFiles.json);
+  assert.equal(report.project.dir, path.basename(project));
+  assert.notEqual(report.project.dir, '');
+  assert.equal(report.project.dir.startsWith('/'), false);
+  assert.equal(report.project.configFile, 'playwright.config.ts');
+  assert.equal(report.tests[0].file, 'a.spec.ts');
+  assert.equal(report.startedAt, formatIsoOffset(started));
+  assert.equal(report.finishedAt, formatIsoOffset(finished));
+  for (const [label, text] of [
+    ['console', inside.out],
+    ['json', insideFiles.json],
+    ['markdown', insideFiles.md],
+    ['html', insideFiles.html],
+  ]) {
+    assertNoAbsolutePath(text, label);
+    assert.equal(text.includes(project), false, label);
+  }
+});
+
+function captureRun(argv, cwd, now) {
+  let out = '';
+  let err = '';
+  const stdoutWrite = process.stdout.write;
+  const stderrWrite = process.stderr.write;
+  process.stdout.write = (chunk) => {
+    out += chunk;
+    return true;
+  };
+  process.stderr.write = (chunk) => {
+    err += chunk;
+    return true;
+  };
+  try {
+    const status = run(argv, cwd, now);
+    return { status, out, err };
+  } finally {
+    process.stdout.write = stdoutWrite;
+    process.stderr.write = stderrWrite;
+  }
+}
+
+function readReports(dir) {
+  return {
+    json: fs.readFileSync(path.join(dir, 'report.json'), 'utf8'),
+    md: fs.readFileSync(path.join(dir, 'report.md'), 'utf8'),
+    html: fs.readFileSync(path.join(dir, 'report.html'), 'utf8'),
+  };
+}
+
+function assertNoAbsolutePath(text, label) {
+  for (const token of text.split(/[\s"'`,<>]+/)) {
+    const absolute = token.startsWith('/') && token.slice(1).includes('/');
+    assert.equal(absolute, false, `${label}: ${token}`);
+    assert.equal(/^[A-Za-z]:[\\/]/.test(token), false, `${label}: ${token}`);
+  }
+}

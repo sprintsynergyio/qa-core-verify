@@ -1,5 +1,6 @@
 import type { Report, ReportFinding, Verdict } from './model.js';
-import { VERDICTS } from './model.js';
+import { VERDICTS, trustNote } from './model.js';
+import { collapseNewlines } from './paths.js';
 
 const VERDICT_LABEL: Record<Verdict, string> = {
   trusted: 'Trusted',
@@ -36,12 +37,16 @@ export function formatHtml(report: Report): string {
     `<p>${escapeHtml(report.tool.name)} ${escapeHtml(report.tool.version)}</p>`,
   );
   parts.push(`<p>Started ${escapeHtml(report.startedAt)}. Finished ${escapeHtml(report.finishedAt)}.</p>`);
+  const checks = report.checksRun.length === 0 ? 'none' : report.checksRun.join(', ');
+  parts.push(`<p>Checks run: ${escapeHtml(checks)}.</p>`);
+  const note = trustNote(report.checksRun);
+  if (note) parts.push(`<p>${escapeHtml(note)}</p>`);
   parts.push('</header>');
   parts.push('<section>');
   parts.push('<h2>Project</h2>');
   parts.push('<ul>');
-  parts.push(`<li>Directory: ${escapeHtml(report.project.dir)}</li>`);
-  parts.push(`<li>Config: ${escapeHtml(report.project.configFile ?? 'none')}</li>`);
+  parts.push(`<li>Directory: ${escapeHtml(collapseNewlines(report.project.dir))}</li>`);
+  parts.push(`<li>Config: ${escapeHtml(collapseNewlines(report.project.configFile ?? 'none'))}</li>`);
   parts.push(`<li>Specs: ${report.project.specCount}</li>`);
   parts.push(`<li>Tests: ${report.project.testCount}</li>`);
   parts.push('</ul>');
@@ -88,9 +93,9 @@ export function formatHtml(report: Report): string {
   for (const test of report.tests) {
     const ruleClasses = [...new Set(test.findings.map((finding) => `rule-${finding.ruleId}`))].join(' ');
     parts.push(`<article class="test verdict-${test.verdict} ${ruleClasses}">`);
-    parts.push(`<h3>${escapeHtml(test.titlePath.join(' > '))}</h3>`);
+    parts.push(`<h3>${escapeHtml(collapseNewlines(test.titlePath.join(' > ')))}</h3>`);
     parts.push(
-      `<p class="meta">${escapeHtml(test.file)}:${test.line} <span class="badge verdict-${test.verdict}">${escapeHtml(test.verdict)}</span></p>`,
+      `<p class="meta">${escapeHtml(collapseNewlines(test.file))}:${test.line} <span class="badge verdict-${test.verdict}">${escapeHtml(test.verdict)}</span></p>`,
     );
     if (test.findings.length === 0) parts.push('<p>No findings.</p>');
     for (const finding of test.findings) parts.push(findingHtml(finding));
@@ -106,8 +111,8 @@ function findingHtml(finding: ReportFinding): string {
   const lines = [
     `<section class="finding rule-${escapeHtml(finding.ruleId)}">`,
     `<h4>${escapeHtml(finding.ruleId)} <span class="severity">${escapeHtml(finding.severity)}</span></h4>`,
-    `<p>${escapeHtml(finding.file)}:${finding.line}:${finding.column}</p>`,
-    `<p>${escapeHtml(finding.message)}</p>`,
+    `<p>${escapeHtml(collapseNewlines(finding.file))}:${finding.line}:${finding.column}</p>`,
+    `<p>${escapeHtml(collapseNewlines(finding.message))}</p>`,
     '<p class="label">Evidence</p>',
     `<pre>${escapeHtml(finding.evidence)}</pre>`,
     '<p class="label">Fix</p>',

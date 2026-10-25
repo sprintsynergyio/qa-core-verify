@@ -6,17 +6,21 @@ The checker writes one report in four forms. The JSON file and `--json` use this
 
 `tool.name` is the package name. `tool.version` is the package version. Both are read from `package.json`.
 
-`startedAt` and `finishedAt` are ISO 8601 timestamps in UTC with a numeric offset, for example `2026-10-25T00:00:00.000+00:00`.
+`startedAt` and `finishedAt` are ISO 8601 timestamps in local time. The offset is the offset of that local time, for example `+05:00` when the machine is five hours ahead of UTC.
 
 ## Project
 
-`project.dir` is the project directory. `project.configFile` is the Playwright config file when one is present, and `null` when it is not. Paths are relative to the directory where the command was run.
+`project.dir` is the base name of the project folder. It is `.` when that name is empty, which is the filesystem root. It is never an absolute path, and it does not change with the current working directory.
+
+`project.configFile` is the Playwright config file when one is present, and `null` when it is not. Every other file path in the report is also relative to the project folder and uses `/` separators. That includes each test `file`, each finding `file`, the file portion of `id`, and the report paths on the console.
 
 `project.specCount` is the number of spec files that were scanned. `project.testCount` is the number of `test()` calls. A `test.describe.skip` block is not a test, so it is not included in `testCount`.
 
 ## Checks Run
 
 `checksRun` lists the checks that ran. This version runs `weak-assertion`. `locator` and `cannot-fail` are in the schema for later checks and are not run yet.
+
+The console prints `Checks run:` with that list. The Markdown report lists it under Checks Run. The HTML report prints it in the header. While `locator` or `cannot-fail` is absent, the Markdown summary and the HTML header also say: Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run.
 
 ## Tests
 
@@ -34,13 +38,14 @@ A `test.describe.skip` row exists so its single finding has a place in `tests`. 
 
 ## Verdict
 
-This version assigns one verdict to each row:
+PLAN section 4 assigns one verdict to each test:
 
-- `not-run` when the row is a `test.describe.skip` block, or the test has `skip` or `fixme`. Findings on that row are still listed.
-- `untrusted` when the row is not `not-run` and any finding has severity error.
-- `review` when the row has no error finding and at least one warn or info finding.
-- `trusted` when the row has no findings.
-- `baseline-red` is reserved for a later check that the test already fails on the unchanged app. A static run does not assign it, so its count is 0.
+- `trusted` when the row has no finding at warn level or above. Info findings, including QCV-W000, QCV-W009, and QCV-W010, stay `trusted`.
+- `review` when the row has at least one warn finding and no error finding.
+- `untrusted` when the row has at least one error finding.
+- `baseline-red` and `not-run` are for tests a runtime check could not evaluate. This static checker does not assign `baseline-red`, so that count stays 0.
+
+`not-run` is extended here for rows the static checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
 
 ## Files
 

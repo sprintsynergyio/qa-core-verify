@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -105,7 +106,7 @@ function runPipeline() {
     tests.push(...inventory.tests);
     skippedDescribes.push(...inventory.skippedDescribes);
   }
-  return { discovery, tests, findings: collectFindings(tests, skippedDescribes) };
+  return { discovery, tests, skippedDescribes, findings: collectFindings(tests, skippedDescribes) };
 }
 
 function findingKey(file, line, ruleId) {
@@ -206,15 +207,19 @@ test('QCV-W001 through QCV-W010 are active, and the skipped test records why it 
 });
 
 test('the demo config is read and the cli agrees with the static pipeline', () => {
-  const { discovery, tests, findings } = runPipeline();
+  const { discovery, tests, skippedDescribes, findings } = runPipeline();
   assert.match(discovery.method, /Playwright config playwright\.config\.ts/);
   assert.match(discovery.method, /testDir '\.\/tests'/);
   const before = hashTree(projectDir);
-  const result = spawnSync(process.execPath, ['dist/cli.js', 'example-project/saucedemo'], {
+  const hadRuntimeDir = fs.existsSync(path.join(projectDir, '.qa-core'));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-verify-golden-'));
+  const result = spawnSync(process.execPath, ['dist/cli.js', 'example-project/saucedemo', '--out', out], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
   assert.equal(hashTree(projectDir), before);
+  assert.equal(fs.existsSync(path.join(projectDir, '.qa-core')), hadRuntimeDir);
+  assert.equal(fs.existsSync(path.join(out, 'report.json')), true);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /opens the login page and stops/);
   assert.match(result.stdout, /waits and then ends/);
@@ -226,6 +231,9 @@ test('the demo config is read and the cli agrees with the static pipeline', () =
   assert.doesNotMatch(result.stdout, /untrusted[^\n]*add to cart updates the cart badge/);
   assert.doesNotMatch(result.stdout, /untrusted[^\n]*locked out user sees the error/);
   assert.doesNotMatch(result.stdout, /untrusted[^\n]*checkout overview shows the backpack item total/);
+  assert.equal(result.stdout.includes(projectDir), false);
+  const reportRel = path.relative(projectDir, path.join(out, 'report.json')).split(path.sep).join('/');
+  assert.match(result.stdout, new RegExp(`Reports: ${reportRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   const counts = { error: 0, warn: 0, info: 0 };
   const verdicts = { trusted: 0, review: 0, untrusted: 0, 'baseline-red': 0, 'not-run': 0 };
   for (const finding of findings) counts[finding.severity] += 1;
@@ -233,9 +241,10 @@ test('the demo config is read and the cli agrees with the static pipeline', () =
     const owned = findings.filter((finding) => finding.testTitle === entry.titlePath.join(' > ') && finding.file === entry.file);
     if (entry.modifiers.includes('skip') || entry.modifiers.includes('fixme')) verdicts['not-run'] += 1;
     else if (owned.some((finding) => finding.severity === 'error')) verdicts.untrusted += 1;
-    else if (owned.length > 0) verdicts.review += 1;
+    else if (owned.some((finding) => finding.severity === 'warn')) verdicts.review += 1;
     else verdicts.trusted += 1;
   }
+  verdicts['not-run'] += skippedDescribes.length;
   const summary = [
     'Summary:',
     `${verdicts.trusted} trusted,`,
@@ -248,6 +257,6 @@ test('the demo config is read and the cli agrees with the static pipeline', () =
     countLabel(counts.info, 'info finding', 'info findings') + '.',
   ].join(' ');
   assert.ok(result.stdout.includes(summary), result.stdout);
-  assert.match(result.stdout, /Reports: example-project\/saucedemo\/\.qa-core\/verify\/report\.json/);
+  assert.match(result.stdout, /Checks run: weak-assertion\./);
   assert.doesNotMatch(result.stderr, /No tests found/);
 });

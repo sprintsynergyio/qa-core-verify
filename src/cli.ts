@@ -7,8 +7,8 @@ import { loadVerifyConfig } from './config.js';
 import { exitCodeFor, isSeverity } from './exit-code.js';
 import { discoverSpecs, findPlaywrightConfig } from './inventory/discover.js';
 import { parseSpecFile, type InventoryTest, type SkippedDescribe } from './inventory/parse.js';
-import { toDisplayPath } from './report/console.js';
 import { buildReport } from './report/model.js';
+import { toProjectPath } from './report/paths.js';
 import { consoleText, parseFormats, reportJson, writeReportFiles, type ReportFormat } from './report/write.js';
 import { CHECKS_RUN, collectFindings } from './rules/index.js';
 import type { Severity } from './rules/types.js';
@@ -44,7 +44,8 @@ interface CliOptions {
   specArgs: string[];
 }
 
-export function run(argv: readonly string[], cwd = process.cwd()): number {
+/** `now` supplies `startedAt` and `finishedAt`. Tests pass a fixed clock. */
+export function run(argv: readonly string[], cwd = process.cwd(), now: () => Date = () => new Date()): number {
   let options: CliOptions;
   try {
     options = parseCli(argv);
@@ -62,7 +63,7 @@ export function run(argv: readonly string[], cwd = process.cwd()): number {
     return 2;
   }
 
-  const startedAt = new Date();
+  const startedAt = now();
   try {
     const projectDir = path.resolve(cwd, options.projectDir);
     if (!fs.existsSync(projectDir)) {
@@ -85,7 +86,6 @@ export function run(argv: readonly string[], cwd = process.cwd()): number {
     const emptyNotice = emptySuiteNotice(discovery.files.length, tests.length);
     const configFile = findPlaywrightConfig(projectDir);
     const report = buildReport({
-      cwd,
       projectDir,
       configFile,
       specCount: discovery.files.length,
@@ -94,10 +94,10 @@ export function run(argv: readonly string[], cwd = process.cwd()): number {
       findings,
       checksRun: CHECKS_RUN,
       startedAt,
-      finishedAt: new Date(),
+      finishedAt: now(),
     });
     const outDir = options.outDir ? path.resolve(cwd, options.outDir) : path.join(projectDir, '.qa-core', 'verify');
-    const written = writeReportFiles(report, outDir, options.formats).map((file) => toDisplayPath(file, cwd));
+    const written = writeReportFiles(report, outDir, options.formats).map((file) => toProjectPath(file, projectDir));
 
     console.error(discovery.method);
     if (emptyNotice) console.error(emptyNotice);

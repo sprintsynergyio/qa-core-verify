@@ -1,0 +1,14 @@
+trusted  bad/<img>.spec.ts:1  <img src=x onerror=alert(4)>
+
+trusted  dir/file name.spec.ts:2  line one line two
+
+trusted  pipe.spec.ts:3  a | b > <b>bold</b>
+
+untrusted  link.spec.ts:4  [link](javascript:...)
+  QCV-W001  error  4:1  sees <b> and | and [link](javascript:...)
+    Evidence: seen ``` and ````` here
+    Fix: fix ```` hint
+
+Summary: 3 trusted, 0 review, 1 untrusted, 0 baseline-red, 0 not-run. 1 error, 0 warnings, 0 info findings.
+Checks run: weak-assertion.
+Reports: .qa-core/verify/report.md.
