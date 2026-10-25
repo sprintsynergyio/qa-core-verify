@@ -403,14 +403,14 @@ test('click missing fails', async ({ page }) => {
     outDir: path.join(project, '.qa-core', 'verify'),
     keepWorkspace: false,
   });
-  assert.equal(run.evidence.playwrightExitCode, 1, run.stderr);
+  assert.equal(run.evidence.playwrightExitCode, 1, `${run.stderr}\n${run.stdout}`);
   const stay = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#stay');
-  assert.ok(stay, `missing click on #stay\n${JSON.stringify(run.evidence.records)}\n${run.stderr}`);
+  assert.ok(stay, `missing click on #stay\n${JSON.stringify(run.evidence.records)}\n${run.stderr}\n${run.stdout}`);
   assert.equal(stay.actionSucceeded, true);
   assert.equal(stay.resolvedOnAction, true);
   assert.equal(stay.matchCount, 1);
   const gone = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#gone');
-  assert.ok(gone, `missing click that removes its target\n${JSON.stringify(run.evidence.records)}\n${run.stderr}`);
+  assert.ok(gone, `missing click that removes its target\n${JSON.stringify(run.evidence.records)}\n${run.stderr}\n${run.stdout}`);
   assert.equal(gone.actionSucceeded, true);
   assert.equal(gone.resolvedOnAction, true);
   assert.equal(Number.isInteger(gone.matchCount) && gone.matchCount >= 0, true);
