@@ -3,34 +3,43 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { after, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { test } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildEvidence, callSiteFromStack, evidenceWithoutActionMatchCount } from '../dist/runtime/locator-evidence/evidence.js';
 import { collectLocatorEvidence, rewritePlaywrightImports } from '../dist/runtime/locator-evidence/injected-fixture.js';
 import { assertWorkspaceFile, listDescendantPids } from '../dist/runtime/workspace.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sauceDemo = path.join(repoRoot, 'example-project/saucedemo');
-const tmpNamesAtStart = new Set(fs.readdirSync(os.tmpdir()));
-
-// A killed Chromium leaves its user-data directory in the temp folder. Remove only the ones this file created.
-after(() => {
-  let names = [];
-  try {
-    names = fs.readdirSync(os.tmpdir());
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (tmpNamesAtStart.has(name) || !name.startsWith('playwright_chromiumdev_profile-')) continue;
-    fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-  }
-});
 
 function tempDir(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+function privateTempEnv(dir) {
+  return { ...process.env, TMPDIR: dir, TMP: dir, TEMP: dir };
+}
+
+async function withPrivateTemp(t, run) {
+  const dir = tempDir(t, 'qcv-sig-');
+  const saved = {
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+  };
+  process.env.TMPDIR = dir;
+  process.env.TMP = dir;
+  process.env.TEMP = dir;
+  try {
+    return await run(dir);
+  } finally {
+    for (const key of ['TMPDIR', 'TMP', 'TEMP']) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
 }
 
 function writeProject(dir, { retries = 0, spec = PASS_SPEC } = {}) {
@@ -170,11 +179,13 @@ test('the default evidence run leaves the project bytes unchanged and removes th
   const project = tempDir(t, 'qcv-project-');
   writeProject(project);
   const before = new Map(sourceFiles(project).map((file) => [file, fs.readFileSync(file)]));
-  const run = await collectLocatorEvidence({
-    projectDir: project,
-    outDir: path.join(project, '.qa-core', 'verify'),
-    keepWorkspace: false,
-  });
+  const run = await withPrivateTemp(t, () =>
+    collectLocatorEvidence({
+      projectDir: project,
+      outDir: path.join(project, '.qa-core', 'verify'),
+      keepWorkspace: false,
+    }),
+  );
   assert.equal(run.evidence.playwrightExitCode, 0);
   assert.equal(run.kept, false);
   assert.equal(fs.existsSync(run.workspaceDir), false);
@@ -197,11 +208,13 @@ test('Playwright retries stay at zero in the temp copy', async (t) => {
   const previous = process.env.QCV_ATTEMPT_FILE;
   process.env.QCV_ATTEMPT_FILE = attempts;
   try {
-    const run = await collectLocatorEvidence({
-      projectDir: project,
-      outDir: path.join(project, '.qa-core', 'verify'),
-      keepWorkspace: false,
-    });
+    const run = await withPrivateTemp(t, () =>
+      collectLocatorEvidence({
+        projectDir: project,
+        outDir: path.join(project, '.qa-core', 'verify'),
+        keepWorkspace: false,
+      }),
+    );
     assert.equal(run.evidence.playwrightExitCode, 1);
     assert.equal(fs.readFileSync(attempts, 'utf8'), '1');
     assert.equal(fs.existsSync(run.evidencePath), true);
@@ -217,11 +230,13 @@ test('keep-workspace retains the copy and the symlinked node_modules', async (t)
   writeProject(project);
   const modules = path.join(repoRoot, 'node_modules', '@playwright', 'test', 'package.json');
   const marker = fs.readFileSync(modules);
-  const run = await collectLocatorEvidence({
-    projectDir: project,
-    outDir: path.join(project, '.qa-core', 'verify'),
-    keepWorkspace: true,
-  });
+  const run = await withPrivateTemp(t, () =>
+    collectLocatorEvidence({
+      projectDir: project,
+      outDir: path.join(project, '.qa-core', 'verify'),
+      keepWorkspace: true,
+    }),
+  );
   t.after(() => fs.rmSync(run.workspaceDir, { recursive: true, force: true }));
   assert.equal(run.kept, true);
   assert.equal(fs.existsSync(run.workspaceDir), true);
@@ -242,10 +257,11 @@ test('the cli prints an outside --out path as typed and still writes the evidenc
   fs.mkdirSync(project);
   writeProject(project);
   const cli = path.join(repoRoot, 'dist/cli.js');
+  const scratch = tempDir(t, 'qcv-sig-');
   const result = spawnSync(
     process.execPath,
     [cli, '.', '--only', 'locator-evidence', '--out', '../evidence-out'],
-    { cwd: project, encoding: 'utf8' },
+    { cwd: project, encoding: 'utf8', env: privateTempEnv(scratch) },
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Locator evidence: \.\.\/evidence-out\/locator-evidence\.json/);
@@ -256,9 +272,11 @@ test('the cli prints an outside --out path as typed and still writes the evidenc
   const failing = path.join(parent, 'fail');
   fs.mkdirSync(failing);
   writeProject(failing, { spec: "import { test, expect } from '@playwright/test';\ntest('bad', () => { expect(1).toBe(2); });\n" });
+  const failedScratch = tempDir(t, 'qcv-sig-');
   const failed = spawnSync(process.execPath, [cli, failing, '--only', 'locator-evidence', '--out', path.join(parent, 'fail-out')], {
     cwd: repoRoot,
     encoding: 'utf8',
+    env: privateTempEnv(failedScratch),
   });
   assert.equal(failed.status, 1, failed.stderr);
   assert.equal(fs.existsSync(path.join(parent, 'fail-out', 'locator-evidence.json')), true);
@@ -275,7 +293,7 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
     },
   });
   const out = tempDir(t, 'qcv-sauce-out-');
-  const run = await collectLocatorEvidence({ projectDir: copy, outDir: out, keepWorkspace: false });
+  const run = await withPrivateTemp(t, () => collectLocatorEvidence({ projectDir: copy, outDir: out, keepWorkspace: false }));
   assert.equal(hashTree(sauceDemo), before);
   assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), false);
   assert.equal(run.evidence.playwrightExitCode, 0);
@@ -323,12 +341,13 @@ function writeHelperProject(project, helperTarget) {
 }
 
 function runKeptEvidence(t, project) {
+  const scratch = tempDir(t, 'qcv-sig-');
   const out = tempDir(t, 'qcv-symlink-out-');
   const cli = path.join(repoRoot, 'dist/cli.js');
   const result = spawnSync(
     process.execPath,
     [cli, project, '--only', 'locator-evidence', '--keep-workspace', '--out', out],
-    { cwd: repoRoot, encoding: 'utf8' },
+    { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(scratch) },
   );
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const match = /Workspace: (\S+)/.exec(result.stdout);
@@ -413,11 +432,13 @@ test('click missing fails', async ({ page }) => {
 });
 `,
   });
-  const run = await collectLocatorEvidence({
-    projectDir: project,
-    outDir: path.join(project, '.qa-core', 'verify'),
-    keepWorkspace: false,
-  });
+  const run = await withPrivateTemp(t, () =>
+    collectLocatorEvidence({
+      projectDir: project,
+      outDir: path.join(project, '.qa-core', 'verify'),
+      keepWorkspace: false,
+    }),
+  );
   assert.equal(run.evidence.playwrightExitCode, 1, `${run.stderr}\n${run.stdout}`);
   const stay = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#stay');
   assert.ok(stay, `missing click on #stay\n${JSON.stringify(run.evidence.records)}\n${run.stderr}\n${run.stdout}`);
@@ -603,9 +624,11 @@ test('hang', async ({ page }) => {
     { signal: 'SIGHUP', code: 129, again: false },
   ];
   for (const item of cases) {
+    const scratch = tempDir(t, 'qcv-sig-');
     const out = tempDir(t, 'qcv-signal-out-');
     const child = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
       stdio: 'ignore',
+      env: privateTempEnv(scratch),
     });
     t.after(() => {
       try {
@@ -614,7 +637,8 @@ test('hang', async ({ page }) => {
         // The CLI may already have exited.
       }
     });
-    const workspace = await waitForMarkedWorkspace(token, 20_000);
+    const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
+    assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
     const browserUp = await waitForBrowser(child.pid, 20_000);
     assert.equal(browserUp, true, `${item.signal} browser did not start`);
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -634,22 +658,159 @@ test('hang', async ({ page }) => {
     assert.equal(fs.existsSync(workspace), false, workspace);
     await new Promise((resolve) => setTimeout(resolve, 1000));
     assert.equal(fs.existsSync(workspace), false, `${label} left ${workspace}`);
+    assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('qcv-workspace-')), false, scratch);
   }
 });
 
-function waitForMarkedWorkspace(token, timeoutMs) {
+test('an outside Chromium profile and a decoy folder survive signal cleanup', { timeout: 90_000 }, async (t) => {
+  const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'playwright_chromiumdev_profile-'));
+  fs.writeFileSync(path.join(decoy, 'keep.txt'), 'decoy');
+  const holder = tempDir(t, 'qcv-outside-browser-');
+  const playwright = pathToFileURL(path.join(repoRoot, 'node_modules/@playwright/test/index.js')).href;
+  const script = path.join(holder, 'hold.mjs');
+  fs.writeFileSync(
+    script,
+    `import pkg from ${JSON.stringify(playwright)};
+const { chromium } = pkg;
+const browser = await chromium.launch({ headless: true });
+process.stdout.write('ready\\n');
+await new Promise((resolve) => {
+  process.stdin.once('data', async () => {
+    await browser.close();
+    resolve();
+  });
+});
+`,
+  );
+  const beforeLaunch = new Set(fs.readdirSync(os.tmpdir()));
+  const child = spawn(process.execPath, [script], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let profile = '';
+  let holderErr = '';
+  child.stderr.on('data', (chunk) => {
+    holderErr += chunk.toString('utf8');
+  });
+  t.after(() => {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // The holder may already have exited.
+    }
+    fs.rmSync(decoy, { recursive: true, force: true });
+    if (profile) fs.rmSync(profile, { recursive: true, force: true });
+  });
+  await readLine(child.stdout, 20_000).catch((error) => {
+    throw new Error(`${error.message}\n${holderErr}`);
+  });
+  const created = fs.readdirSync(os.tmpdir()).filter(
+    (name) => !beforeLaunch.has(name) && name.startsWith('playwright_chromiumdev_profile-'),
+  );
+  assert.deepEqual(created.length, 1, `expected one outside profile, saw ${created.join(', ')}`);
+  profile = path.join(os.tmpdir(), created[0]);
+  assert.equal(profile.startsWith(`${os.tmpdir()}${path.sep}playwright_chromiumdev_profile-`), true, profile);
+  assert.equal(profile === decoy, false);
+  assert.equal(fs.existsSync(path.join(decoy, 'keep.txt')), true);
+  assert.equal(commandUsesPath(profile), true, 'outside browser was not using its profile');
+
+  const project = tempDir(t, 'qcv-signal-project-');
+  const token = `qcv-signal-marker-${process.pid}-decoy.txt`;
+  fs.writeFileSync(path.join(project, token), 'marker');
+  writeProject(project, {
+    spec: `import { test } from '@playwright/test';
+test('hang', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await new Promise(() => {});
+});
+`,
+  });
+  const scratch = tempDir(t, 'qcv-sig-');
+  const out = tempDir(t, 'qcv-signal-out-');
+  const before = new Set(fs.readdirSync(os.tmpdir()));
+  const cli = path.join(repoRoot, 'dist/cli.js');
+  const cliChild = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
+    stdio: 'ignore',
+    env: privateTempEnv(scratch),
+  });
+  t.after(() => {
+    try {
+      cliChild.kill('SIGKILL');
+    } catch {
+      // The CLI may already have exited.
+    }
+  });
+  const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
+  assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
+  const browserUp = await waitForBrowser(cliChild.pid, 20_000);
+  assert.equal(browserUp, true, 'signal browser did not start');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const exitedPromise = waitForExit(cliChild, 15_000);
+  cliChild.kill('SIGINT');
+  const exited = await exitedPromise;
+  assert.equal(exited.code, 130, `SIGINT exited ${exited.code} signal ${exited.signal}`);
+  assert.equal(fs.existsSync(workspace), false, workspace);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(fs.existsSync(path.join(decoy, 'keep.txt')), true, 'decoy profile was removed');
+  assert.equal(fs.existsSync(profile), true, 'outside Chromium profile was removed');
+  assert.equal(commandUsesPath(profile), true, 'outside browser died');
+  const added = fs.readdirSync(os.tmpdir()).filter((name) => !before.has(name));
+  assert.deepEqual(added, [], `signal cleanup added ${added.join(', ')} to ${os.tmpdir()}`);
+
+  child.stdin.write('close\n');
+  child.stdin.end();
+  await waitForExit(child, 15_000);
+});
+
+function readLine(stream, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    const timer = setTimeout(() => {
+      stream.off('data', onData);
+      reject(new Error(`timed out waiting for a line: ${buf}`));
+    }, timeoutMs);
+    const onData = (chunk) => {
+      buf += chunk.toString('utf8');
+      const nl = buf.indexOf('\n');
+      if (nl < 0) return;
+      clearTimeout(timer);
+      stream.off('data', onData);
+      resolve(buf.slice(0, nl).trim());
+    };
+    stream.on('data', onData);
+  });
+}
+
+function commandUsesPath(dir) {
+  let names = [];
+  try {
+    names = fs.readdirSync('/proc');
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    let command = '';
+    try {
+      command = fs.readFileSync(`/proc/${name}/cmdline`, 'utf8');
+    } catch {
+      continue;
+    }
+    if (command.includes(dir)) return true;
+  }
+  return false;
+}
+
+function waitForMarkedWorkspace(root, token, timeoutMs) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const poll = () => {
       let names = [];
       try {
-        names = fs.readdirSync(os.tmpdir());
+        names = fs.readdirSync(root);
       } catch {
         names = [];
       }
       for (const name of names) {
         if (!name.startsWith('qcv-workspace-')) continue;
-        const dir = path.join(os.tmpdir(), name);
+        const dir = path.join(root, name);
         if (fs.existsSync(path.join(dir, token))) {
           resolve(dir);
           return;
