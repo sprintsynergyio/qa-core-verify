@@ -16,9 +16,17 @@ Guessing that the hidden call has an assertion, or that it returns a locator, wo
 
 ### Bad Example
 
-The spec calls `midAssert`. `midAssert` calls `deepAssert` from a second file.
+```ts
+await midAssert(page);
+```
+
+`midAssert` calls `deepAssert` from a second file. The checker does not open that file.
 
 ### Good Example
+
+```ts
+await assertTitle(page);
+```
 
 The spec imports `assertTitle` directly, and that function contains the `expect`.
 
@@ -69,7 +77,7 @@ error
 
 ### What
 
-`toBeTruthy`, `toBeDefined`, `not.toBeNull`, `not.toBeUndefined`, or `not.toBeFalsy` on a locator. The locator may be written inline, stored in a variable, or returned by a helper the spec imports.
+`toBeTruthy`, `toBeDefined`, `not.toBeNull`, `not.toBeUndefined`, or `not.toBeFalsy` on a locator. The locator may be written inline, stored in a variable, returned by a helper the spec imports, or read from a page object field, initializer, or getter.
 
 ### Why
 
@@ -99,7 +107,9 @@ error
 
 ### What
 
-`expect(locator)` or `expect(page)` uses a matcher that returns a promise, and that call is neither awaited nor returned from the test.
+A matcher that returns a promise is neither awaited nor returned from the test. `expect.poll` returns a promise for every matcher, including `toBe`. The subject can be a locator, a page, or any other value.
+
+`await Promise.all`, `await Promise.allSettled`, and a returned `Promise.all` or `Promise.allSettled` count as waiting. An array element or a `.map` callback passed to that call is included. A value returned from a `test.step` callback counts when that step is awaited or returned.
 
 ### Why
 
@@ -121,6 +131,13 @@ Returning the promise from the test is also enough:
 
 ```ts
 return expect(page.getByRole('button', { name: 'Login' })).toBeVisible();
+```
+
+These are awaited too:
+
+```ts
+await Promise.all([expect(a).toHaveText('A'), expect(b).toHaveText('B')]);
+await test.step('x', () => expect(page.getByTestId('title')).toHaveText('Products'));
 ```
 
 ### Severity
@@ -252,7 +269,7 @@ if ((await missing.count()) > 0) {
 await expect(page.getByTestId('title')).toHaveText('Products');
 ```
 
-A `do while` loop runs the body once before the condition. A `for` loop that starts at 0 and counts up to a positive number also runs. Those are not flagged.
+A `do while` loop runs the body once before the condition. A `for` loop that starts at 0 and counts up to a positive number also runs. A `for of` over a non-empty array literal runs, and so does one over a `const` in the same test that is bound to such a literal. `forEach`, `map`, and the same family are the same when the receiver is one of those. Those are not flagged. An assertion on the right of `&&`, `||`, or `??` is flagged, because that side can be skipped.
 
 ### Severity
 
@@ -376,3 +393,5 @@ Imports are followed one level, into a helper or a page object in a local file. 
 `test.skip(condition)` and `test.fixme(condition)` inside a test body are annotations. QCV-W009 flags the declaration forms, including `describe.fixme`.
 
 A method stored on an object literal is not followed. Name it in `qa-core-verify.config.json` if it is the assertion, or move it to a function the spec imports.
+
+`const e = expect` inside a test is not treated as `expect`. `e(locator).toBeVisible()` is not seen. Call `expect` by that name, or use `expect.configure`, which is recognized.

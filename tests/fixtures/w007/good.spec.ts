@@ -20,3 +20,30 @@ test('counted loop', async ({ page }) => {
     await expect(page.getByTestId('title')).toHaveText('Products');
   }
 });
+
+test('for of literal', async ({ page }) => {
+  for (const id of ['a', 'b']) {
+    await expect(page.getByTestId(id)).toHaveText('Products');
+  }
+});
+
+test('for of const', async ({ page }) => {
+  const ids = ['a', 'b'];
+  for (const id of ids) {
+    await expect(page.getByTestId(id)).toHaveText('Products');
+  }
+});
+
+test('for each literal', async ({ page }) => {
+  [1, 2].forEach(async () => {
+    await expect(page.getByTestId('title')).toHaveText('Products');
+  });
+});
+
+test('map literal', async ({ page }) => {
+  await Promise.all(
+    ['a', 'b'].map(async (id) => {
+      await expect(page.getByTestId(id)).toHaveText(id);
+    }),
+  );
+});

@@ -116,9 +116,11 @@ interface SavedScope {
   pageReads: Map<string, PageReadKind>;
   instances: Map<string, ClassBody>;
   localFns: Map<string, FunctionBody>;
+  nonEmptyArrays: Set<string>;
   thisPage: boolean;
   ownerClass: ClassBody | undefined;
   returnCounts: boolean;
+  returnIsAwaited: boolean;
   conditional: boolean;
   swallowed: boolean;
   eventCount: number;
@@ -145,9 +147,12 @@ class BodyWalker<Bindings> {
   private pageReads = new Map<string, PageReadKind>();
   private instances = new Map<string, ClassBody>();
   private localFns = new Map<string, FunctionBody>();
+  private nonEmptyArrays = new Set<string>();
   private thisPage = false;
   private ownerClass: ClassBody | undefined;
   private returnCounts = true;
+  private returnIsAwaited = false;
+  private readonly frames: Array<{ fn: ts.Node; counts: boolean }> = [];
   private conditional = false;
   private swallowed = false;
   private readonly expects: ExpectCall[] = [];
@@ -225,7 +230,13 @@ class BodyWalker<Bindings> {
       else this.walk(node.statement);
       return;
     }
-    if (ts.isForOfStatement(node) || ts.isForInStatement(node)) {
+    if (ts.isForOfStatement(node)) {
+      this.walk(node.expression);
+      if (this.iterationMayBeEmpty(node.expression)) this.withConditional(() => this.walk(node.statement));
+      else this.walk(node.statement);
+      return;
+    }
+    if (ts.isForInStatement(node)) {
       this.walk(node.expression);
       this.withConditional(() => this.walk(node.statement));
       return;
@@ -244,9 +255,11 @@ class BodyWalker<Bindings> {
       const initializer = unwrap(node.initializer);
       if ((ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) && initializer.body) {
         this.localFns.set(node.name.text, this.makeLocal(node.name.text, initializer.parameters, initializer.body));
+        this.noteArrayConst(node);
         return;
       }
       this.applyBinding(node.name.text, this.valueKind(node.initializer));
+      this.noteArrayConst(node);
     }
     if (
       ts.isBinaryExpression(node) &&
@@ -254,6 +267,11 @@ class BodyWalker<Bindings> {
       ts.isIdentifier(node.left)
     ) {
       this.applyBinding(node.left.text, this.valueKind(node.right));
+    }
+    if (ts.isBinaryExpression(node) && isShortCircuit(node.operatorToken.kind)) {
+      this.walk(node.left);
+      this.withConditional(() => this.walk(node.right));
+      return;
     }
     if (ts.isCallExpression(node)) {
       if (this.onCall(node) === 'done') return;
@@ -269,11 +287,17 @@ class BodyWalker<Bindings> {
     const body = node.body;
     if (!body) return;
     const savedReturn = this.returnCounts;
+    const savedReturnAwaited = this.returnIsAwaited;
     const savedConditional = this.conditional;
     this.returnCounts = false;
-    if (isIterationCallback(node)) this.conditional = true;
+    this.returnIsAwaited = false;
+    this.frames.push({ fn: node, counts: false });
+    const receiver = iterationReceiver(node);
+    if (receiver && this.iterationMayBeEmpty(receiver)) this.conditional = true;
     this.walk(body);
+    this.frames.pop();
     this.returnCounts = savedReturn;
+    this.returnIsAwaited = savedReturnAwaited;
     this.conditional = savedConditional;
   }
 
@@ -282,9 +306,15 @@ class BodyWalker<Bindings> {
       const callback = callbackOf(call);
       if (callback) {
         const savedReturn = this.returnCounts;
+        const savedReturnAwaited = this.returnIsAwaited;
+        const stepSettled = isAwaited(call) || this.isReturnedNode(call);
         this.returnCounts = false;
+        this.returnIsAwaited = stepSettled;
+        this.frames.push({ fn: callback, counts: false });
         this.walk(callback.body);
+        this.frames.pop();
         this.returnCounts = savedReturn;
+        this.returnIsAwaited = savedReturnAwaited;
       }
       return 'done';
     }
@@ -339,6 +369,8 @@ class BodyWalker<Bindings> {
     const subjectText = subject ? subject.getText(this.sourceFile) : '';
     expect.sameSource = subjectText.length > 0 && subjectText === expect.argumentSource;
     expect.returned = this.isReturnedNode(call);
+    this.settlePromiseAll(expect, call);
+    if (this.returnIsAwaited && this.isReturnPosition(call)) expect.awaited = true;
     expect.conditional = this.conditional;
     expect.swallowed = this.swallowed;
     expect.file = this.sourceFile.fileName;
@@ -393,7 +425,9 @@ class BodyWalker<Bindings> {
     if (ts.isCallExpression(current)) {
       const read = this.pageReadOf(current);
       if (read) return { type: 'page-read', read };
-      if (this.options.isLocatorExpression(current, this.locatorNames)) return { type: 'locator' };
+      if (this.options.isLocatorExpression(current, this.locatorNames) || this.locatorMethodOnKnown(current)) {
+        return { type: 'locator' };
+      }
       const resolved = this.resolveCallee(current);
       if (resolved === 'unresolved') {
         this.noteUnresolved(current, calleeName(current));
@@ -401,7 +435,52 @@ class BodyWalker<Bindings> {
       }
       if (resolved) return this.returnKindOf(resolved);
     }
+    if (ts.isPropertyAccessExpression(current)) {
+      if (current.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        if (current.name.text === 'page' && this.thisPage) return { type: 'page' };
+        if (this.ownerClass) return this.memberKind(this.ownerClass, current.name.text);
+        return { type: 'other' };
+      }
+      const base = this.valueKind(current.expression);
+      if (base.type === 'instance') return this.memberKind(base.classBody, current.name.text);
+    }
     return { type: 'other' };
+  }
+
+  private memberKind(classBody: ClassBody, name: string): ValueKind {
+    const field = classBody.fields.get(name);
+    if (!field) return { type: 'other' };
+    const key = `${classBody.index.filePath}#${classBody.name}#${name}`;
+    if (this.kindStack.has(key)) return { type: 'other' };
+    this.kindStack.add(key);
+    const saved = this.save();
+    this.sourceFile = classBody.index.sourceFile;
+    this.fileIndex = classBody.index;
+    this.bindings = this.options.bindingsFor(classBody.index.sourceFile);
+    this.locatorNames = new Set();
+    this.pageNames = new Set();
+    this.pageReads = new Map();
+    this.instances = new Map();
+    this.localFns = new Map();
+    this.nonEmptyArrays = new Set();
+    this.thisPage = classBody.thisPage;
+    this.ownerClass = classBody;
+    this.returnCounts = false;
+    this.returnIsAwaited = false;
+    seedPageNames(field.parameters, this.pageNames);
+    const result = mergeKinds(field.exprs.map((expr) => this.valueKind(expr)));
+    this.restore(saved);
+    this.kindStack.delete(key);
+    return result;
+  }
+
+  private locatorMethodOnKnown(call: ts.CallExpression): boolean {
+    const expr = unwrap(call.expression);
+    if (!ts.isPropertyAccessExpression(expr)) return false;
+    if (expr.name.text !== 'filter' && expr.name.text !== 'first' && expr.name.text !== 'last' && expr.name.text !== 'nth') {
+      return false;
+    }
+    return this.valueKind(expr.expression).type === 'locator';
   }
 
   private returnKindOf(fn: FunctionBody): ValueKind {
@@ -469,7 +548,7 @@ class BodyWalker<Bindings> {
     if (!ts.isPropertyAccessExpression(expr)) return undefined;
     const name = expr.name.text;
     if (!isPageReadName(name)) return undefined;
-    if (this.options.isLocatorExpression(expr.expression, this.locatorNames) || this.isPageExpr(expr.expression)) return name;
+    if (this.isLocatorValue(expr.expression) || this.isPageExpr(expr.expression)) return name;
     return undefined;
   }
 
@@ -477,7 +556,7 @@ class BodyWalker<Bindings> {
     const expr = unwrap(call.expression);
     if (!ts.isPropertyAccessExpression(expr)) return false;
     const name = expr.name.text;
-    if (LOCATOR_ACTIONS.has(name) && this.options.isLocatorExpression(expr.expression, this.locatorNames)) return true;
+    if (LOCATOR_ACTIONS.has(name) && this.isLocatorValue(expr.expression)) return true;
     if (PAGE_ACTIONS.has(name) && this.isPageExpr(expr.expression)) return true;
     return false;
   }
@@ -516,17 +595,65 @@ class BodyWalker<Bindings> {
     return false;
   }
 
-  private isReturnedNode(call: ts.CallExpression): boolean {
-    if (!this.returnCounts) return false;
-    let node: ts.Node = call;
-    let parent = node.parent;
+  private isReturnedNode(node: ts.Node): boolean {
+    if (!this.isReturnPosition(node)) return false;
+    return this.countsFor(node);
+  }
+
+  /** Nested callbacks do not return from the test. The test body and an inlined helper do. */
+  private countsFor(node: ts.Node): boolean {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (isFunctionLike(current)) {
+        for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+          const frame = this.frames[index];
+          if (frame && frame.fn === current) return frame.counts;
+        }
+        return true;
+      }
+      current = current.parent;
+    }
+    return true;
+  }
+
+  private isReturnPosition(node: ts.Node): boolean {
+    let current: ts.Node = node;
+    let parent = current.parent;
     while (parent && isTransparent(parent)) {
-      node = parent;
+      current = parent;
       parent = parent.parent;
     }
     if (parent && ts.isReturnStatement(parent)) return true;
-    if (parent && ts.isArrowFunction(parent) && parent.body === node) return true;
+    if (parent && ts.isArrowFunction(parent) && parent.body === current) return true;
     return false;
+  }
+
+  private settlePromiseAll(expect: ExpectCall, call: ts.CallExpression): void {
+    const all = promiseAllOfExpect(call);
+    if (!all) return;
+    if (isAwaited(all)) expect.awaited = true;
+    else if (this.isReturnedNode(all)) expect.returned = true;
+  }
+
+  private iterationMayBeEmpty(expr: ts.Expression): boolean {
+    const current = unwrap(expr);
+    if (ts.isArrayLiteralExpression(current)) return !hasElement(current);
+    if (ts.isIdentifier(current)) return !this.nonEmptyArrays.has(current.text);
+    return true;
+  }
+
+  private noteArrayConst(node: ts.VariableDeclaration): void {
+    if (!ts.isIdentifier(node.name)) return;
+    if (isConst(node) && node.initializer && isNonEmptyArrayLiteral(node.initializer)) {
+      this.nonEmptyArrays.add(node.name.text);
+      return;
+    }
+    this.nonEmptyArrays.delete(node.name.text);
+  }
+
+  private isLocatorValue(expr: ts.Expression): boolean {
+    if (this.options.isLocatorExpression(expr, this.locatorNames)) return true;
+    return this.valueKind(expr).type === 'locator';
   }
 
   private applyBinding(name: string, kind: ValueKind): void {
@@ -599,9 +726,11 @@ class BodyWalker<Bindings> {
     this.pageReads = new Map();
     this.instances = new Map();
     this.localFns = new Map();
+    this.nonEmptyArrays = new Set();
     this.thisPage = fn.thisPage;
     this.ownerClass = fn.ownerClass;
     this.returnCounts = true;
+    this.returnIsAwaited = false;
     seedPageNames(fn.parameters, this.pageNames);
   }
 
@@ -615,9 +744,11 @@ class BodyWalker<Bindings> {
       pageReads: this.pageReads,
       instances: this.instances,
       localFns: this.localFns,
+      nonEmptyArrays: this.nonEmptyArrays,
       thisPage: this.thisPage,
       ownerClass: this.ownerClass,
       returnCounts: this.returnCounts,
+      returnIsAwaited: this.returnIsAwaited,
       conditional: this.conditional,
       swallowed: this.swallowed,
       eventCount: this.events.length,
@@ -633,9 +764,11 @@ class BodyWalker<Bindings> {
     this.pageReads = saved.pageReads;
     this.instances = saved.instances;
     this.localFns = saved.localFns;
+    this.nonEmptyArrays = saved.nonEmptyArrays;
     this.thisPage = saved.thisPage;
     this.ownerClass = saved.ownerClass;
     this.returnCounts = saved.returnCounts;
+    this.returnIsAwaited = saved.returnIsAwaited;
     this.conditional = saved.conditional;
     this.swallowed = saved.swallowed;
   }
@@ -738,12 +871,83 @@ function statementThrows(statement: ts.Statement): boolean {
   return false;
 }
 
-function isIterationCallback(node: ts.Node): boolean {
+function iterationReceiver(node: ts.Node): ts.Expression | undefined {
   const parent = node.parent;
-  if (!parent || !ts.isCallExpression(parent)) return false;
-  if (!parent.arguments.some((argument) => argument === node)) return false;
+  if (!parent || !ts.isCallExpression(parent)) return undefined;
+  if (!parent.arguments.some((argument) => argument === node)) return undefined;
   const expr = unwrap(parent.expression);
-  return ts.isPropertyAccessExpression(expr) && ITERATION_METHODS.has(expr.name.text);
+  if (!ts.isPropertyAccessExpression(expr) || !ITERATION_METHODS.has(expr.name.text)) return undefined;
+  return expr.expression;
+}
+
+function isShortCircuit(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+    kind === ts.SyntaxKind.BarBarToken ||
+    kind === ts.SyntaxKind.QuestionQuestionToken
+  );
+}
+
+function isConst(node: ts.VariableDeclaration): boolean {
+  const list = node.parent;
+  return ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
+}
+
+function isNonEmptyArrayLiteral(expr: ts.Expression): boolean {
+  const current = unwrap(expr);
+  return ts.isArrayLiteralExpression(current) && hasElement(current);
+}
+
+function hasElement(expr: ts.ArrayLiteralExpression): boolean {
+  return expr.elements.some((element) => !!element && !ts.isOmittedExpression(element) && !ts.isSpreadElement(element));
+}
+
+function promiseAllOfExpect(call: ts.CallExpression): ts.CallExpression | undefined {
+  const direct = promiseAllFromValue(call);
+  if (direct) return direct;
+  const mapCall = mapCallReturning(call);
+  if (!mapCall) return undefined;
+  return promiseAllFromValue(mapCall);
+}
+
+function promiseAllFromValue(node: ts.Node): ts.CallExpression | undefined {
+  let current: ts.Node = node;
+  let parent = current.parent;
+  while (parent && (isTransparent(parent) || ts.isArrayLiteralExpression(parent))) {
+    if (ts.isArrayLiteralExpression(parent) && !parent.elements.some((element) => element === current)) return undefined;
+    current = parent;
+    parent = parent.parent;
+  }
+  if (!parent || !ts.isCallExpression(parent)) return undefined;
+  if (!parent.arguments.some((argument) => argument === current)) return undefined;
+  const expr = unwrap(parent.expression);
+  if (!ts.isPropertyAccessExpression(expr)) return undefined;
+  if (expr.name.text !== 'all' && expr.name.text !== 'allSettled') return undefined;
+  const head = unwrap(expr.expression);
+  if (!ts.isIdentifier(head) || head.text !== 'Promise') return undefined;
+  return parent;
+}
+
+function mapCallReturning(call: ts.CallExpression): ts.CallExpression | undefined {
+  let current: ts.Node = call;
+  let parent = current.parent;
+  while (parent && isTransparent(parent)) {
+    current = parent;
+    parent = parent.parent;
+  }
+  let fn: ts.Node | undefined;
+  if (parent && ts.isReturnStatement(parent)) {
+    fn = parent.parent;
+    while (fn && !isFunctionLike(fn)) fn = fn.parent;
+  } else if (parent && ts.isArrowFunction(parent) && parent.body === current) {
+    fn = parent;
+  }
+  if (!fn?.parent || !ts.isCallExpression(fn.parent)) return undefined;
+  const mapCall = fn.parent;
+  if (!mapCall.arguments.some((argument) => argument === fn)) return undefined;
+  const expr = unwrap(mapCall.expression);
+  if (!ts.isPropertyAccessExpression(expr) || expr.name.text !== 'map') return undefined;
+  return mapCall;
 }
 
 function readLiteral(expr: ts.Expression): ScalarLiteral | undefined {

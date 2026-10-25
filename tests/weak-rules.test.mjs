@@ -32,7 +32,18 @@ const cases = [
     ruleId: 'QCV-W003',
     severity: 'error',
     relatedLintRule: 'missing-playwright-await',
-    titles: ['not awaited', 'page url', 'soft text'],
+    titles: [
+      'closure call',
+      'contain class',
+      'fixture locator',
+      'match aria snapshot',
+      'not awaited',
+      'page url',
+      'poll',
+      'response ok',
+      'soft text',
+      'to pass',
+    ],
     needle: 'expect(page).toHaveURL',
     evidence: 'expect(page).toHaveURL(\'/inventory.html\')',
   },
@@ -65,7 +76,7 @@ const cases = [
     ruleId: 'QCV-W007',
     severity: 'warn',
     relatedLintRule: 'no-conditional-expect',
-    titles: ['catch', 'for each', 'for of', 'if', 'switch', 'ternary', 'ternary', 'while'],
+    titles: ['and', 'catch', 'for each', 'for of', 'if', 'nullish', 'or', 'switch', 'ternary', 'ternary', 'while'],
     needle: 'await expect(page.getByTestId(\'title\')).toHaveText(\'Products\')',
     evidence: 'await expect(page.getByTestId(\'title\')).toHaveText(\'Products\')',
   },
@@ -185,4 +196,19 @@ test('a page object class imported one level is resolved', () => {
     findings.map((finding) => `${finding.ruleId} ${finding.testTitle}`),
     ['QCV-W002 page object locator is truthy'],
   );
+});
+
+test('page object fields and getters keep their locator or page read kind', () => {
+  const bad = findingsIn(path.join(fixtures, 'helpers-resolve/field-locators.spec.ts'));
+  assert.deepEqual(
+    bad.map((finding) => `${finding.ruleId} ${finding.testTitle}`).sort(),
+    [
+      'QCV-W002 constructor field is truthy',
+      'QCV-W002 getter field is truthy',
+      'QCV-W002 initializer field is truthy',
+      'QCV-W003 constructor field is not awaited',
+      'QCV-W005 page read field is truthy',
+    ],
+  );
+  assert.deepEqual(findingsIn(path.join(fixtures, 'helpers-resolve/field-locators-good.spec.ts')), []);
 });

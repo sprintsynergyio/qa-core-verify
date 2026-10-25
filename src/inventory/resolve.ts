@@ -18,10 +18,17 @@ export interface FunctionBody {
   index: FileIndex;
 }
 
+/** An expression that defines a class field, captured so the walker can classify it later. */
+export interface FieldBody {
+  exprs: ts.Expression[];
+  parameters: readonly ts.ParameterDeclaration[];
+}
+
 export interface ClassBody {
   name: string;
   exported: boolean;
   methods: Map<string, FunctionBody>;
+  fields: Map<string, FieldBody>;
   thisPage: boolean;
   index: FileIndex;
 }
@@ -135,16 +142,77 @@ function collectClasses(statement: ts.Statement, index: FileIndex): void {
     name: className,
     exported,
     methods: new Map(),
+    fields: new Map(),
     thisPage,
     index,
   };
+  const ctor = statement.members.find((member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member));
+  const ctorParams = ctor?.parameters ?? [];
+  const buckets = new Map<string, FieldBucket>();
   for (const member of statement.members) {
-    if (!ts.isMethodDeclaration(member) || !member.body || !ts.isIdentifier(member.name)) continue;
-    const method = addFunction(index, member.name.text, member.parameters, member.body, exported, thisPage, classBody);
-    classBody.methods.set(member.name.text, method);
+    if (ts.isMethodDeclaration(member) && member.body && ts.isIdentifier(member.name)) {
+      const method = addFunction(index, member.name.text, member.parameters, member.body, exported, thisPage, classBody);
+      classBody.methods.set(member.name.text, method);
+    }
+    if (ts.isPropertyDeclaration(member) && member.initializer && ts.isIdentifier(member.name)) {
+      fieldBucket(buckets, member.name.text).init = member.initializer;
+    }
+    if (ts.isGetAccessor(member) && member.body && ts.isIdentifier(member.name)) {
+      fieldBucket(buckets, member.name.text).getter = returnExprs(member.body);
+    }
+  }
+  if (ctor?.body) collectFieldAssignments(ctor.body, buckets);
+  for (const [name, bucket] of buckets) {
+    const fromCtor = bucket.assigns.length > 0;
+    const exprs = fromCtor ? bucket.assigns : bucket.init ? [bucket.init] : bucket.getter;
+    if (exprs.length === 0) continue;
+    classBody.fields.set(name, { exprs, parameters: fromCtor ? ctorParams : [] });
   }
   index.classes.set(className, classBody);
   if (isDefaultExport(statement)) index.classes.set('default', classBody);
+}
+
+interface FieldBucket {
+  init?: ts.Expression;
+  assigns: ts.Expression[];
+  getter: ts.Expression[];
+}
+
+function fieldBucket(buckets: Map<string, FieldBucket>, name: string): FieldBucket {
+  const found = buckets.get(name);
+  if (found) return found;
+  const created: FieldBucket = { assigns: [], getter: [] };
+  buckets.set(name, created);
+  return created;
+}
+
+function collectFieldAssignments(body: ts.Block, buckets: Map<string, FieldBucket>): void {
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.expression.kind === ts.SyntaxKind.ThisKeyword &&
+      ts.isIdentifier(node.left.name)
+    ) {
+      fieldBucket(buckets, node.left.name.text).assigns.push(node.right);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+}
+
+function returnExprs(body: ts.ConciseBody): ts.Expression[] {
+  if (!ts.isBlock(body)) return [body];
+  const found: ts.Expression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return;
+    if (ts.isReturnStatement(node) && node.expression) found.push(node.expression);
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  return found;
 }
 
 function addFunction(

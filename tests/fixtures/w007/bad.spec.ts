@@ -33,10 +33,25 @@ test('catch', async ({ page }) => {
 });
 
 test('for of', async ({ page }) => {
-  const names = ['Products'];
+  let names = ['Products'];
   for (const name of names) {
     await expect(page.getByTestId('title')).toHaveText(name);
   }
+});
+
+test('and', async ({ page }) => {
+  const ready = false;
+  ready && (await expect(page.getByTestId('title')).toHaveText('Products'));
+});
+
+test('or', async ({ page }) => {
+  const ready = true;
+  ready || (await expect(page.getByTestId('title')).toHaveText('Products'));
+});
+
+test('nullish', async ({ page }) => {
+  const ready = 'set';
+  ready ?? (await expect(page.getByTestId('title')).toHaveText('Products'));
 });
 
 test('while', async ({ page }) => {
@@ -48,7 +63,7 @@ test('while', async ({ page }) => {
 });
 
 test('for each', async ({ page }) => {
-  const names = ['Products'];
+  let names = ['Products'];
   names.forEach(async (name) => {
     await expect(page.getByTestId('title')).toHaveText(name);
   });

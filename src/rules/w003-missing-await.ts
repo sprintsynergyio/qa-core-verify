@@ -3,8 +3,13 @@ import type { Finding } from './types.js';
 
 export const W003_RULE_ID = 'QCV-W003';
 
-/** Matchers that return a promise. Sync matchers such as toBe and toEqual are not in this set. */
-const WEB_FIRST = new Set([
+/**
+ * Matchers that return a promise in Playwright 1.60.0.
+ * Taken from LocatorAssertions, PageAssertions, APIResponseAssertions, and FunctionAssertions
+ * in playwright/types/test.d.ts. toMatchSnapshot returns void, so it is not listed.
+ * expect.poll is separate: every matcher on it returns a promise.
+ */
+const ASYNC_MATCHERS = new Set([
   'toBeAttached',
   'toBeChecked',
   'toBeDisabled',
@@ -14,7 +19,9 @@ const WEB_FIRST = new Set([
   'toBeFocused',
   'toBeHidden',
   'toBeInViewport',
+  'toBeOK',
   'toBeVisible',
+  'toContainClass',
   'toContainText',
   'toHaveAccessibleDescription',
   'toHaveAccessibleErrorMessage',
@@ -32,6 +39,7 @@ const WEB_FIRST = new Set([
   'toHaveURL',
   'toHaveValue',
   'toHaveValues',
+  'toMatchAriaSnapshot',
   'toPass',
 ]);
 
@@ -60,7 +68,7 @@ export function findMissingAwait(tests: readonly InventoryTest[]): Finding[] {
 }
 
 function isMissingAwait(expect: ExpectCall): boolean {
-  if (expect.subjectKind !== 'locator' && expect.subjectKind !== 'page') return false;
-  if (!WEB_FIRST.has(expect.matcher)) return false;
-  return !expect.awaited && !expect.returned;
+  if (expect.awaited || expect.returned) return false;
+  if (expect.poll) return true;
+  return ASYNC_MATCHERS.has(expect.matcher);
 }
