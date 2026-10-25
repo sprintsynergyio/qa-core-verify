@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildEvidence, callSiteFromStack, evidenceWithoutActionMatchCount } from '../dist/runtime/locator-evidence/evidence.js';
 import { collectLocatorEvidence, rewritePlaywrightImports } from '../dist/runtime/locator-evidence/injected-fixture.js';
@@ -11,6 +11,21 @@ import { assertWorkspaceFile, listDescendantPids } from '../dist/runtime/workspa
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sauceDemo = path.join(repoRoot, 'example-project/saucedemo');
+const tmpNamesAtStart = new Set(fs.readdirSync(os.tmpdir()));
+
+// A killed Chromium leaves its user-data directory in the temp folder. Remove only the ones this file created.
+after(() => {
+  let names = [];
+  try {
+    names = fs.readdirSync(os.tmpdir());
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (tmpNamesAtStart.has(name) || !name.startsWith('playwright_chromiumdev_profile-')) continue;
+    fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+  }
+});
 
 function tempDir(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
