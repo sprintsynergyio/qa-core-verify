@@ -14,4 +14,6 @@ export interface Finding {
   message: string;
   evidence: string;
   fixHint: string;
+  /** Set when eslint-plugin-playwright has the same or a close rule. eslint is not a dependency. */
+  relatedLintRule?: string;
 }

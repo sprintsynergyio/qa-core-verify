@@ -1,7 +1,7 @@
 {
   "name": "qa-core-verify",
   "version": "0.0.1",
-  "description": "Audit a Playwright suite for tests that have no assertion. Work in progress, private until v0.1 review.",
+  "description": "Audit a Playwright suite for weak assertions. Work in progress, private until v0.1 review.",
   "type": "module",
   "license": "MIT",
   "private": true,

@@ -17,7 +17,7 @@ npm run demo:saucedemo -- tests/good
 
 ## Checker
 
-This command does not open a browser. It reports tests that have no assertion.
+This command does not open a browser. It reports the static weak assertion rules in [docs/rules.md](../../docs/rules.md). `tests/good` is written to stay clear of those rules.
 
 ```sh
 npm run build

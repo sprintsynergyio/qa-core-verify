@@ -8,13 +8,13 @@ import { exitCodeFor, isSeverity } from './exit-code.js';
 import { discoverSpecs } from './inventory/discover.js';
 import { parseSpecFile, type InventoryTest } from './inventory/parse.js';
 import { formatConsoleReport, toDisplayPath } from './report/console.js';
-import { findTestsWithNoAssertion } from './rules/w001-no-assertion.js';
+import { collectFindings } from './rules/index.js';
 import type { Finding, Severity } from './rules/types.js';
 import { ToolError } from './tool-error.js';
 
 export const HELP = `qa-core-verify <project-dir> [spec globs...] [--json] [--fail-on error|warn|info]
 
-Audit a Playwright suite and report tests with no assertion (QCV-W001).
+Audit a Playwright suite for weak assertions (QCV-W000 through QCV-W010).
 
 Options:
   --json              Print the raw findings array as JSON. This format is unstable.
@@ -69,7 +69,7 @@ export function run(argv: readonly string[], cwd = process.cwd()): number {
     for (const file of discovery.files) {
       tests.push(...parseSpecFile(file, config).tests);
     }
-    const findings = findTestsWithNoAssertion(tests).map((finding) => displayFinding(finding, cwd));
+    const findings = collectFindings(tests).map((finding) => displayFinding(finding, cwd));
     const emptyNotice = emptySuiteNotice(discovery.files.length, tests.length);
 
     if (options.json) {
