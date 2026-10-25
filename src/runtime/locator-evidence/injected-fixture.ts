@@ -11,6 +11,9 @@ const PARTS_DIR = path.join('.qa-core', 'locator-parts');
 
 export interface LocatorEvidenceRun {
   evidence: EvidenceFile;
+  /** `qcv-run-XXXXXX`. `--keep-workspace` keeps this directory, which contains `project`. */
+  runRoot: string;
+  /** Copied project at `<runRoot>/project`. */
   workspaceDir: string;
   kept: boolean;
   evidencePath: string;
@@ -55,6 +58,7 @@ export async function collectLocatorEvidence(options: {
   const evidencePath = writeEvidenceFile(evidence, options.outDir);
   return {
     evidence,
+    runRoot: run.runRoot,
     workspaceDir: run.workspaceDir,
     kept: run.kept,
     evidencePath,

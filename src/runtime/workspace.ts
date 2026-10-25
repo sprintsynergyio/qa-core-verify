@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { displayText } from '../report/paths.js';
 import { ToolError } from '../tool-error.js';
 
 const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git']);
@@ -11,9 +10,9 @@ const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwrig
 interface ActiveWorkspace {
   keep: boolean;
   child?: ChildProcess;
-  /** Project copy. `--keep-workspace` retains this directory and not its parent. */
+  /** Copied project at `<runRoot>/project`. `--keep-workspace` retains `runRoot`, which then contains `project`. */
   projectCopy: string;
-  /** Chromium temp directory. A sibling of `projectCopy`, never a path inside the copy. */
+  /** Chromium temp directory. A sibling of `projectCopy`, removed even when the run root is kept. */
   browserTmp?: string;
 }
 
@@ -144,7 +143,7 @@ function installSignalCleanup(): void {
       for (const [runRoot, state] of entries) {
         if (state.keep) {
           removeBrowserTemp(state);
-          if (signal === 'SIGINT') fs.writeSync(2, `Workspace: ${redactHomePath(state.projectCopy)}\n`);
+          fs.writeSync(2, workspaceLine(runRoot));
           continue;
         }
         try {
@@ -172,14 +171,21 @@ function removeBrowserTemp(state: ActiveWorkspace): void {
   state.browserTmp = undefined;
 }
 
-/** Show `~` for a path inside the home directory. Other paths stay absolute. */
-export function redactHomePath(dir: string): string {
-  const home = path.resolve(os.homedir());
+/**
+ * Absolute path for the Workspace line.
+ * C0 (U+0000 through U+001F) and C1 (U+007F through U+009F) are written as
+ * `\u` plus four lowercase hex digits. The path is not rewritten with `~`.
+ */
+export function formatWorkspacePath(dir: string): string {
   const resolved = path.resolve(dir);
-  let shown = resolved;
-  if (resolved === home) shown = '~';
-  else if (resolved.startsWith(`${home}${path.sep}`)) shown = `~${path.sep}${resolved.slice(home.length + 1)}`;
-  return displayText(shown);
+  return resolved.replace(/[\u0000-\u001F\u007F-\u009F]/g, (char) => {
+    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  });
+}
+
+/** `Workspace: <absolute path>` plus a newline. Both keep paths write this to stderr. */
+export function workspaceLine(dir: string): string {
+  return `Workspace: ${formatWorkspacePath(dir)}\n`;
 }
 
 function isOutsideRoot(root: string, target: string): boolean {
@@ -257,6 +263,9 @@ export interface PlaywrightRun {
 }
 
 export interface WorkspaceRun {
+  /** `qcv-run-XXXXXX`. `--keep-workspace` keeps this directory. After the browser temp is removed it contains `project`. */
+  runRoot: string;
+  /** Copied project at `<runRoot>/project`. Evidence paths are relative to this directory. */
   workspaceDir: string;
   kept: boolean;
   playwright: PlaywrightRun;
@@ -332,7 +341,7 @@ export async function runPlaywrightInWorkspace(
     if (!signalStop) removeBrowserTemp(state);
     if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
     if (signalStop) await new Promise(() => {});
-    return { workspaceDir, kept: options.keep, playwright };
+    return { runRoot, workspaceDir, kept: options.keep, playwright };
   } catch (error) {
     if (!signalStop) removeBrowserTemp(state);
     if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });

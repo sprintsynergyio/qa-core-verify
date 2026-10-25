@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildEvidence, callSiteFromStack, evidenceWithoutActionMatchCount } from '../dist/runtime/locator-evidence/evidence.js';
 import { collectLocatorEvidence, rewritePlaywrightImports } from '../dist/runtime/locator-evidence/injected-fixture.js';
-import { assertWorkspaceFile, listDescendantPids, redactHomePath } from '../dist/runtime/workspace.js';
+import { assertWorkspaceFile, formatWorkspacePath, listDescendantPids } from '../dist/runtime/workspace.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sauceDemo = path.join(repoRoot, 'example-project/saucedemo');
@@ -31,9 +31,13 @@ function injectFailure(stage) {
 
 function bindCleanup(t) {
   const stops = [];
+  const checks = [];
   const removals = [];
+  const tracked = { pids: new Set(), pgrps: new Set(), sids: new Set() };
   t.after(() => {
-    const steps = [...stops, ...removals];
+    const steps = [...stops];
+    if (process.platform === 'linux') steps.push(() => assertNoLeftovers(tracked, 'teardown'));
+    steps.push(...checks, ...removals);
     if (process.env.QCV_INJECT_TEARDOWN === '1') {
       steps.unshift(async () => {
         throw new Error('injected teardown failure');
@@ -42,15 +46,78 @@ function bindCleanup(t) {
     return runSteps(steps);
   });
   return {
+    tracked,
     stop(fn) {
       stops.push(fn);
+    },
+    check(fn) {
+      checks.push(fn);
+    },
+    noteTree(rootPid) {
+      if (!rootPid || process.platform !== 'linux') return;
+      absorbIds(tracked, rootPid);
     },
     dir(prefix) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
       removals.push(() => fs.rmSync(dir, { recursive: true, force: true }));
       return dir;
     },
+    remove(dir) {
+      removals.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    },
   };
+}
+
+function procIds(pid) {
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  return { pid, pgrp: Number(rest[2]), sid: Number(rest[3]) };
+}
+
+function absorbIds(tracked, rootPid) {
+  const mine = procIds(process.pid);
+  for (const pid of [rootPid, ...listDescendantPids(rootPid)]) {
+    tracked.pids.add(pid);
+    try {
+      const info = procIds(pid);
+      if (info.pgrp && info.pgrp !== mine.pgrp) tracked.pgrps.add(info.pgrp);
+      if (info.sid && info.sid !== mine.sid) tracked.sids.add(info.sid);
+    } catch {
+      // The process exited before its ids could be read.
+    }
+  }
+}
+
+// The test process shares its session with the runner, so that session is not
+// required to be empty. Processes recorded from this test's tree must be gone,
+// including a detached child whose process group or session is not the test's.
+function assertNoLeftovers(tracked, label) {
+  const left = [];
+  for (const name of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    let info;
+    try {
+      info = procIds(pid);
+    } catch {
+      continue;
+    }
+    if (tracked.pids.has(pid) || tracked.pgrps.has(info.pgrp) || tracked.sids.has(info.sid)) left.push(pid);
+  }
+  assert.deepEqual(left, [], `${label} left pids ${left.join(',')}`);
+  const descendants = listDescendantPids(process.pid);
+  assert.deepEqual(descendants, [], `${label} left descendants ${descendants.join(',')}`);
+}
+
+function parseWorkspaceLine(stderr, stdout) {
+  assert.equal(stdout.includes('Workspace:'), false, stdout);
+  const lines = stderr.split(/\r?\n/).filter((line) => line.startsWith('Workspace: '));
+  assert.equal(lines.length, 1, stderr);
+  const shown = lines[0].slice('Workspace: '.length);
+  assert.equal(shown.includes('~'), false, shown);
+  assert.equal(shown, formatWorkspacePath(shown));
+  assert.equal(path.isAbsolute(shown), true, shown);
+  return shown;
 }
 
 async function runSteps(steps) {
@@ -382,8 +449,11 @@ test('keep-workspace retains the copy and the symlinked node_modules', async (t)
       keepWorkspace: true,
     }),
   );
-  t.after(() => fs.rmSync(run.workspaceDir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(run.runRoot, { recursive: true, force: true }));
   assert.equal(run.kept, true);
+  assert.equal(run.workspaceDir, path.join(run.runRoot, 'project'));
+  assert.equal(path.basename(run.runRoot).startsWith('qcv-run-'), true);
+  assert.deepEqual(fs.readdirSync(run.runRoot).sort(), ['project']);
   assert.equal(fs.existsSync(run.workspaceDir), true);
   const link = path.join(run.workspaceDir, 'node_modules');
   assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
@@ -392,7 +462,7 @@ test('keep-workspace retains the copy and the symlinked node_modules', async (t)
   assert.equal(spec.includes('@playwright/test'), false);
   const config = fs.readFileSync(path.join(run.workspaceDir, 'playwright.config.ts'), 'utf8');
   assert.match(config, /@playwright\/test/);
-  fs.rmSync(run.workspaceDir, { recursive: true, force: true });
+  fs.rmSync(run.runRoot, { recursive: true, force: true });
   assert.equal(fs.readFileSync(modules).equals(marker), true);
 });
 
@@ -495,11 +565,9 @@ function runKeptEvidence(t, project) {
     { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(scratch) },
   );
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  const match = /Workspace: (\S+)/.exec(result.stdout);
-  assert.ok(match, result.stdout);
-  const workspace = match[1];
-  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
-  return workspace;
+  const runRoot = parseWorkspaceLine(result.stderr, result.stdout);
+  t.after(() => fs.rmSync(runRoot, { recursive: true, force: true }));
+  return path.join(runRoot, 'project');
 }
 
 test('a symlink inside the project is copied as a file and the original stays unchanged', (t) => {
@@ -749,12 +817,23 @@ test('record order does not follow action matchCount', (t) => {
   );
 });
 
-test('a home path is shown with a tilde and other paths stay absolute', () => {
-  const home = os.homedir();
-  assert.equal(redactHomePath(home), '~');
-  assert.equal(redactHomePath(path.join(home, 'qcv', 'project')), `~${path.sep}qcv${path.sep}project`);
+test('Workspace paths stay absolute and escape control characters', () => {
+  const home = path.join(os.homedir(), 'qcv', 'project');
+  assert.equal(formatWorkspacePath(home), path.resolve(home));
+  assert.equal(formatWorkspacePath(home).includes('~'), false);
   const outside = path.join(os.tmpdir(), 'qcv-not-home', 'project');
-  assert.equal(redactHomePath(outside), outside);
+  assert.equal(formatWorkspacePath(outside), path.resolve(outside));
+  const messy = path.join(os.tmpdir(), 'qcv-\u0001-run\n\u007f\u0085');
+  const formatted = formatWorkspacePath(messy);
+  assert.equal(formatted.includes('\u0001'), false);
+  assert.equal(formatted.includes('\n'), false);
+  assert.equal(formatted.includes('\u007f'), false);
+  assert.equal(formatted.includes('\u0085'), false);
+  assert.equal(formatted.includes('~'), false);
+  assert.match(formatted, /\\u0001/);
+  assert.match(formatted, /\\u000a/);
+  assert.match(formatted, /\\u007f/);
+  assert.match(formatted, /\\u0085/);
 });
 
 test('planted .qcv-tmp folders are copied byte-identical and the run passes', (t) => {
@@ -787,34 +866,33 @@ test('reads user temp files', () => {
   assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
   assert.equal(fs.readFileSync(top).equals(topBytes), true);
   assert.equal(fs.readFileSync(nested).equals(nestedBytes), true);
-  const keptMatch = /Workspace: (\S+)/.exec(first.stdout);
-  assert.ok(keptMatch, first.stdout);
-  const kept = keptMatch[1];
+  const kept = parseWorkspaceLine(first.stderr, first.stdout);
+  const keptProject = path.join(kept, 'project');
+  assert.equal(path.basename(kept).startsWith('qcv-run-'), true, kept);
   assert.equal(kept.startsWith(`${scratch}${path.sep}`), true, kept);
-  assert.equal(fs.readFileSync(path.join(kept, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
-  assert.equal(fs.readFileSync(path.join(kept, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
-  assert.equal(fs.readdirSync(kept).some((name) => name.startsWith('.qcv-browser-')), false);
-  assert.equal(fs.readdirSync(path.dirname(kept)).some((name) => name.startsWith('.qcv-browser-')), false);
+  assert.deepEqual(fs.readdirSync(kept).sort(), ['project']);
+  assert.equal(fs.readFileSync(path.join(keptProject, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
+  assert.equal(fs.readFileSync(path.join(keptProject, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
+  assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('.qcv-browser-')), false);
 
   const scratchAgain = tempDir(t, 'qcv-sig-');
   const outAgain = tempDir(t, 'qcv-signal-out-');
   const again = spawnSync(
     process.execPath,
-    [cli, kept, '--only', 'locator-evidence', '--keep-workspace', '--out', outAgain],
+    [cli, keptProject, '--only', 'locator-evidence', '--keep-workspace', '--out', outAgain],
     { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(scratchAgain) },
   );
   assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
   assert.equal(fs.readFileSync(top).equals(topBytes), true);
   assert.equal(fs.readFileSync(nested).equals(nestedBytes), true);
-  assert.equal(fs.readFileSync(path.join(kept, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
-  assert.equal(fs.readFileSync(path.join(kept, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
-  const againMatch = /Workspace: (\S+)/.exec(again.stdout);
-  assert.ok(againMatch, again.stdout);
-  const keptAgain = againMatch[1];
-  assert.equal(fs.readFileSync(path.join(keptAgain, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
-  assert.equal(fs.readFileSync(path.join(keptAgain, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
-  assert.equal(fs.readdirSync(keptAgain).some((name) => name.startsWith('.qcv-browser-')), false);
-  assert.equal(fs.readdirSync(path.dirname(keptAgain)).some((name) => name.startsWith('.qcv-browser-')), false);
+  assert.equal(fs.readFileSync(path.join(keptProject, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
+  assert.equal(fs.readFileSync(path.join(keptProject, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
+  const keptAgain = parseWorkspaceLine(again.stderr, again.stdout);
+  const againProject = path.join(keptAgain, 'project');
+  assert.deepEqual(fs.readdirSync(keptAgain).sort(), ['project']);
+  assert.equal(fs.readFileSync(path.join(againProject, '.qcv-tmp', 'data.txt')).equals(topBytes), true);
+  assert.equal(fs.readFileSync(path.join(againProject, 'tests', '.qcv-tmp', 'data.txt')).equals(nestedBytes), true);
+  assert.equal(fs.readdirSync(scratchAgain).some((name) => name.startsWith('.qcv-browser-')), false);
 });
 
 test(
@@ -848,6 +926,7 @@ test('hang', async ({ page }) => {
         env: privateTempEnv(scratch),
       });
       cleanup.stop(() => stopCli(child));
+      cleanup.noteTree(child.pid);
       injectFailure('after-spawn');
       const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
       assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
@@ -856,8 +935,10 @@ test('hang', async ({ page }) => {
       injectFailure('after-profile');
       const browserUp = await waitForBrowser(child.pid, 20_000);
       assert.equal(browserUp, true, `${item.signal} browser did not start`);
+      cleanup.noteTree(child.pid);
       await new Promise((resolve) => setTimeout(resolve, 500));
       injectFailure('browser-up');
+      cleanup.noteTree(child.pid);
       const exitedPromise = waitForExitCode(child, 15_000);
       child.kill(item.signal);
       if (item.again) {
@@ -876,16 +957,41 @@ test('hang', async ({ page }) => {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const left = fs.readdirSync(scratch);
       assert.deepEqual(left, [], `${label} left ${left.join(', ')} in ${scratch}`);
+      cleanup.noteTree(child.pid);
+      assertNoLeftovers(cleanup.tracked, label);
     }
   },
 );
 
 test(
-  'SIGINT with --keep-workspace prints the kept path on stderr',
-  { skip: process.platform !== 'linux' && 'needs /proc', timeout: 60_000 },
+  'keep-workspace prints the run directory on stderr for a normal finish and for SIGINT, SIGTERM, and SIGHUP',
+  { skip: process.platform !== 'linux' && 'needs /proc', timeout: 120_000 },
   async (t) => {
     const cleanup = bindCleanup(t);
-    const project = cleanup.dir('qcv-signal-project-');
+    const homeTmp = fs.mkdtempSync(path.join(os.homedir(), 'qcv-home-tmp-'));
+    cleanup.remove(homeTmp);
+    const cli = path.join(repoRoot, 'dist/cli.js');
+    const quick = path.join(homeTmp, 'quick');
+    const quickScratch = path.join(homeTmp, 'quick-scratch');
+    const quickOut = path.join(homeTmp, 'quick-out');
+    fs.mkdirSync(quick);
+    fs.mkdirSync(quickScratch);
+    fs.mkdirSync(quickOut);
+    writeProject(quick);
+    const finished = spawnSync(
+      process.execPath,
+      [cli, quick, '--only', 'locator-evidence', '--keep-workspace', '--out', quickOut],
+      { cwd: repoRoot, encoding: 'utf8', env: privateTempEnv(quickScratch) },
+    );
+    assert.equal(finished.status, 0, `${finished.stdout}\n${finished.stderr}`);
+    const finishedRun = parseWorkspaceLine(finished.stderr, finished.stdout);
+    assert.equal(finishedRun.startsWith(`${homeTmp}${path.sep}`), true, finishedRun);
+    assert.equal(path.basename(finishedRun).startsWith('qcv-run-'), true, finishedRun);
+    assert.deepEqual(fs.readdirSync(finishedRun).sort(), ['project']);
+    assert.equal(fs.existsSync(path.join(finishedRun, 'project', 'retry.spec.ts')), true);
+
+    const project = path.join(homeTmp, 'hang');
+    fs.mkdirSync(project);
     const token = `qcv-signal-marker-${process.pid}-keep.txt`;
     fs.writeFileSync(path.join(project, token), 'marker');
     const userFile = path.join(project, 'keep-me.txt');
@@ -898,38 +1004,52 @@ test('hang', async ({ page }) => {
 });
 `,
     });
-    const scratch = cleanup.dir('qcv-sig-');
-    const out = cleanup.dir('qcv-signal-out-');
-    const cli = path.join(repoRoot, 'dist/cli.js');
-    const child = spawn(
-      process.execPath,
-      [cli, project, '--only', 'locator-evidence', '--keep-workspace', '--out', out],
-      { stdio: ['ignore', 'pipe', 'pipe'], env: privateTempEnv(scratch) },
-    );
-    cleanup.stop(() => stopCli(child));
-    let stderr = '';
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString('utf8');
-    });
-    const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
-    const browserUp = await waitForBrowser(child.pid, 20_000);
-    assert.equal(browserUp, true, 'keep-workspace browser did not start');
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const exitedPromise = waitForExitCode(child, 15_000);
-    child.kill('SIGINT');
-    const exited = await exitedPromise;
-    if (!child.stderr.readableEnded) {
-      await new Promise((resolve) => child.stderr.once('end', resolve));
+    const signals = [
+      { signal: 'SIGINT', code: 130 },
+      { signal: 'SIGTERM', code: 143 },
+      { signal: 'SIGHUP', code: 129 },
+    ];
+    for (const item of signals) {
+      const scratch = fs.mkdtempSync(path.join(homeTmp, 'qcv-sig-'));
+      const out = fs.mkdtempSync(path.join(homeTmp, 'qcv-signal-out-'));
+      const child = spawn(
+        process.execPath,
+        [cli, project, '--only', 'locator-evidence', '--keep-workspace', '--out', out],
+        { stdio: ['ignore', 'pipe', 'pipe'], env: privateTempEnv(scratch) },
+      );
+      cleanup.stop(() => stopCli(child));
+      cleanup.noteTree(child.pid);
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString('utf8');
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+      });
+      const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
+      const browserUp = await waitForBrowser(child.pid, 20_000);
+      assert.equal(browserUp, true, `${item.signal} keep-workspace browser did not start`);
+      cleanup.noteTree(child.pid);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      cleanup.noteTree(child.pid);
+      const exitedPromise = waitForExitCode(child, 15_000);
+      child.kill(item.signal);
+      const exited = await exitedPromise;
+      if (!child.stdout.readableEnded) await new Promise((resolve) => child.stdout.once('end', resolve));
+      if (!child.stderr.readableEnded) await new Promise((resolve) => child.stderr.once('end', resolve));
+      assert.equal(exited.code, item.code, `${item.signal} exited ${exited.code} signal ${exited.signal}`);
+      const shown = parseWorkspaceLine(stderr, stdout);
+      assert.equal(shown, formatWorkspacePath(path.dirname(workspace)), stderr);
+      assert.equal(shown.startsWith(`${homeTmp}${path.sep}`), true, shown);
+      assert.equal(path.basename(shown).startsWith('qcv-run-'), true, shown);
+      assert.deepEqual(fs.readdirSync(shown).sort(), ['project']);
+      assert.equal(fs.readFileSync(path.join(shown, 'project', token), 'utf8'), 'marker');
+      assert.equal(fs.readFileSync(userFile, 'utf8'), 'user-owned');
+      assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('.qcv-browser-')), false);
+      cleanup.noteTree(child.pid);
+      assertNoLeftovers(cleanup.tracked, item.signal);
     }
-    assert.equal(exited.code, 130, `SIGINT exited ${exited.code} signal ${exited.signal}`);
-    const match = /Workspace: (\S+)/.exec(stderr);
-    assert.ok(match, stderr);
-    assert.equal(match[1], workspace);
-    assert.equal(fs.readFileSync(path.join(workspace, token), 'utf8'), 'marker');
-    assert.equal(fs.readFileSync(userFile, 'utf8'), 'user-owned');
-    assert.equal(fs.readdirSync(workspace).some((name) => name.startsWith('.qcv-browser-')), false);
-    assert.equal(fs.readdirSync(path.dirname(workspace)).some((name) => name.startsWith('.qcv-browser-')), false);
-    assert.equal(redactHomePath(workspace), workspace);
   },
 );
 
@@ -966,6 +1086,7 @@ await new Promise((resolve) => {
       holderErr += chunk.toString('utf8');
     });
     cleanup.stop(() => stopHelper(child, 5_000));
+    cleanup.noteTree(child.pid);
     injectFailure('after-spawn');
     await readLine(child.stdout, 20_000).catch((error) => {
       throw new Error(`${error.message}\n${holderErr}`);
@@ -975,6 +1096,7 @@ await new Promise((resolve) => {
     assert.equal(profile === decoy, false);
     assert.equal(fs.existsSync(path.join(decoy, 'keep.txt')), true);
     assert.equal(commandUsesPath(profile), true, 'outside browser was not using its profile');
+    cleanup.noteTree(child.pid);
     injectFailure('after-profile');
 
     const project = cleanup.dir('qcv-signal-project-');
@@ -996,12 +1118,15 @@ test('hang', async ({ page }) => {
       env: privateTempEnv(scratch),
     });
     cleanup.stop(() => stopCli(cliChild));
+    cleanup.noteTree(cliChild.pid);
     const workspace = await waitForMarkedWorkspace(scratch, token, 20_000);
     assert.equal(workspace.startsWith(`${scratch}${path.sep}`), true, workspace);
     const browserUp = await waitForBrowser(cliChild.pid, 20_000);
     assert.equal(browserUp, true, 'signal browser did not start');
+    cleanup.noteTree(cliChild.pid);
     await new Promise((resolve) => setTimeout(resolve, 500));
     injectFailure('browser-up');
+    cleanup.noteTree(cliChild.pid);
     const exitedPromise = waitForExitCode(cliChild, 15_000);
     cliChild.kill('SIGINT');
     const exited = await exitedPromise;
@@ -1014,6 +1139,9 @@ test('hang', async ({ page }) => {
     assert.equal(fs.existsSync(profile), true, 'outside Chromium profile was removed');
     assert.equal(commandUsesPath(profile), true, 'outside browser died');
     await stopHelper(child, 15_000);
+    cleanup.noteTree(child.pid);
+    cleanup.noteTree(cliChild.pid);
+    assertNoLeftovers(cleanup.tracked, 'outside profile');
   },
 );
 

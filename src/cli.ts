@@ -11,6 +11,7 @@ import { buildReport } from './report/model.js';
 import { consoleReportPaths, displayText } from './report/paths.js';
 import { consoleText, parseFormats, reportJson, writeReportFiles, type ReportFormat } from './report/write.js';
 import { collectLocatorEvidence } from './runtime/locator-evidence/injected-fixture.js';
+import { workspaceLine } from './runtime/workspace.js';
 import { CHECKS_RUN, collectFindings } from './rules/index.js';
 import type { Severity } from './rules/types.js';
 import { ToolError } from './tool-error.js';
@@ -34,7 +35,11 @@ Options:
                       Not accepted with --only locator-evidence.
   --only <name>       Run one check instead of the static audit. The name is locator-evidence.
                       That check runs Playwright in a temp copy and writes locator-evidence.json.
-  --keep-workspace    Keep the temp copy. Requires --only locator-evidence.
+  --keep-workspace    Keep the temp run directory. Requires --only locator-evidence.
+                      stderr prints Workspace: and the absolute qcv-run directory.
+                      That directory contains project, the copied tree.
+                      The same line is printed after SIGINT, SIGTERM, and SIGHUP.
+                      C0 and C1 controls in the path are escaped as \\u plus four hex digits.
   -h, --help          Show this help.
 
 Exit codes:
@@ -226,7 +231,7 @@ async function runLocatorEvidence(options: CliOptions, cwd: string): Promise<num
     process.stdout.write(
       `Locator evidence: ${evidenceLine}\nPlaywright exit: ${result.evidence.playwrightExitCode}\nRecords: ${result.evidence.records.length}\n`,
     );
-    if (options.keepWorkspace) process.stdout.write(`Workspace: ${result.workspaceDir}\n`);
+    if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
     const code = result.evidence.playwrightExitCode;
     if (code === 0 || code === 1) return code;
     console.error(`Playwright exited ${code}.`);
