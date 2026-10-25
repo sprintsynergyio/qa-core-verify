@@ -124,6 +124,8 @@ export interface SuiteInventory {
 interface Bindings {
   testLocals: Set<string>;
   expectLocals: Set<string>;
+  /** Const names bound to `expect.soft`. `let` and `var` are never added. */
+  softLocals: Set<string>;
   namespaces: Set<string>;
 }
 
@@ -132,6 +134,7 @@ interface SuiteContext {
   modifiers: TestModifier[];
   modifierSites: ModifierSite[];
   expectAliases: Set<string>;
+  softAliases: Set<string>;
 }
 
 interface ExpectShape {
@@ -197,7 +200,7 @@ export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInve
   const skippedDescribes: SkippedDescribe[] = [];
   walkSuite(
     sourceFile,
-    { titles: [], modifiers: [], modifierSites: [], expectAliases: new Set() },
+    { titles: [], modifiers: [], modifierSites: [], expectAliases: new Set(), softAliases: new Set() },
     sourceFile,
     bindings,
     config,
@@ -239,6 +242,7 @@ function walkSuite(
         // describe.skip is reported once on the block. only and fixme still apply to each test.
         modifierSites: [...ctx.modifierSites, ...sites.filter((site) => site.modifier !== 'skip')],
         expectAliases: new Set(ctx.expectAliases),
+        softAliases: new Set(ctx.softAliases),
       };
       if (callback) walkSuite(callback.body, next, sourceFile, bindings, config, tests, skippedDescribes);
       return;
@@ -267,12 +271,27 @@ function noteSuiteAliases(statement: ts.VariableStatement, ctx: SuiteContext, bi
   if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return;
   for (const declaration of statement.declarationList.declarations) {
     if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+    const name = declaration.name.text;
     const init = unwrapExpression(declaration.initializer);
-    if (!ts.isIdentifier(init)) continue;
-    if (bindings.expectLocals.has(init.text) || ctx.expectAliases.has(init.text)) {
-      ctx.expectAliases.add(declaration.name.text);
+    if (isSoftAliasInitializer(init, bindings, ctx)) {
+      ctx.softAliases.add(name);
+      ctx.expectAliases.delete(name);
+      continue;
+    }
+    if (ts.isIdentifier(init) && (bindings.expectLocals.has(init.text) || ctx.expectAliases.has(init.text))) {
+      ctx.expectAliases.add(name);
+      ctx.softAliases.delete(name);
     }
   }
+}
+
+/** `expect.soft`, or a const that is already a soft alias. `let` and `var` never reach this function. */
+function isSoftAliasInitializer(expr: ts.Expression, bindings: Bindings, ctx: SuiteContext): boolean {
+  if (ts.isIdentifier(expr)) return ctx.softAliases.has(expr.text) || bindings.softLocals.has(expr.text);
+  if (!ts.isPropertyAccessExpression(expr) || expr.name.text !== 'soft') return false;
+  const base = unwrapExpression(expr.expression);
+  if (!ts.isIdentifier(base)) return false;
+  return bindings.expectLocals.has(base.text) || ctx.expectAliases.has(base.text);
 }
 
 function callCalleeName(call: ts.CallExpression): string | undefined {
@@ -320,7 +339,7 @@ function recordTest(
     unresolved: [],
     floatingCalls: [],
   };
-  collectBody(callback, test, sourceFile, bindings, config, ctx.expectAliases);
+  collectBody(callback, test, sourceFile, bindings, config, ctx.expectAliases, ctx.softAliases);
   tests.push(test);
 }
 
@@ -331,6 +350,7 @@ function collectBody(
   bindings: Bindings,
   config: VerifyConfig,
   expectAliases: ReadonlySet<string>,
+  softAliases: ReadonlySet<string>,
 ): void {
   const analyzed = analyzeBody({
     body: callback.body,
@@ -349,8 +369,10 @@ function collectBody(
     isLocatorExpression: (expr, names) => isLocatorExpression(expr, names),
     readHelper: (call, active, file) => asHelper(call, active, config, file),
     expectAliases,
+    softAliases,
     isExpectName: (name, active) => active.expectLocals.has(name),
-    withExpectAliases: (active, aliases) => withExpectAliases(active, aliases),
+    isSoftName: (name, active) => active.softLocals.has(name),
+    withExpectAliases: (active, aliases, softAliases) => withExpectAliases(active, aliases, softAliases),
   });
   test.expects = analyzed.expects;
   test.locators = analyzed.locators;
@@ -360,11 +382,17 @@ function collectBody(
   test.floatingCalls = analyzed.floatingCalls;
 }
 
-function withExpectAliases(bindings: Bindings, aliases: ReadonlySet<string>): Bindings {
-  if (aliases.size === 0) return bindings;
+function withExpectAliases(
+  bindings: Bindings,
+  aliases: ReadonlySet<string>,
+  softAliases: ReadonlySet<string>,
+): Bindings {
+  if (aliases.size === 0 && softAliases.size === 0) return bindings;
   const expectLocals = new Set(bindings.expectLocals);
   for (const name of aliases) expectLocals.add(name);
-  return { testLocals: bindings.testLocals, expectLocals, namespaces: bindings.namespaces };
+  const softLocals = new Set(bindings.softLocals);
+  for (const name of softAliases) softLocals.add(name);
+  return { testLocals: bindings.testLocals, expectLocals, softLocals, namespaces: bindings.namespaces };
 }
 
 function readExpectParts(
@@ -437,6 +465,10 @@ function expectShape(expr: ts.Expression, bindings: Bindings): ExpectShape | nul
     return { ...inner, rejects: true };
   }
   if (!ts.isCallExpression(unwrapped)) return null;
+  const callee = unwrapExpression(unwrapped.expression);
+  if (ts.isIdentifier(callee) && bindings.softLocals.has(callee.text)) {
+    return { not: false, soft: true, poll: false, resolves: false, rejects: false, subject: unwrapped.arguments[0] };
+  }
   if (isExpectConfigure(unwrapped.expression, bindings)) {
     return { not: false, soft: false, poll: false, resolves: false, rejects: false, subject: unwrapped.arguments[0] };
   }
@@ -670,8 +702,9 @@ function dedupeModifiers(modifiers: readonly TestModifier[]): TestModifier[] {
 function collectBindings(sourceFile: ts.SourceFile): Bindings {
   const testLocals = new Set<string>();
   const expectLocals = new Set<string>();
+  const softLocals = new Set<string>();
   const namespaces = new Set<string>();
-  const bindings: Bindings = { testLocals, expectLocals, namespaces };
+  const bindings: Bindings = { testLocals, expectLocals, softLocals, namespaces };
 
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
@@ -685,8 +718,12 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
         const init = unwrapExpression(node.initializer);
         const list = node.parent;
         const isConst = ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
-        if (isConst && isFileScope(node) && ts.isIdentifier(init) && expectLocals.has(init.text)) {
+        if (isConst && isFileScope(node) && isFileSoftAlias(init, expectLocals, softLocals)) {
+          softLocals.add(node.name.text);
+          expectLocals.delete(node.name.text);
+        } else if (isConst && isFileScope(node) && ts.isIdentifier(init) && expectLocals.has(init.text)) {
           expectLocals.add(node.name.text);
+          softLocals.delete(node.name.text);
         }
       }
     }
@@ -702,6 +739,13 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   };
   visit(sourceFile);
   return bindings;
+}
+
+function isFileSoftAlias(expr: ts.Expression, expectLocals: Set<string>, softLocals: Set<string>): boolean {
+  if (ts.isIdentifier(expr)) return softLocals.has(expr.text);
+  if (!ts.isPropertyAccessExpression(expr) || expr.name.text !== 'soft') return false;
+  const base = unwrapExpression(expr.expression);
+  return ts.isIdentifier(base) && expectLocals.has(base.text);
 }
 
 function isFileScope(node: ts.Node): boolean {

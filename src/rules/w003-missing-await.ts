@@ -9,6 +9,8 @@ export const W003_RULE_ID = 'QCV-W003';
  * in playwright/types/test.d.ts. toMatchSnapshot returns void, so it is not listed.
  * expect.poll, expect().resolves, and expect().rejects are separate: every matcher on them returns a promise.
  */
+const W003_FIX = 'Await the assertion, or return its promise from the test.';
+
 const ASYNC_MATCHERS = new Set([
   'toBeAttached',
   'toBeChecked',
@@ -61,7 +63,7 @@ export function findMissingAwait(tests: readonly InventoryTest[]): Finding[] {
         testTitle: title,
         message: 'Async assertion is not awaited.',
         evidence: expect.evidence,
-        fixHint: 'Await the assertion, or return its promise from the test.',
+        fixHint: W003_FIX,
         relatedLintRule: 'missing-playwright-await',
         ownerId,
       });
@@ -84,7 +86,7 @@ function floatingFinding(call: SourceFact, testTitle: string, ownerId: string): 
     testTitle,
     message: 'Async assertion is not awaited.',
     evidence: call.source,
-    fixHint: 'Await the call, or return its promise from the test.',
+    fixHint: W003_FIX,
     relatedLintRule: 'missing-playwright-await',
     ownerId,
   };

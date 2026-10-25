@@ -41,10 +41,14 @@ export interface AnalyzeOptions<Bindings> {
   isLocatorCall: (call: ts.CallExpression, locatorNames: Set<string>) => boolean;
   isLocatorExpression: (expr: ts.Expression, locatorNames: Set<string>) => boolean;
   readHelper: (call: ts.CallExpression, bindings: Bindings, file: ts.SourceFile) => HelperCall | null;
-  /** Const aliases of `expect` from the file or an enclosing describe. */
+  /** Const aliases of `expect` from the file or an enclosing describe. `let` and `var` are not included. */
   expectAliases?: ReadonlySet<string>;
+  /** Const aliases of `expect.soft`. `let` and `var` are not included. */
+  softAliases?: ReadonlySet<string>;
   isExpectName: (name: string, bindings: Bindings) => boolean;
-  withExpectAliases: (bindings: Bindings, aliases: ReadonlySet<string>) => Bindings;
+  /** True when `name` is a const alias of `expect.soft` already stored on the bindings. */
+  isSoftName: (name: string, bindings: Bindings) => boolean;
+  withExpectAliases: (bindings: Bindings, aliases: ReadonlySet<string>, softAliases: ReadonlySet<string>) => Bindings;
 }
 
 export interface BodyAnalysis {
@@ -131,6 +135,7 @@ interface SavedScope {
   conditional: boolean;
   swallowed: boolean;
   expectAliases: Set<string>;
+  softAliases: Set<string>;
   eventCount: number;
 }
 
@@ -164,6 +169,7 @@ class BodyWalker<Bindings> {
   private conditional = false;
   private swallowed = false;
   private expectAliases: Set<string>;
+  private softAliases: Set<string>;
   private readonly expects: ExpectCall[] = [];
   private readonly locators: LocatorCall[] = [];
   private readonly helpers: HelperCall[] = [];
@@ -181,6 +187,7 @@ class BodyWalker<Bindings> {
     this.fileIndex = indexParsedFile(options.sourceFile);
     this.bindings = options.bindings;
     this.expectAliases = new Set(options.expectAliases ?? []);
+    this.softAliases = new Set(options.softAliases ?? []);
     seedPageNames(options.parameters, this.pageNames);
   }
 
@@ -308,9 +315,11 @@ class BodyWalker<Bindings> {
     const savedReturnAwaited = this.returnIsAwaited;
     const savedConditional = this.conditional;
     const savedAliases = this.expectAliases;
+    const savedSoft = this.softAliases;
     this.returnCounts = false;
     this.returnIsAwaited = false;
     this.expectAliases = new Set(savedAliases);
+    this.softAliases = new Set(savedSoft);
     this.frames.push({ fn: node, counts: false });
     const receiver = iterationReceiver(node);
     if (receiver && this.iterationMayBeEmpty(receiver)) this.conditional = true;
@@ -320,6 +329,7 @@ class BodyWalker<Bindings> {
     this.returnIsAwaited = savedReturnAwaited;
     this.conditional = savedConditional;
     this.expectAliases = savedAliases;
+    this.softAliases = savedSoft;
   }
 
   private onCall(call: ts.CallExpression): 'done' | 'children' {
@@ -329,6 +339,7 @@ class BodyWalker<Bindings> {
         const savedReturn = this.returnCounts;
         const savedReturnAwaited = this.returnIsAwaited;
         const savedAliases = this.expectAliases;
+        const savedSoft = this.softAliases;
         const stepSettled = isAwaited(call) || this.isReturnedNode(call) || this.returnedThroughChain(call);
         const beforeExpects = this.expects.length;
         const beforeHelpers = this.helpers.length;
@@ -336,12 +347,14 @@ class BodyWalker<Bindings> {
         this.returnCounts = false;
         this.returnIsAwaited = stepSettled;
         this.expectAliases = new Set(savedAliases);
+        this.softAliases = new Set(savedSoft);
         this.frames.push({ fn: callback, counts: false });
         this.walk(callback.body);
         this.frames.pop();
         this.returnCounts = savedReturn;
         this.returnIsAwaited = savedReturnAwaited;
         this.expectAliases = savedAliases;
+        this.softAliases = savedSoft;
         const tiedToStep = this.expects.slice(beforeExpects).some((expect) => expect.awaited || expect.returned);
         const addedHelpers = this.helpers.length > beforeHelpers;
         if (!stepSettled && ts.isBlock(callback.body) && (tiedToStep || addedHelpers)) this.floatingCalls.push(fact);
@@ -762,7 +775,7 @@ class BodyWalker<Bindings> {
   }
 
   private bound(): Bindings {
-    return this.options.withExpectAliases(this.bindings, this.expectAliases);
+    return this.options.withExpectAliases(this.bindings, this.expectAliases, this.softAliases);
   }
 
   private isExpectIdentifier(name: string): boolean {
@@ -770,22 +783,40 @@ class BodyWalker<Bindings> {
     return this.options.isExpectName(name, this.bindings);
   }
 
-  /** A `const` alias of `expect` in this test. `let` and `var` are not aliases. */
+  /**
+   * A `const` alias of `expect` or `expect.soft` in this test.
+   * `let` and `var` are not aliases, because they can be reassigned.
+   */
   private noteAlias(node: ts.VariableDeclaration): void {
     if (!ts.isIdentifier(node.name)) return;
     const name = node.name.text;
     if (isConst(node) && node.initializer) {
       const init = unwrap(node.initializer);
+      if (this.isSoftInitializer(init)) {
+        this.softAliases.add(name);
+        this.expectAliases.delete(name);
+        return;
+      }
       if (ts.isIdentifier(init) && this.isExpectIdentifier(init.text)) {
         this.expectAliases.add(name);
+        this.softAliases.delete(name);
         return;
       }
     }
     this.shadowAlias(name);
   }
 
+  /** `expect.soft`, or a const already known to be `expect.soft`. */
+  private isSoftInitializer(expr: ts.Expression): boolean {
+    if (ts.isIdentifier(expr)) return this.softAliases.has(expr.text) || this.options.isSoftName(expr.text, this.bindings);
+    if (!ts.isPropertyAccessExpression(expr) || expr.name.text !== 'soft') return false;
+    const base = unwrap(expr.expression);
+    return ts.isIdentifier(base) && this.isExpectIdentifier(base.text);
+  }
+
   private shadowAlias(name: string): void {
-    if (this.expectAliases.has(name)) this.expectAliases.delete(name);
+    this.expectAliases.delete(name);
+    this.softAliases.delete(name);
   }
 
   private returnedThroughChain(node: ts.Node): boolean {
@@ -816,6 +847,7 @@ class BodyWalker<Bindings> {
     this.returnCounts = true;
     this.returnIsAwaited = false;
     this.expectAliases = new Set();
+    this.softAliases = new Set();
     seedPageNames(fn.parameters, this.pageNames);
   }
 
@@ -837,6 +869,7 @@ class BodyWalker<Bindings> {
       conditional: this.conditional,
       swallowed: this.swallowed,
       expectAliases: this.expectAliases,
+      softAliases: this.softAliases,
       eventCount: this.events.length,
     };
   }
@@ -858,6 +891,7 @@ class BodyWalker<Bindings> {
     this.conditional = saved.conditional;
     this.swallowed = saved.swallowed;
     this.expectAliases = saved.expectAliases;
+    this.softAliases = saved.softAliases;
   }
 
   private withConditional(run: () => void): void {

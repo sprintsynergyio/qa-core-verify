@@ -233,8 +233,12 @@ test('the demo config is read and the cli agrees with the static pipeline', (t) 
   assert.doesNotMatch(result.stdout, /untrusted[^\n]*locked out user sees the error/);
   assert.doesNotMatch(result.stdout, /untrusted[^\n]*checkout overview shows the backpack item total/);
   assert.equal(result.stdout.includes(projectDir), false);
-  const reportRel = path.relative(projectDir, path.join(out, 'report.json')).split(path.sep).join('/');
-  assert.match(result.stdout, new RegExp(`Reports: ${reportRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  const typedOut = out.split(path.sep).join('/');
+  const escapedOut = typedOut.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  assert.match(
+    result.stdout,
+    new RegExp(`Reports: ${escapedOut}/report.json, ${escapedOut}/report.md, ${escapedOut}/report.html`),
+  );
   const counts = { error: 0, warn: 0, info: 0 };
   const verdicts = { trusted: 0, review: 0, untrusted: 0, 'baseline-red': 0, 'not-run': 0 };
   for (const finding of findings) counts[finding.severity] += 1;

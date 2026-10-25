@@ -20,6 +20,12 @@ test('visible after goto', async ({ page }) => {
   await expect(page.getByTestId('login-button')).toBeVisible();
 });
 
+test('url after click then goto', async ({ page }) => {
+  await page.getByRole('button', { name: 'Login' }).click();
+  await page.goto('/inventory.html');
+  await expect(page).toHaveURL('/inventory.html');
+});
+
 test('hidden after click', async ({ page }) => {
   await page.getByRole('button', { name: 'Close' }).click();
   await expect(page.getByTestId('error')).toBeHidden();

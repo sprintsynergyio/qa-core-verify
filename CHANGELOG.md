@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `--only locator-evidence` records locator match counts in a temp copy of the project. The choice and the measurements are in `docs/decisions/0001-locator-evidence.md`.
+- When `--out` is outside the project, the console prints that path as it was typed.
+- Evidence and fix hints drop C1 controls and bidi overrides before they are printed.
+- The HTML rule filter hides a whole test when none of its rules are checked.
+- A const alias of `expect.soft` is a soft assertion. `let` and `var` are not followed.
+- QCV-W006 still flags a presence-only assertion when a click is followed by `page.goto`.
+- QCV-W003 uses one fix hint for an unawaited assertion and an unawaited call.
 - A row is trusted when it has no warn or error finding. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
 - Report paths are relative to the project folder. `project.dir` is the folder's base name.
 - Markdown escapes titles, file names, and messages. Timestamps use local time and its offset. Reports name the checks that ran.

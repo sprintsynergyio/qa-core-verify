@@ -225,7 +225,7 @@ None.
 
 ### What
 
-After the last action, every assertion is `toBeVisible`, `toBeAttached`, or `toBeInViewport`. Actions include interactions such as `click` and `fill`, and the navigation calls `reload`, `goBack`, and `goForward`. `page.goto` is navigation, not a user action, so it does not count as the last action. A test whose only navigation is `page.goto` is not flagged.
+After the last action, every assertion is `toBeVisible`, `toBeAttached`, or `toBeInViewport`. Actions include interactions such as `click` and `fill`, and the navigation calls `reload`, `goBack`, and `goForward`. `page.goto` is navigation, not a user action, so it does not count as the last action. A test whose only navigation is `page.goto` is not flagged. A click, then `page.goto`, then a presence-only `toBeVisible` is still flagged, because the click stays the last user action.
 
 ### Why
 
@@ -236,6 +236,12 @@ The element can be present while the text, URL, count, or state is wrong. The te
 ```ts
 await page.getByRole('button', { name: 'Add to cart' }).click();
 await expect(page.getByTestId('inventory-list')).toBeVisible();
+```
+
+```ts
+await page.getByRole('button', { name: 'Login' }).click();
+await page.goto('/');
+await expect(page.getByTestId('login-button')).toBeVisible();
 ```
 
 ### Good Example
@@ -411,3 +417,5 @@ Imports are followed one level, into a helper or a page object in a local file. 
 A method stored on an object literal is not followed. Name it in `qa-core-verify.config.json` if it is the assertion, or move it to a function the spec imports.
 
 A `const` alias of `expect` is treated as `expect` when it is declared in the file, in a `describe` callback, or in the same test: `const e = expect` then `await e(locator).toBeVisible()`. The initializer must be `expect` or another `const` alias already in scope. `let` and `var` aliases are not followed, because they can be reassigned. `expect.configure` is recognized for `const` and for assignment.
+
+A `const` alias of `expect.soft` is a soft assertion in those same places. `const soft = expect.soft`, `const e = expect` then `const soft = e.soft`, and `const soft2 = soft` all count. `let` and `var` aliases of `expect.soft` are not followed.

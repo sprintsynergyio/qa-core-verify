@@ -41,8 +41,8 @@ A `test.describe.skip` row exists so its single finding has a place in `tests`. 
 Each row gets one verdict:
 
 - `trusted` when the row has no finding at warn level or above. Info findings, including QCV-W000, QCV-W009, and QCV-W010, stay `trusted`.
-- `review` when the row has at least one warn finding and no error finding.
-- `untrusted` when the row has at least one error finding.
+- `review` when the row has at least one warn finding and no error finding. A warn means the test is weak. It does not prove the test is useless.
+- `untrusted` when the row has at least one error finding. In the plan, untrusted means a check proved the test cannot fail, or that it uses a locator that never matched. This static checker assigns untrusted for an error from the rules that ran. It does not detect a locator that never matched. That is a later runtime check.
 - `baseline-red` and `not-run` are for tests a runtime check could not evaluate. This static checker does not assign `baseline-red`, so that count stays 0.
 
 `not-run` is extended here for rows the static checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.

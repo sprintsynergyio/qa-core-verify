@@ -458,8 +458,9 @@ test('report paths stay relative to the project from any working directory', (t)
   assert.equal(report.tests[0].file, 'a.spec.ts');
   assert.equal(report.startedAt, formatIsoOffset(started));
   assert.equal(report.finishedAt, formatIsoOffset(finished));
+  const escapedOut = out.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  assert.match(inside.out, new RegExp(`Reports: ${escapedOut}/report.json, ${escapedOut}/report.md, ${escapedOut}/report.html`));
   for (const [label, text] of [
-    ['console', inside.out],
     ['json', insideFiles.json],
     ['markdown', insideFiles.md],
     ['html', insideFiles.html],
@@ -467,6 +468,75 @@ test('report paths stay relative to the project from any working directory', (t)
     assertNoAbsolutePath(text, label);
     assert.equal(text.includes(project), false, label);
   }
+  assert.equal(inside.out.includes(project), false);
+
+  const insideOut = path.join(project, 'nested-out');
+  t.after(() => fs.rmSync(insideOut, { recursive: true, force: true }));
+  const relative = captureRun(['--format', 'console,json', '--out', 'nested-out', '.'], project, clock());
+  assert.equal(relative.status, 0, relative.err);
+  assert.match(relative.out, /Reports: nested-out\/report\.json/);
+  assertNoAbsolutePath(relative.out, 'inside out');
+
+  const sibling = path.join(path.dirname(project), 'qcv-sibling-out');
+  t.after(() => fs.rmSync(sibling, { recursive: true, force: true }));
+  const outsideTyped = captureRun(['--format', 'console,json', '--out', '../qcv-sibling-out', '.'], project, clock());
+  assert.equal(outsideTyped.status, 0, outsideTyped.err);
+  assert.match(outsideTyped.out, /Reports: \.\.\/qcv-sibling-out\/report\.json/);
+});
+
+test('displayText strips C1 controls and bidi overrides from evidence and fix hints', () => {
+  const evidence = 'see \u009B and \u202Ehidden\u202C';
+  const fixHint = 'fix \u2066hint\u2069';
+  const report = {
+    ...probeReport,
+    tests: [
+      {
+        id: 'controls-2',
+        file: 'a.spec.ts',
+        line: 1,
+        titlePath: ['kept'],
+        verdict: 'untrusted',
+        findings: [
+          {
+            ruleId: 'QCV-W001',
+            check: 'weak-assertion',
+            severity: 'error',
+            file: 'a.spec.ts',
+            line: 1,
+            column: 1,
+            message: 'message',
+            evidence,
+            fixHint,
+          },
+        ],
+      },
+    ],
+  };
+  const html = formatHtml(report);
+  const markdown = formatMarkdown(report);
+  const consoleText = formatConsoleReport(report, ['.qa-core/verify/report.md']);
+  for (const text of [html, markdown, consoleText]) {
+    assert.equal(text.includes('\u009B'), false);
+    assert.equal(text.includes('\u202E'), false);
+    assert.equal(text.includes('\u202C'), false);
+    assert.equal(text.includes('\u2066'), false);
+    assert.equal(text.includes('\u2069'), false);
+    assert.match(text, /see\s+and hidden/);
+    assert.match(text, /fix hint/);
+  }
+});
+
+test('the html rule filter hides a whole test when none of its rules are checked', () => {
+  const html = formatHtml(probeReport);
+  assert.match(html, /article\.test:has\(\.finding\)\{display:none\}/);
+  assert.match(html, /body:has\(#filter-rule-QCV-W001:checked\) article\.test\.rule-QCV-W001\{display:block\}/);
+  assert.match(html, /article\.verdict-trusted\{display:none !important\}/);
+  assert.match(html, /<article class="test verdict-untrusted rule-QCV-W001">/);
+  assert.match(html, /<article class="test verdict-trusted ">[\s\S]*<p>No findings\.<\/p>/);
+  const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  const hideAt = style.indexOf('article.test:has(.finding){display:none}');
+  const showAt = style.indexOf('body:has(#filter-rule-QCV-W001:checked) article.test.rule-QCV-W001{display:block}');
+  assert.equal(hideAt >= 0 && showAt > hideAt, true);
 });
 
 function captureRun(argv, cwd, now) {

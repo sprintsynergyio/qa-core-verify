@@ -114,9 +114,9 @@ function findingHtml(finding: ReportFinding): string {
     `<p>${escapeHtml(displayText(finding.file))}:${finding.line}:${finding.column}</p>`,
     `<p>${escapeHtml(collapseNewlines(finding.message))}</p>`,
     '<p class="label">Evidence</p>',
-    `<pre>${escapeHtml(finding.evidence)}</pre>`,
+    `<pre>${escapeHtml(displayText(finding.evidence))}</pre>`,
     '<p class="label">Fix</p>',
-    `<pre>${escapeHtml(finding.fixHint)}</pre>`,
+    `<pre>${escapeHtml(displayText(finding.fixHint))}</pre>`,
   ];
   if (finding.relatedLintRule) {
     lines.push(`<p>Related lint rule: ${escapeHtml(finding.relatedLintRule)}</p>`);
@@ -127,10 +127,15 @@ function findingHtml(finding: ReportFinding): string {
 
 function css(rules: readonly string[]): string {
   const hideVerdicts = VERDICTS.map(
-    (verdict) => `body:not(:has(#filter-verdict-${verdict}:checked)) .verdict-${verdict}{display:none}`,
+    (verdict) => `body:not(:has(#filter-verdict-${verdict}:checked)) article.verdict-${verdict}{display:none !important}`,
   );
-  const hideRules = rules.map(
+  const hideFindings = rules.map(
     (rule) => `body:not(:has(#filter-rule-${rule}:checked)) .finding.rule-${rule}{display:none}`,
+  );
+  // A test with findings stays hidden until one of its rules is checked, so clearing every rule hides the whole test.
+  const hideTestsWithFindings = 'article.test:has(.finding){display:none}';
+  const showTests = rules.map(
+    (rule) => `body:has(#filter-rule-${rule}:checked) article.test.rule-${rule}{display:block}`,
   );
   return [
     'body{margin:0;padding:24px;font-family:Georgia,serif;color:#1c1915;background:#f6f3ec}',
@@ -150,7 +155,9 @@ function css(rules: readonly string[]): string {
     'pre{white-space:pre-wrap;background:#f6f3ec;padding:8px;border-radius:6px;margin:0}',
     '.choices{display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:12px}',
     '.choices label{font-family:"Segoe UI",Helvetica,Arial,sans-serif}',
+    hideTestsWithFindings,
+    ...showTests,
+    ...hideFindings,
     ...hideVerdicts,
-    ...hideRules,
   ].join('');
 }
