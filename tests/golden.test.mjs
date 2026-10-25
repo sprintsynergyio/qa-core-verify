@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadVerifyConfig } from '../dist/config.js';
 import { discoverSpecs } from '../dist/inventory/discover.js';
 import { parseSpecFile } from '../dist/inventory/parse.js';
-import { findTestsWithNoAssertion } from '../dist/rules/w001-no-assertion.js';
+import { collectFindings } from '../dist/rules/index.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const projectDir = path.join(repoRoot, 'example-project/saucedemo');
@@ -60,24 +60,36 @@ function assertManifestShape(entry) {
   }
 }
 
-// A SEEDED comment sits on the line above the problem.
-// The manifest line is that problem line. QCV-W001 reports the same line.
+// SEEDED comments sit in a block on the lines above the problem.
+// Two rules on one line use two comments. The manifest line is that problem line.
 function seededComments(files) {
   const found = [];
   for (const file of files) {
     const lines = fs.readFileSync(file, 'utf8').split(/\n/);
-    for (let index = 0; index < lines.length; index += 1) {
-      const match = /^\s*\/\/ SEEDED:\s+(\S+)\s+(\S.*)$/.exec(lines[index] ?? '');
-      if (!match) continue;
-      const next = lines[index + 1];
+    let index = 0;
+    while (index < lines.length) {
+      if (!/^\s*\/\/ SEEDED:\s+(\S+)\s+(\S.*)$/.test(lines[index] ?? '')) {
+        index += 1;
+        continue;
+      }
+      const stack = [];
+      while (index < lines.length) {
+        const stacked = /^\s*\/\/ SEEDED:\s+(\S+)\s+(\S.*)$/.exec(lines[index] ?? '');
+        if (!stacked) break;
+        stack.push(stacked[1]);
+        index += 1;
+      }
+      const next = lines[index];
       const where = `${relativeToProject(file)}:${index + 1}`;
       assert.equal(typeof next, 'string', `${where} is the last line`);
-      assert.equal(next.trim() === '' || next.trim().startsWith('//'), false, `${where} must sit on the line above the problem`);
-      found.push({
-        file: relativeToProject(file),
-        line: index + 2,
-        ruleId: match[1],
-      });
+      assert.equal(next.trim() === '' || next.trim().startsWith('//'), false, `${where} must be the seeded line`);
+      for (const ruleId of stack) {
+        found.push({
+          file: relativeToProject(file),
+          line: index + 1,
+          ruleId,
+        });
+      }
     }
   }
   return found;
@@ -90,11 +102,15 @@ function runPipeline() {
   for (const file of discovery.files) {
     tests.push(...parseSpecFile(file, config).tests);
   }
-  return { discovery, tests, findings: findTestsWithNoAssertion(tests) };
+  return { discovery, tests, findings: collectFindings(tests) };
 }
 
 function findingKey(file, line, ruleId) {
   return `${file}:${line}:${ruleId}`;
+}
+
+function countLabel(count, singular, plural) {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function hashTree(dir) {
@@ -131,7 +147,22 @@ test('reports every active expected finding and no findings under tests/good', (
     findings.some((finding) => relativeToProject(finding.file).startsWith('tests/good/')),
     false,
   );
-  assert.equal(findings.every((finding) => finding.ruleId === 'QCV-W001' && finding.severity === 'error'), true);
+  const severityByRule = {
+    'QCV-W000': 'info',
+    'QCV-W001': 'error',
+    'QCV-W002': 'error',
+    'QCV-W003': 'error',
+    'QCV-W004': 'error',
+    'QCV-W005': 'warn',
+    'QCV-W006': 'warn',
+    'QCV-W007': 'warn',
+    'QCV-W008': 'error',
+    'QCV-W009': 'info',
+    'QCV-W010': 'info',
+  };
+  for (const finding of findings) {
+    assert.equal(finding.severity, severityByRule[finding.ruleId], `${finding.ruleId} ${finding.file}:${finding.line}`);
+  }
 });
 
 test('seeded comments and the manifest list the same file, line, and rule', () => {
@@ -144,16 +175,29 @@ test('seeded comments and the manifest list the same file, line, and rule', () =
   assert.equal(new Set(seededKeys).size, seededKeys.length);
 });
 
-test('only QCV-W001 entries are active, and the skipped test records why it does not pass', () => {
+test('QCV-W001 through QCV-W010 are active, and the skipped test records why it does not pass', () => {
   const manifest = readManifest();
-  const activeRules = [...new Set(manifest.filter((entry) => entry.status === 'active').map((entry) => entry.ruleId))];
-  assert.deepEqual(activeRules, ['QCV-W001']);
+  const activeRules = [...new Set(manifest.filter((entry) => entry.status === 'active').map((entry) => entry.ruleId))].sort();
+  assert.deepEqual(activeRules, [
+    'QCV-W001',
+    'QCV-W002',
+    'QCV-W003',
+    'QCV-W004',
+    'QCV-W005',
+    'QCV-W006',
+    'QCV-W007',
+    'QCV-W008',
+    'QCV-W009',
+    'QCV-W010',
+  ]);
+  const pendingRules = [...new Set(manifest.filter((entry) => entry.status === 'pending').map((entry) => entry.ruleId))].sort();
+  assert.deepEqual(pendingRules, ['QCV-F001', 'QCV-F002', 'QCV-L002', 'QCV-L003', 'QCV-L004']);
   const covered = new Set(manifest.map((entry) => entry.ruleId));
   for (const ruleId of SEEDED_RULES) assert.equal(covered.has(ruleId), true, ruleId);
   const withReason = manifest.filter((entry) => entry.reason !== undefined);
   assert.equal(withReason.length, 1);
   assert.equal(withReason[0].ruleId, 'QCV-W009');
-  assert.equal(withReason[0].status, 'pending');
+  assert.equal(withReason[0].status, 'active');
   assert.match(withReason[0].reason, /skips this test/);
 });
 
@@ -174,11 +218,15 @@ test('the demo config is read and the cli agrees with the static pipeline', () =
   assert.doesNotMatch(result.stdout, /add to cart updates the cart badge/);
   assert.doesNotMatch(result.stdout, /locked out user sees the error/);
   assert.doesNotMatch(result.stdout, /checkout overview shows the backpack item total/);
-  assert.match(
-    result.stdout,
-    new RegExp(
-      `Summary: ${findings.length} errors, 0 warnings, 0 info findings\\. ${tests.length} tests scanned\\.`,
-    ),
-  );
+  const counts = { error: 0, warn: 0, info: 0 };
+  for (const finding of findings) counts[finding.severity] += 1;
+  const summary = [
+    'Summary:',
+    countLabel(counts.error, 'error', 'errors') + ',',
+    countLabel(counts.warn, 'warning', 'warnings') + ',',
+    countLabel(counts.info, 'info finding', 'info findings') + '.',
+    countLabel(tests.length, 'test', 'tests') + ' scanned.',
+  ].join(' ');
+  assert.ok(result.stdout.includes(summary), result.stdout);
   assert.doesNotMatch(result.stderr, /No tests found/);
 });

@@ -25,7 +25,19 @@ An optional `qa-core-verify.config.json` in the project directory can name asser
 
 ## Rules
 
+The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](docs/rules.md) says what the rule detects, why, a bad example, a good example, the severity, and the related lint rule when there is one.
+
+- QCV-W000 Could Not Resolve Helper (info)
 - QCV-W001 Test Has No Assertion (error)
+- QCV-W002 Generic Matcher On A Locator (error)
+- QCV-W003 Web-First Assertion Not Awaited (error)
+- QCV-W004 Value Compared With Itself (error)
+- QCV-W005 Existence Check On A Page Read (warn)
+- QCV-W006 Presence Only After The Last Action (warn)
+- QCV-W007 Expect In A Branch Or A Loop (warn)
+- QCV-W008 Try Catch Swallows The Assertion (error)
+- QCV-W009 Skipped Or Focused Test (info)
+- QCV-W010 Hard Wait With No Assertion After It (info)
 
 ## Demo Suite
 

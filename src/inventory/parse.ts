@@ -2,9 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import { matchesAssertionHelper, type VerifyConfig } from '../config.js';
+import { analyzeBody } from './body.js';
 import { ToolError } from '../tool-error.js';
 
 export type TestModifier = 'only' | 'skip' | 'fixme';
+
+export type SubjectKind = 'locator' | 'page' | 'page-read' | 'literal' | 'unknown' | 'other';
+
+export type PageReadKind = 'textContent' | 'innerText' | 'getAttribute' | 'inputValue' | 'count';
+
+export type ScalarLiteral =
+  | { kind: 'string'; value: string }
+  | { kind: 'number'; value: number }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'null' }
+  | { kind: 'undefined' };
 
 export interface ExpectCall {
   matcher: string;
@@ -12,7 +24,22 @@ export interface ExpectCall {
   soft: boolean;
   poll: boolean;
   awaited: boolean;
+  /** True when the test or the current helper returns this expect call. */
+  returned: boolean;
   subjectSource: string;
+  subjectKind: SubjectKind;
+  pageRead?: PageReadKind;
+  argumentSource: string;
+  subjectLiteral?: ScalarLiteral;
+  argumentLiteral?: ScalarLiteral;
+  /** True when the subject text and the first argument text are the same. */
+  sameSource: boolean;
+  /** True when the expect sits in a branch or a loop that may not run. */
+  conditional: boolean;
+  /** True when the expect sits in a try whose catch does not rethrow. */
+  swallowed: boolean;
+  evidence: string;
+  file: string;
   line: number;
   column: number;
 }
@@ -30,6 +57,31 @@ export interface HelperCall {
   column: number;
 }
 
+export interface SourceFact {
+  file: string;
+  source: string;
+  line: number;
+  column: number;
+}
+
+export interface UnresolvedHelper extends SourceFact {
+  name: string;
+}
+
+export interface ModifierSite {
+  modifier: TestModifier;
+  source: string;
+  line: number;
+  column: number;
+}
+
+export type BodyEvent =
+  | { type: 'expect'; expect: ExpectCall }
+  | { type: 'action'; fact: SourceFact }
+  | { type: 'wait'; fact: SourceFact }
+  | { type: 'helper'; fact: SourceFact }
+  | { type: 'unresolved'; helper: UnresolvedHelper };
+
 export interface InventoryTest {
   title: string;
   titlePath: string[];
@@ -37,9 +89,12 @@ export interface InventoryTest {
   line: number;
   column: number;
   modifiers: TestModifier[];
+  modifierSites: ModifierSite[];
   expects: ExpectCall[];
   locators: LocatorCall[];
   helpers: HelperCall[];
+  events: BodyEvent[];
+  unresolved: UnresolvedHelper[];
 }
 
 export interface SuiteInventory {
@@ -55,6 +110,7 @@ interface Bindings {
 interface SuiteContext {
   titles: string[];
   modifiers: TestModifier[];
+  modifierSites: ModifierSite[];
 }
 
 interface ExpectShape {
@@ -82,12 +138,15 @@ const TIMER_NAMES = new Set(['setTimeout', 'setInterval', 'setImmediate']);
  * Read one spec with the TypeScript parser. The file is not executed.
  * `test` and `expect` must be imported. Named imports may come from
  * `@playwright/test`, `playwright`, `playwright/test`, or a relative fixture
- * file. The import is not loaded or followed. A call to `extend` on a known
- * test binding, and `expect.configure`, become bindings too. Condition-only
+ * file. Those imports are not executed. A relative helper or page object file
+ * is parsed one level deep so a test can see its assertions and locators.
+ * A second import level is not opened. A call to `extend` on a known test
+ * binding, and `expect.configure`, become bindings too. Condition-only
  * `skip`, `fixme`, `fail`, and `slow` calls are annotations. At suite level,
  * callbacks passed to other calls are searched so data-driven tests are found.
  * Callbacks of beforeEach, afterEach, beforeAll, afterAll, setTimeout,
- * setInterval, and setImmediate are not searched.
+ * setInterval, and setImmediate are not searched. An expect in one of those
+ * hooks is not an assertion of the test.
  */
 export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInventory {
   const absolute = path.resolve(filePath);
@@ -112,7 +171,7 @@ export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInve
 
   const bindings = collectBindings(sourceFile);
   const tests: InventoryTest[] = [];
-  walkSuite(sourceFile, { titles: [], modifiers: [] }, sourceFile, bindings, config, tests);
+  walkSuite(sourceFile, { titles: [], modifiers: [], modifierSites: [] }, sourceFile, bindings, config, tests);
   return { tests };
 }
 
@@ -131,6 +190,7 @@ function walkSuite(
       const next: SuiteContext = {
         titles: [...ctx.titles, readTitle(node, sourceFile)],
         modifiers: dedupeModifiers([...ctx.modifiers, ...kind.modifiers]),
+        modifierSites: [...ctx.modifierSites, ...sitesFor(node, kind.modifiers, sourceFile)],
       };
       if (callback) walkSuite(callback.body, next, sourceFile, bindings, config, tests);
       return;
@@ -192,63 +252,68 @@ function recordTest(
     line: pos.line,
     column: pos.column,
     modifiers: dedupeModifiers([...ctx.modifiers, ...ownModifiers]),
+    modifierSites: [...ctx.modifierSites, ...sitesFor(call, ownModifiers, sourceFile)],
     expects: [],
     locators: [],
     helpers: [],
+    events: [],
+    unresolved: [],
   };
-  collectBody(callback.body, test, sourceFile, bindings, config);
+  collectBody(callback, test, sourceFile, bindings, config);
   tests.push(test);
 }
 
 function collectBody(
-  body: ts.Node,
+  callback: ts.ArrowFunction | ts.FunctionExpression,
   test: InventoryTest,
   sourceFile: ts.SourceFile,
   bindings: Bindings,
   config: VerifyConfig,
 ): void {
-  const locatorNames = new Set<string>();
-  const walk = (node: ts.Node): void => {
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      isLocatorExpression(node.initializer, locatorNames)
-    ) {
-      locatorNames.add(node.name.text);
-    }
-    if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      ts.isIdentifier(node.left) &&
-      isLocatorExpression(node.right, locatorNames)
-    ) {
-      locatorNames.add(node.left.text);
-    }
+  const analyzed = analyzeBody({
+    body: callback.body,
+    parameters: callback.parameters,
+    sourceFile,
+    bindings,
+    specPath: sourceFile.fileName,
+    readExpect: (call, file, active) => readExpectParts(call, active, file),
+    bindingsFor: (file) => collectBindings(file),
+    isStep: (call, active) => classifyCall(call, active)?.type === 'step',
+    isIgnoredSuiteCall: (call, active) => {
+      const kind = classifyCall(call, active);
+      return kind?.type === 'test' || kind?.type === 'describe' || kind?.type === 'annotation';
+    },
+    isLocatorCall: (call, names) => isLocatorCall(call, names),
+    isLocatorExpression: (expr, names) => isLocatorExpression(expr, names),
+    readHelper: (call, active, file) => asHelper(call, active, config, file),
+  });
+  test.expects = analyzed.expects;
+  test.locators = analyzed.locators;
+  test.helpers = analyzed.helpers;
+  test.events = analyzed.events;
+  test.unresolved = analyzed.unresolved;
+}
 
-    if (ts.isCallExpression(node)) {
-      const kind = classifyCall(node, bindings);
-      if (kind?.type === 'step') {
-        const callback = callbackOf(node);
-        if (callback) walk(callback.body);
-        return;
-      }
-      if (kind?.type === 'test' || kind?.type === 'describe' || kind?.type === 'annotation') return;
+function readExpectParts(
+  call: ts.CallExpression,
+  bindings: Bindings,
+  sourceFile: ts.SourceFile,
+): { expect: ExpectCall; subject: ts.Expression | undefined } | null {
+  const expect = asExpectMatcher(call, bindings, sourceFile);
+  if (!expect) return null;
+  const shape = ts.isPropertyAccessExpression(call.expression) ? expectShape(call.expression.expression, bindings) : null;
+  return { expect, subject: shape?.subject };
+}
 
-      const expectCall = asExpectMatcher(node, bindings, sourceFile);
-      if (expectCall) {
-        test.expects.push(expectCall);
-      } else if (isLocatorCall(node, locatorNames)) {
-        const pos = positionOf(node, sourceFile);
-        test.locators.push({ source: node.getText(sourceFile), line: pos.line, column: pos.column });
-      } else {
-        const helper = asHelper(node, bindings, config, sourceFile);
-        if (helper) test.helpers.push(helper);
-      }
-    }
-    ts.forEachChild(node, walk);
-  };
-  walk(body);
+function sitesFor(
+  call: ts.CallExpression,
+  modifiers: readonly TestModifier[],
+  sourceFile: ts.SourceFile,
+): ModifierSite[] {
+  if (modifiers.length === 0) return [];
+  const pos = positionOf(call, sourceFile);
+  const source = call.expression.getText(sourceFile);
+  return modifiers.map((modifier) => ({ modifier, source, line: pos.line, column: pos.column }));
 }
 
 function asExpectMatcher(
@@ -262,13 +327,22 @@ function asExpectMatcher(
   const shape = expectShape(call.expression.expression, bindings);
   if (!shape) return null;
   const pos = positionOf(call, sourceFile);
+  const argument = call.arguments[0];
   return {
     matcher,
     not: shape.not,
     soft: shape.soft,
     poll: shape.poll,
     awaited: isAwaited(call),
+    returned: false,
     subjectSource: shape.subject ? shape.subject.getText(sourceFile) : '',
+    subjectKind: 'other',
+    argumentSource: argument ? argument.getText(sourceFile) : '',
+    sameSource: false,
+    conditional: false,
+    swallowed: false,
+    evidence: evidenceText(call, sourceFile),
+    file: sourceFile.fileName,
     line: pos.line,
     column: pos.column,
   };
@@ -450,6 +524,23 @@ function readTitle(call: ts.CallExpression, sourceFile: ts.SourceFile): string {
 function stripWrappingBackticks(text: string): string {
   if (text.startsWith('`') && text.endsWith('`') && text.length >= 2) return text.slice(1, -1);
   return text;
+}
+
+function evidenceText(call: ts.CallExpression, sourceFile: ts.SourceFile): string {
+  let node: ts.Node = call;
+  let parent = node.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isSatisfiesExpression(parent) ||
+      ts.isNonNullExpression(parent))
+  ) {
+    node = parent;
+    parent = parent.parent;
+  }
+  if (parent && ts.isAwaitExpression(parent)) return parent.getText(sourceFile);
+  return call.getText(sourceFile);
 }
 
 function isAwaited(node: ts.Node): boolean {
