@@ -125,6 +125,14 @@ test('does not flag condition annotations, and still flags an empty test.fail an
   );
 });
 
+test('does not flag a test that exists only inside a hook or a timer callback', () => {
+  const findings = findingsFor(path.join(parserDir, 'callbacks.spec.ts'), emptyConfig());
+  assert.deepEqual(
+    findings.map((entry) => entry.testTitle),
+    ['mapped ${name}', 'real empty'],
+  );
+});
+
 test('flags a generated test that has no assertion', () => {
   const findings = findingsFor(path.join(parserDir, 'generated.spec.ts'), emptyConfig());
   assert.deepEqual(

@@ -15,7 +15,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "verify": "npm run build && node dist/cli.js"
+    "verify": "npm run build && node dist/cli.js",
+    "demo:saucedemo": "playwright test -c example-project/saucedemo"
   },
   "dependencies": {
     "@playwright/test": "1.60.0",

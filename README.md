@@ -27,6 +27,22 @@ An optional `qa-core-verify.config.json` in the project directory can name asser
 
 - QCV-W001 Test Has No Assertion (error)
 
+## Demo Suite
+
+The folder `example-project/saucedemo` is a Playwright suite for [SauceDemo](https://www.saucedemo.com), a free practice app. It has a few honest tests and deliberately weak tests. The weak spots are marked with `SEEDED` comments and listed in `expected-findings.json`. See [example-project/saucedemo/README.md](example-project/saucedemo/README.md).
+
+```sh
+npx playwright install chromium
+npm run demo:saucedemo -- tests/good
+```
+
+`npm test` includes a golden test that reads that manifest. The golden test does not open a browser. To print the current findings:
+
+```sh
+npm run build
+node dist/cli.js example-project/saucedemo
+```
+
 ## License
 
 MIT. Copyright 2026 Muhammad Usman. See [LICENSE](LICENSE).

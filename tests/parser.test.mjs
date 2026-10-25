@@ -235,6 +235,23 @@ test('treats condition, boolean, and no-arg skip, fail, fixme, and slow as annot
   assert.equal(titles.includes('not today'), false);
 });
 
+test('does not inventory tests inside hooks or timer callbacks', () => {
+  const inventory = parseSpecFile(path.join(parserDir, 'callbacks.spec.ts'), config);
+  assert.deepEqual(
+    inventory.tests.map((entry) => entry.title),
+    ['kept ${name}', 'mapped ${name}', 'describe for each ${name}', 'real empty'],
+  );
+  assert.deepEqual(byTitle(inventory, 'describe for each ${name}').titlePath, [
+    'wrapped',
+    'describe for each ${name}',
+  ]);
+  assert.equal(byTitle(inventory, 'kept ${name}').expects[0].matcher, 'toHaveURL');
+  assert.equal(byTitle(inventory, 'mapped ${name}').expects.length, 0);
+  assert.equal(inventory.tests.some((entry) => entry.title.startsWith('inside')), false);
+  assert.equal(inventory.tests.some((entry) => entry.title.startsWith('timer')), false);
+  assert.equal(inventory.tests.some((entry) => entry.title.startsWith('hook inside')), false);
+});
+
 test('finds tests created inside forEach and map, and strips template backticks', () => {
   const inventory = parseSpecFile(path.join(parserDir, 'generated.spec.ts'), config);
   assert.deepEqual(
