@@ -5,9 +5,9 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { buildEvidence, callSiteFromStack } from '../dist/runtime/locator-evidence/evidence.js';
+import { buildEvidence, callSiteFromStack, evidenceWithoutActionMatchCount } from '../dist/runtime/locator-evidence/evidence.js';
 import { collectLocatorEvidence, rewritePlaywrightImports } from '../dist/runtime/locator-evidence/injected-fixture.js';
-import { assertWorkspaceFile } from '../dist/runtime/workspace.js';
+import { assertWorkspaceFile, listDescendantPids } from '../dist/runtime/workspace.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sauceDemo = path.join(repoRoot, 'example-project/saucedemo');
@@ -114,6 +114,7 @@ test('call sites and evidence paths stay project relative and drop control chara
   assert.equal(record.testTitle, 'banner hidden');
   assert.equal(record.matchCount, 0);
   assert.equal(record.actionSucceeded, false);
+  assert.equal(record.resolvedOnAction, false);
   assert.equal(JSON.stringify(evidence).includes('\u202E'), false);
   assert.equal(JSON.stringify(evidence).includes('\u009B'), false);
 });
@@ -275,9 +276,10 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   assert.ok(locked, 'missing locked out error locator');
   assert.equal(locked.matchCount, 1);
   assert.equal(
-    run.evidence.records.some((record) => record.actionSucceeded === true && record.matchCount === 0),
-    false,
+    run.evidence.records.every((record) => record.resolvedOnAction === record.actionSucceeded),
+    true,
   );
+  assert.equal(locked.resolvedOnAction, false);
   assert.equal(run.evidence.records.every((record) => !record.file.startsWith('/') && !record.testFile.startsWith('/')), true);
 });
 
@@ -378,16 +380,17 @@ test('assertWorkspaceFile refuses a symlink and a file reached through a directo
   assert.throws(() => assertWorkspaceFile(root, path.join(root, 'out', 'secret.ts')), /outside the temp workspace/);
 });
 
-test('a successful action that removes its target is recorded as matched', async (t) => {
+test('a raw post-action count is kept and resolvedOnAction follows the action', async (t) => {
   const project = tempDir(t, 'qcv-action-');
   writeProject(project, {
     spec: `import { test } from '@playwright/test';
 test('click removes the button', async ({ page }) => {
-  await page.setContent('<button id="gone">Go</button>');
+  await page.setContent('<button id="stay">Stay</button><button id="gone">Go</button>');
+  await page.locator('#stay').click();
   await page.locator('#gone').evaluate((element) => {
     element.addEventListener('click', () => element.remove());
   });
-  await page.locator('#gone').click();
+  await page.locator('#gone').click({ force: true });
 });
 test('click missing fails', async ({ page }) => {
   await page.setContent('<p>none</p>');
@@ -400,72 +403,208 @@ test('click missing fails', async ({ page }) => {
     outDir: path.join(project, '.qa-core', 'verify'),
     keepWorkspace: false,
   });
-  assert.equal(run.evidence.playwrightExitCode, 1);
+  assert.equal(run.evidence.playwrightExitCode, 1, run.stderr);
+  const stay = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#stay');
+  assert.ok(stay, `missing click on #stay\n${JSON.stringify(run.evidence.records)}\n${run.stderr}`);
+  assert.equal(stay.actionSucceeded, true);
+  assert.equal(stay.resolvedOnAction, true);
+  assert.equal(stay.matchCount, 1);
   const gone = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#gone');
-  assert.ok(gone, 'missing click that removes its target');
+  assert.ok(gone, `missing click that removes its target\n${JSON.stringify(run.evidence.records)}\n${run.stderr}`);
   assert.equal(gone.actionSucceeded, true);
-  assert.equal(gone.matchCount, 1);
+  assert.equal(gone.resolvedOnAction, true);
+  assert.equal(Number.isInteger(gone.matchCount) && gone.matchCount >= 0, true);
   const missing = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#missing');
   assert.ok(missing, 'missing failed click');
   assert.equal(missing.actionSucceeded, false);
+  assert.equal(missing.resolvedOnAction, false);
   assert.equal(missing.matchCount, 0);
-  assert.equal(
-    run.evidence.records.some((record) => record.actionSucceeded === true && record.matchCount === 0),
-    false,
-  );
 });
 
-test('SIGINT and SIGTERM remove the temp workspace', { timeout: 60_000 }, async (t) => {
+test('resolvedOnAction is derived from actionSucceeded and matchCount is not clamped', () => {
+  const workspace = '/tmp/qcv-workspace-example';
+  const stack = [`Error: sample`, `    at spec (${workspace}/retry.spec.ts:4:3)`].join('\n');
+  const evidence = buildEvidence({
+    parts: [
+      {
+        selector: '#gone',
+        api: "locator('#gone')",
+        url: 'about:blank',
+        matchCount: 0,
+        phase: 'action',
+        call: 'click',
+        negated: false,
+        actionSucceeded: true,
+        stack,
+        testFile: `${workspace}/retry.spec.ts`,
+        testLine: 2,
+        testTitle: 'click removes the button',
+      },
+      {
+        selector: '#missing',
+        api: "locator('#missing')",
+        url: 'about:blank',
+        matchCount: 0,
+        phase: 'action',
+        call: 'click',
+        negated: false,
+        actionSucceeded: false,
+        stack,
+        testFile: `${workspace}/retry.spec.ts`,
+        testLine: 6,
+        testTitle: 'click missing fails',
+      },
+    ],
+    workspaceDir: workspace,
+    projectDir: '/anywhere/demo',
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    playwrightExitCode: 1,
+  });
+  assert.equal(evidence.records.length, 2);
+  const gone = evidence.records.find((record) => record.selector === '#gone');
+  const missing = evidence.records.find((record) => record.selector === '#missing');
+  assert.equal(gone.matchCount, 0);
+  assert.equal(gone.actionSucceeded, true);
+  assert.equal(gone.resolvedOnAction, true);
+  assert.equal(missing.matchCount, 0);
+  assert.equal(missing.actionSucceeded, false);
+  assert.equal(missing.resolvedOnAction, false);
+
+  const other = buildEvidence({
+    parts: [
+      {
+        selector: '#gone',
+        api: "locator('#gone')",
+        url: 'about:blank',
+        matchCount: 1,
+        phase: 'action',
+        call: 'click',
+        negated: false,
+        actionSucceeded: true,
+        stack,
+        testFile: `${workspace}/retry.spec.ts`,
+        testLine: 2,
+        testTitle: 'click removes the button',
+      },
+      {
+        selector: '#missing',
+        api: "locator('#missing')",
+        url: 'about:blank',
+        matchCount: 0,
+        phase: 'action',
+        call: 'click',
+        negated: false,
+        actionSucceeded: false,
+        stack,
+        testFile: `${workspace}/retry.spec.ts`,
+        testLine: 6,
+        testTitle: 'click missing fails',
+      },
+    ],
+    workspaceDir: workspace,
+    projectDir: '/anywhere/demo',
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    playwrightExitCode: 1,
+  });
+  assert.notEqual(JSON.stringify(evidence), JSON.stringify(other));
+  assert.equal(
+    JSON.stringify(evidenceWithoutActionMatchCount(evidence)),
+    JSON.stringify(evidenceWithoutActionMatchCount(other)),
+  );
+  const stripped = JSON.stringify(evidenceWithoutActionMatchCount(evidence));
+  assert.equal(stripped.includes('matchCount'), false);
+  assert.equal(stripped.includes('"resolvedOnAction":true'), true);
+});
+
+test('SIGINT and SIGTERM remove the temp workspace after the page is open', { timeout: 90_000 }, async (t) => {
   const project = tempDir(t, 'qcv-signal-project-');
+  const token = `qcv-signal-marker-${process.pid}.txt`;
+  fs.writeFileSync(path.join(project, token), 'marker');
   writeProject(project, {
     spec: `import { test } from '@playwright/test';
-test('hangs', () => new Promise(() => {}));
-`,
-  });
-  const runnerDir = tempDir(t, 'qcv-signal-runner-');
-  const runner = path.join(runnerDir, 'run.mjs');
-  const workspaceModule = path.join(repoRoot, 'dist/runtime/workspace.js');
-  fs.writeFileSync(
-    runner,
-    `import fs from 'node:fs';
-import { runPlaywrightInWorkspace } from ${JSON.stringify(workspaceModule)};
-const marker = process.argv[2];
-const projectDir = process.argv[3];
-await runPlaywrightInWorkspace(projectDir, {
-  keep: false,
-  onWorkspace(dir) {
-    fs.writeFileSync(marker, dir);
-  },
+test('hang', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await new Promise(() => {});
 });
 `,
-  );
+  });
+  const cli = path.join(repoRoot, 'dist/cli.js');
   const expected = { SIGINT: 130, SIGTERM: 143 };
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    const marker = path.join(tempDir(t, 'qcv-signal-marker-'), 'dir.txt');
-    const child = spawn(process.execPath, [runner, marker, project], { stdio: 'ignore' });
-    const workspace = await waitForFile(marker, 20_000);
-    assert.equal(fs.existsSync(workspace), true, workspace);
-    const exitedPromise = waitForExit(child, 10_000);
+    const out = tempDir(t, 'qcv-signal-out-');
+    const child = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
+      stdio: 'ignore',
+    });
+    t.after(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // The CLI may already have exited.
+      }
+    });
+    const workspace = await waitForMarkedWorkspace(token, 20_000);
+    const browserUp = await waitForBrowser(child.pid, 20_000);
+    assert.equal(browserUp, true, 'browser did not start');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const exitedPromise = waitForExit(child, 15_000);
     child.kill(signal);
     const exited = await exitedPromise;
     assert.equal(exited.code, expected[signal], `${signal} exited ${exited.code} signal ${exited.signal}`);
-    assert.equal(fs.existsSync(workspace), false);
+    assert.equal(fs.existsSync(workspace), false, workspace);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(fs.existsSync(workspace), false, workspace);
   }
 });
 
-function waitForFile(file, timeoutMs) {
+function waitForMarkedWorkspace(token, timeoutMs) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const poll = () => {
-      if (fs.existsSync(file)) {
-        const text = fs.readFileSync(file, 'utf8').trim();
-        if (text) {
-          resolve(text);
+      let names = [];
+      try {
+        names = fs.readdirSync(os.tmpdir());
+      } catch {
+        names = [];
+      }
+      for (const name of names) {
+        if (!name.startsWith('qcv-workspace-')) continue;
+        const dir = path.join(os.tmpdir(), name);
+        if (fs.existsSync(path.join(dir, token))) {
+          resolve(dir);
           return;
         }
       }
       if (Date.now() - started > timeoutMs) {
-        reject(new Error(`timed out waiting for ${file}`));
+        reject(new Error(`timed out waiting for workspace ${token}`));
+        return;
+      }
+      setTimeout(poll, 50);
+    };
+    poll();
+  });
+}
+
+function waitForBrowser(rootPid, timeoutMs) {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const poll = () => {
+      const pids = [rootPid, ...listDescendantPids(rootPid)];
+      for (const pid of pids) {
+        let command = '';
+        try {
+          command = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+        } catch {
+          command = '';
+        }
+        if (/chrome|chromium|headless_shell/i.test(command)) {
+          resolve(true);
+          return;
+        }
+      }
+      if (Date.now() - started > timeoutMs) {
+        resolve(false);
         return;
       }
       setTimeout(poll, 50);

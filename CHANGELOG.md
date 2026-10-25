@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `--only locator-evidence` records locator match counts in a temp copy of the project. The choice and the measurements are in `docs/decisions/0001-locator-evidence.md`.
-- A successful locator action is counted after it returns. `matchCount` is at least 1 and `actionSucceeded` is true. The temp copy follows symlinks, and a rewrite is refused unless the file is a regular file inside that copy. `project.dir` drops control characters and bidi overrides. `--json`, `--format`, and `--fail-on` exit 2 with that mode. SIGINT and SIGTERM remove the temp copy.
+- A locator action records the raw `count()` taken after the action returns. `resolvedOnAction` is true when that strict action returned. The temp copy follows symlinks, and a rewrite is refused unless the file is a regular file inside that copy. `project.dir` drops control characters and bidi overrides. `--json`, `--format`, and `--fail-on` exit 2 with that mode. SIGINT and SIGTERM stop Playwright and Chromium, then remove the temp copy.
 - When `--out` is outside the project, the console prints that path as it was typed.
 - Evidence and fix hints drop C1 controls and bidi overrides before they are printed.
 - The HTML rule filter hides a whole test when none of its rules are checked.

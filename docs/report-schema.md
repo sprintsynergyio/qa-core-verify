@@ -52,3 +52,13 @@ Each row gets one verdict:
 The default directory is `<project>/.qa-core/verify`. `--out <dir>` changes that directory. The file names are `report.json`, `report.md`, and `report.html`.
 
 `--format console,json,md,html` chooses outputs. The default is all four. `console` is printed. The other three are files. `--json` prints the JSON report to stdout and does not also print the console report.
+
+## Locator Evidence
+
+`locator-evidence.json` is a separate file from `report.json`. `--only locator-evidence` writes it. `schemaVersion` is 1. It has no timestamps. Paths are relative to the project copy. `project.dir` is the project folder's base name after the same `displayText` cleaning as the report paths.
+
+Each record is one locator action or one locator assertion.
+
+- `matchCount` is the raw number returned by `count()` after that call. For an action, the count is taken after the action returns. The prototype does not change that number. An action that navigates, or that removes its target, can record 0. The same action can record a different `matchCount` on the next run. That field is the non-deterministic part of an action record. Assertion counts are taken after the matcher settles.
+- `actionSucceeded` is true when the action returned, and false for a failed action and for every assertion.
+- `resolvedOnAction` is derived only from `actionSucceeded`. It is true when a strict action returned, which means Playwright had resolved one element at action time. It is not a count, and it does not change when the later `matchCount` is 0.

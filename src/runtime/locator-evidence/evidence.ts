@@ -10,8 +10,13 @@ export interface EvidenceRecord {
   phase: 'action' | 'assertion';
   call: string;
   negated: boolean;
-  /** True when this action returned. Assertions are false. A true record has matchCount of at least 1. */
+  /** True when this action returned. Assertions are false. */
   actionSucceeded: boolean;
+  /**
+   * True when a strict action returned, so Playwright had resolved one element at action time.
+   * Derived only from `actionSucceeded`. It is not a substitute for `matchCount`.
+   */
+  resolvedOnAction: boolean;
   file: string;
   line: number;
   column: number;
@@ -124,6 +129,7 @@ function normalizePart(part: RawEvidencePart, workspaceDir: string): EvidenceRec
     call: displayText(part.call),
     negated: part.negated === true,
     actionSucceeded: part.actionSucceeded === true,
+    resolvedOnAction: part.actionSucceeded === true,
     file: callFile,
     line: site?.line ?? part.testLine,
     column: site?.column ?? 1,
@@ -140,6 +146,29 @@ function projectFile(file: string, workspaceDir: string): string | undefined {
   return shown.length === 0 ? undefined : shown;
 }
 
+/**
+ * Copy for comparing two runs. Action `matchCount` is left out.
+ * That count is taken after the action, so a click that navigates or removes its target can change it.
+ * Every other field, including assertion `matchCount` and `resolvedOnAction`, stays.
+ */
+export function evidenceWithoutActionMatchCount(evidence: EvidenceFile): {
+  schemaVersion: EvidenceFile['schemaVersion'];
+  tool: EvidenceFile['tool'];
+  playwrightVersion: string;
+  project: EvidenceFile['project'];
+  playwrightExitCode: number;
+  records: Array<Omit<EvidenceRecord, 'matchCount'> & { matchCount?: number }>;
+} {
+  return {
+    ...evidence,
+    records: evidence.records.map((record) => {
+      if (record.phase !== 'action') return record;
+      const { matchCount: _actionMatchCount, ...rest } = record;
+      return rest;
+    }),
+  };
+}
+
 function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
   const fields: Array<keyof EvidenceRecord> = [
     'file',
@@ -153,6 +182,7 @@ function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
     'matchCount',
     'negated',
     'actionSucceeded',
+    'resolvedOnAction',
     'testFile',
     'testLine',
     'testTitle',

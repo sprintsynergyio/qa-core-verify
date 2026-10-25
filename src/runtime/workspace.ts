@@ -14,26 +14,129 @@ interface ActiveWorkspace {
 
 const activeWorkspaces = new Map<string, ActiveWorkspace>();
 let signalHooksInstalled = false;
+let signalStop = false;
+
+const SIGNAL_GRACE_MS = 2000;
+const SIGNAL_KILL_MS = 1000;
+
+/** Child pids of `root`, including grandchildren. A dead process is omitted. */
+export function listDescendantPids(root: number): number[] {
+  const byParent = new Map<number, number[]>();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    let status: string;
+    try {
+      status = fs.readFileSync(`/proc/${entry}/status`, 'utf8');
+    } catch {
+      continue;
+    }
+    const match = /^PPid:\s+(\d+)/m.exec(status);
+    const ppidText = match?.[1];
+    if (!ppidText) continue;
+    const ppid = Number(ppidText);
+    const list = byParent.get(ppid);
+    if (list) list.push(pid);
+    else byParent.set(ppid, [pid]);
+  }
+  const out: number[] = [];
+  const stack = [...(byParent.get(root) ?? [])];
+  while (stack.length > 0) {
+    const pid = stack.pop();
+    if (pid === undefined) continue;
+    out.push(pid);
+    const kids = byParent.get(pid);
+    if (kids) stack.push(...kids);
+  }
+  return out;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // The process may already be gone.
+  }
+}
+
+function waitUntil(done: () => boolean, timeoutMs: number): Promise<void> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const poll = (): void => {
+      if (done() || Date.now() - started >= timeoutMs) {
+        resolve();
+        return;
+      }
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+}
+
+/**
+ * Stop Playwright and every process it started, including Chromium.
+ * SIGTERM first. After the grace period, SIGKILL any process that is still alive.
+ */
+async function terminateChild(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid) return;
+  const members = new Set<number>([pid, ...listDescendantPids(pid)]);
+  const killSet = (signal: NodeJS.Signals): void => {
+    if (pidAlive(pid)) {
+      for (const extra of listDescendantPids(pid)) members.add(extra);
+    }
+    for (const member of members) signalPid(member, signal);
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      signalPid(pid, signal);
+    }
+  };
+  const gone = (): boolean => [...members].every((member) => !pidAlive(member));
+  killSet('SIGTERM');
+  await waitUntil(gone, SIGNAL_GRACE_MS);
+  if (!gone()) {
+    killSet('SIGKILL');
+    await waitUntil(gone, SIGNAL_KILL_MS);
+  }
+}
 
 function installSignalCleanup(): void {
   if (signalHooksInstalled) return;
   signalHooksInstalled = true;
   const stop = (signal: NodeJS.Signals): void => {
-    for (const [dir, state] of activeWorkspaces) {
-      if (state.keep) continue;
-      try {
-        state.child?.kill('SIGTERM');
-      } catch {
-        // The Playwright process may already be gone.
+    signalStop = true;
+    const entries = [...activeWorkspaces.entries()];
+    void (async () => {
+      for (const [, state] of entries) {
+        if (state.child) await terminateChild(state.child);
       }
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // Still exit below so the signal does not leave this process running.
+      for (const [dir, state] of entries) {
+        if (state.keep) continue;
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // Still exit below so the signal does not leave this process running.
+        }
       }
-    }
-    activeWorkspaces.clear();
-    process.exit(signal === 'SIGINT' ? 130 : 143);
+      activeWorkspaces.clear();
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    })();
   };
   process.once('SIGINT', () => stop('SIGINT'));
   process.once('SIGTERM', () => stop('SIGTERM'));
@@ -184,13 +287,15 @@ export async function runPlaywrightInWorkspace(
       state.child = child;
     });
     options.after?.(workspaceDir, playwright);
-    if (!options.keep) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (!options.keep && !signalStop) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (signalStop) await new Promise(() => {});
     return { workspaceDir, kept: options.keep, playwright };
   } catch (error) {
-    if (!options.keep) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (!options.keep && !signalStop) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (signalStop) await new Promise(() => {});
     throw error;
   } finally {
-    activeWorkspaces.delete(workspaceDir);
+    if (!signalStop) activeWorkspaces.delete(workspaceDir);
   }
 }
 
@@ -221,6 +326,7 @@ function runPlaywright(
       cwd: workspaceDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     });
     onChild(child);
     let stdout = '';

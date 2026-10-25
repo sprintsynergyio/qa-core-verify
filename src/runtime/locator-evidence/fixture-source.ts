@@ -7,6 +7,7 @@ import { test as base, expect as baseExpect } from '@playwright/test';
 const wrapped = Symbol('qcvWrapped');
 const storeKey = Symbol('qcvStore');
 const evidenceDir = process.env.QCV_EVIDENCE_DIR || '';
+let pendingRecords = 0;
 
 const CHAIN = ['locator', 'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByAltText', 'getByTitle', 'getByTestId', 'filter', 'and', 'or', 'first', 'last', 'nth'];
 const ACTIONS = ['click', 'dblclick', 'tap', 'fill', 'press', 'pressSequentially', 'type', 'check', 'uncheck', 'selectOption', 'setInputFiles', 'hover', 'focus', 'clear', 'dragTo'];
@@ -48,43 +49,78 @@ function assertWorkspaceWrite(file) {
   }
 }
 
+function partFile(store) {
+  const name = [store.testInfo.testId, String(store.testInfo.retry), String(store.testInfo.repeatEachIndex)].join('-').replace(/[^A-Za-z0-9._-]+/g, '_');
+  return path.join(evidenceDir, name + '.json');
+}
+
+function persistStore(store) {
+  if (!evidenceDir) return;
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const file = partFile(store);
+  assertWorkspaceWrite(file);
+  const fd = fs.openSync(file, 'w');
+  try {
+    fs.writeFileSync(fd, JSON.stringify(store.bucket));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 async function record(store, locator, phase, call, negated, succeeded) {
-  let matchCount = null;
-  let counted = false;
+  pendingRecords += 1;
   try {
-    matchCount = await locator.count();
-    counted = typeof matchCount === 'number';
+    let matchCount = null;
+    let counted = false;
+    try {
+      matchCount = await locator.count();
+      counted = typeof matchCount === 'number' && Number.isInteger(matchCount) && matchCount >= 0;
+    } catch {
+      counted = false;
+    }
+    if (!counted) return;
+    const actionSucceeded = phase === 'action' && succeeded === true;
+    let url = '';
+    try {
+      const owner = typeof locator.page === 'function' ? locator.page() : store.page;
+      url = owner.url();
+    } catch {
+      url = '';
+    }
+    let api = '';
+    try {
+      api = typeof locator.toString === 'function' ? locator.toString() : '';
+    } catch {
+      api = '';
+    }
+    let selector = '';
+    try {
+      if (typeof locator._selector === 'string') selector = locator._selector;
+    } catch {
+      selector = '';
+    }
+    store.bucket.push({
+      selector,
+      api,
+      url,
+      matchCount,
+      phase,
+      call,
+      negated,
+      actionSucceeded,
+      resolvedOnAction: actionSucceeded,
+      stack: callStack(),
+      testFile: store.testInfo.file,
+      testLine: store.testInfo.line,
+      testTitle: store.testInfo.titlePath.slice(1).join(' > ') || store.testInfo.title,
+    });
+    persistStore(store);
   } catch {
-    counted = false;
+    // A later field read failed. The count was not invented, and this call stays unrecorded.
+  } finally {
+    pendingRecords -= 1;
   }
-  const actionSucceeded = phase === 'action' && succeeded === true;
-  if (actionSucceeded && (!counted || matchCount === 0)) {
-    matchCount = 1;
-    counted = true;
-  }
-  if (!counted) return;
-  let url = '';
-  try {
-    const owner = typeof locator.page === 'function' ? locator.page() : store.page;
-    url = owner.url();
-  } catch {
-    url = '';
-  }
-  const api = typeof locator.toString === 'function' ? locator.toString() : '';
-  store.bucket.push({
-    selector: locator._selector,
-    api,
-    url,
-    matchCount,
-    phase,
-    call,
-    negated,
-    actionSucceeded,
-    stack: callStack(),
-    testFile: store.testInfo.file,
-    testLine: store.testInfo.line,
-    testTitle: store.testInfo.titlePath.slice(1).join(' > ') || store.testInfo.title,
-  });
 }
 
 function wrapLocator(locator, store) {
@@ -169,13 +205,11 @@ export const test = base.extend({
     try {
       await use(wrapPage(page, store));
     } finally {
-      if (evidenceDir) {
-        fs.mkdirSync(evidenceDir, { recursive: true });
-        const name = [testInfo.testId, String(testInfo.retry), String(testInfo.repeatEachIndex)].join('-').replace(/[^A-Za-z0-9._-]+/g, '_');
-        const file = path.join(evidenceDir, name + '.json');
-        assertWorkspaceWrite(file);
-        fs.writeFileSync(file, JSON.stringify(store.bucket));
+      const deadline = Date.now() + 2000;
+      while (pendingRecords > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
+      if (evidenceDir) persistStore(store);
     }
   },
 });
