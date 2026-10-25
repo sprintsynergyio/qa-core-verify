@@ -16,3 +16,9 @@ test('presence after the last click', async ({ page }) => {
   await page.getByRole('button', { name: 'Add to cart' }).click();
   await expect(page.getByTestId('inventory-list')).toBeVisible();
 });
+
+test('visible after click then goto', async ({ page }) => {
+  await page.getByRole('button', { name: 'Login' }).click();
+  await page.goto('/');
+  await expect(page.getByTestId('login-button')).toBeVisible();
+});

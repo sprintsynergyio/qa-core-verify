@@ -74,7 +74,7 @@ const cases = [
     dir: 'w006',
     ruleId: 'QCV-W006',
     severity: 'warn',
-    titles: ['attached and in viewport', 'presence after the last click', 'visible after click'],
+    titles: ['attached and in viewport', 'presence after the last click', 'visible after click', 'visible after click then goto'],
     needle: 'await expect(page.getByTestId(\'inventory-list\')).toBeVisible()',
     evidence: 'await expect(page.getByTestId(\'inventory-list\')).toBeVisible()',
   },
@@ -171,8 +171,35 @@ test('a const alias of expect counts, and a let alias does not', () => {
   const findings = findingsIn(file);
   assert.deepEqual(
     findings.map((finding) => `${finding.ruleId} ${finding.testTitle}`).sort(),
-    ['QCV-W001 let alias is not seen', 'QCV-W003 alias not awaited'],
+    [
+      'QCV-W001 let alias is not seen',
+      'QCV-W001 let soft alias is not seen',
+      'QCV-W001 var soft alias is not seen',
+      'QCV-W003 alias not awaited',
+    ],
   );
+});
+
+test('a const alias of expect.soft is a soft assertion', () => {
+  const file = path.join(fixtures, 'w003/alias.spec.ts');
+  const inventory = parseSpecFile(file, emptyConfig());
+  for (const title of ['file soft alias', 'describe soft alias', 'chained soft alias', 'test soft alias']) {
+    const entry = inventory.tests.find((item) => item.title === title);
+    assert.ok(entry, title);
+    assert.equal(entry.expects.length, 1, title);
+    assert.equal(entry.expects[0].soft, true, title);
+    assert.equal(entry.expects[0].matcher, 'toBeVisible', title);
+  }
+});
+
+test('QCV-W003 uses the same fix hint for an assertion and a call', () => {
+  const findings = findingsIn(path.join(fixtures, 'w003/bad.spec.ts'));
+  const hint = 'Await the assertion, or return its promise from the test.';
+  const w003 = findings.filter((finding) => finding.ruleId === 'QCV-W003');
+  assert.equal(w003.length > 0, true);
+  assert.equal(w003.every((finding) => finding.fixHint === hint), true);
+  assert.equal(w003.some((finding) => finding.evidence === 'checkTitle(page)'), true);
+  assert.equal(findings.some((finding) => finding.fixHint.includes('Await the call')), false);
 });
 
 test('QCV-W009 uses the focused lint rule for test.only and the skipped lint rule for test.skip', () => {

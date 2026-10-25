@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `--only locator-evidence` records locator match counts in a temp copy of the project. The choice and the measurements are in `docs/decisions/0001-locator-evidence.md`.
+- A locator action records the raw `count()` taken after the action returns. `resolvedOnAction` is true when that strict action returned. Record order does not use `matchCount`. The temp copy follows symlinks, and a rewrite is refused unless the file is a regular file inside that copy. `project.dir` drops control characters and bidi overrides. `--json`, `--format`, and `--fail-on` exit 2 with that mode. SIGINT, SIGHUP, and SIGTERM stop Playwright and Chromium, then remove the temp copy. A repeat of those signals during cleanup is ignored. Chromium's temp files are created in a unique directory beside the project copy, and that directory is removed with the run. The copy includes the project's own files, including a directory named `.qcv-tmp`. With `--keep-workspace`, the kept directory is `qcv-run-XXXXXX` and it contains `project`. The `.qcv-browser-` sibling is removed even when that directory is kept. A normal finish, SIGINT, SIGTERM, and SIGHUP each print `Workspace: ` plus that absolute path on stderr. C0 and C1 controls in the path are escaped as `\u` plus four lowercase hex digits. The path is not shown with `~`.
+- When `--out` is outside the project, the console prints that path as it was typed.
+- Evidence and fix hints drop C1 controls and bidi overrides before they are printed.
+- The HTML rule filter hides a whole test when none of its rules are checked.
+- A const alias of `expect.soft` is a soft assertion. `let` and `var` are not followed.
+- QCV-W006 still flags a presence-only assertion when a click is followed by `page.goto`.
+- QCV-W003 uses one fix hint for an unawaited assertion and an unawaited call.
 - A row is trusted when it has no warn or error finding. Review means a warn. Untrusted means an error. Skip, fixme, and describe.skip stay not-run.
 - Report paths are relative to the project folder. `project.dir` is the folder's base name.
 - Markdown escapes titles, file names, and messages. Timestamps use local time and its offset. Reports name the checks that ran.

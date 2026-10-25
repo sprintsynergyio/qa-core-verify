@@ -49,7 +49,7 @@ export function reportsLine(reportPaths: readonly string[]): string {
 }
 
 function oneLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
+  return displayText(text).replace(/\s+/g, ' ').trim();
 }
 
 function countLabel(count: number, singular: string, plural: string): string {

@@ -32,7 +32,7 @@ Trusted means no warn or error findings from the checks that ran. Locator and ca
 Reports: .qa-core/verify/report.json, .qa-core/verify/report.md, .qa-core/verify/report.html.
 ```
 
-That run writes `example-project/saucedemo/.qa-core/verify/report.json`, `report.md`, and `report.html`. `.qa-core/` is gitignored. `--out <dir>` writes the files in another directory. The console still prints those paths relative to the project folder. `--format console,json,md,html` chooses which reports to produce. The default is all four. `--format console` writes no files.
+That run writes `example-project/saucedemo/.qa-core/verify/report.json`, `report.md`, and `report.html`. `.qa-core/` is gitignored. `--out <dir>` writes the files in another directory. When that directory is inside the project, the console prints the paths relative to the project folder. When it is outside the project, the console prints the `--out` path as it was typed. `--format console,json,md,html` chooses which reports to produce. The default is all four. `--format console` writes no files.
 
 An optional `qa-core-verify.config.json` in the project directory can name assertion helpers. A call that matches `assertFunctionNames` or `assertFunctionPatterns` counts as an assertion for QCV-W001. Patterns are regular expressions, the same idea as eslint-plugin-playwright `expect-expect`.
 

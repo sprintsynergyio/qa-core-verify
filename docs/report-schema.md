@@ -41,8 +41,8 @@ A `test.describe.skip` row exists so its single finding has a place in `tests`. 
 Each row gets one verdict:
 
 - `trusted` when the row has no finding at warn level or above. Info findings, including QCV-W000, QCV-W009, and QCV-W010, stay `trusted`.
-- `review` when the row has at least one warn finding and no error finding.
-- `untrusted` when the row has at least one error finding.
+- `review` when the row has at least one warn finding and no error finding. A warn means the test is weak. It does not prove the test is useless.
+- `untrusted` when the row has at least one error finding. In the plan, untrusted means a check proved the test cannot fail, or that it uses a locator that never matched. This static checker assigns untrusted for an error from the rules that ran. It does not detect a locator that never matched. That is a later runtime check.
 - `baseline-red` and `not-run` are for tests a runtime check could not evaluate. This static checker does not assign `baseline-red`, so that count stays 0.
 
 `not-run` is extended here for rows the static checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
@@ -52,3 +52,13 @@ Each row gets one verdict:
 The default directory is `<project>/.qa-core/verify`. `--out <dir>` changes that directory. The file names are `report.json`, `report.md`, and `report.html`.
 
 `--format console,json,md,html` chooses outputs. The default is all four. `console` is printed. The other three are files. `--json` prints the JSON report to stdout and does not also print the console report.
+
+## Locator Evidence
+
+`locator-evidence.json` is a separate file from `report.json`. `--only locator-evidence` writes it. `schemaVersion` is 1. It has no timestamps. Paths are relative to the project copy. `project.dir` is the project folder's base name after the same `displayText` cleaning as the report paths.
+
+Each record is one locator action or one locator assertion. Records are sorted by file, line, column, test title, and kind (`phase`, then `call`), then the other fields except `matchCount`. `matchCount` is not a sort key, because an action count can change from run to run and would otherwise swap records that share a call site.
+
+- `matchCount` is the raw number returned by `count()` after that call. For an action, the count is taken after the action returns. The prototype does not change that number. The post-action count of any click that navigates or removes its target can vary between runs, and that count can be 0. In the eight-run sample, the add-to-cart clicks at `tests/good/shopping.spec.ts` lines 17 and 37 and `tests/ai-style/weak-assertions.spec.ts` line 38 were 0 every time. Counts that varied across samples are the checkout click at `tests/good/shopping.spec.ts` line 43, the continue click at `tests/good/shopping.spec.ts` line 47 (raw 0 once in review), and the login click at `support/login.ts` line 8. That field is the non-deterministic part of an action record. Assertion counts are taken after the matcher settles.
+- `actionSucceeded` is true when the action returned, and false for a failed action and for every assertion.
+- `resolvedOnAction` is derived only from `actionSucceeded`. It is true when a strict action returned, which means Playwright had resolved one element at action time. It is not a count, and it does not change when the later `matchCount` is 0.

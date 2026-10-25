@@ -80,7 +80,7 @@ function formatFinding(finding: ReportFinding): string[] {
     `- Message: ${inline(finding.message)}`,
   ];
   if (finding.relatedLintRule) lines.push(`- Related Lint Rule: ${inline(finding.relatedLintRule)}`);
-  lines.push('- Evidence:', '', fence(finding.evidence), '', '- Fix:', '', fence(finding.fixHint), '');
+  lines.push('- Evidence:', '', fence(displayText(finding.evidence)), '', '- Fix:', '', fence(displayText(finding.fixHint)), '');
   return lines;
 }
 

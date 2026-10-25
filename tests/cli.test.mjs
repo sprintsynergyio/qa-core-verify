@@ -51,11 +51,14 @@ test('--help exits 0 and prints usage', () => {
   assert.match(result.stdout, /--format/);
   assert.match(result.stdout, /--out/);
   assert.match(result.stdout, /--fail-on/);
+  assert.match(result.stdout, /--only/);
+  assert.match(result.stdout, /--keep-workspace/);
   assert.equal(result.stderr, '');
 });
 
-test('exit 1 for the bad fixture and exit 0 for the good fixture', () => {
-  const bad = runCli([w001Dir, path.join(w001Dir, 'bad.spec.ts')]);
+test('exit 1 for the bad fixture and exit 0 for the good fixture', (t) => {
+  const out = tempDir(t, 'qa-core-verify-cli-out-');
+  const bad = runCli(['--out', out, w001Dir, path.join(w001Dir, 'bad.spec.ts')]);
   assert.equal(bad.status, 1);
   assert.match(bad.stdout, /clicks and does not assert/);
   assert.match(bad.stdout, /only logs/);
@@ -65,14 +68,15 @@ test('exit 1 for the bad fixture and exit 0 for the good fixture', () => {
   assert.match(bad.stdout, /Summary: 0 trusted, 0 review, 3 untrusted, 0 baseline-red, 0 not-run\. 3 errors, 0 warnings, 0 info findings\./);
   assert.doesNotMatch(bad.stderr, /No tests found/);
 
-  const good = runCli([w001Dir, path.join(w001Dir, 'good.spec.ts')]);
+  const good = runCli(['--out', out, w001Dir, path.join(w001Dir, 'good.spec.ts')]);
   assert.equal(good.status, 0);
   assert.doesNotMatch(good.stdout, /QCV-W001/);
   assert.match(good.stdout, /Summary: 3 trusted, 0 review, 0 untrusted, 0 baseline-red, 0 not-run\. 0 errors, 0 warnings, 0 info findings\./);
 });
 
-test('the w001 directory reports only the bad file', () => {
-  const result = runCli([w001Dir]);
+test('the w001 directory reports only the bad file', (t) => {
+  const out = tempDir(t, 'qa-core-verify-cli-out-');
+  const result = runCli(['--out', out, w001Dir]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /bad\.spec\.ts/);
   assert.match(result.stderr, /No Playwright config found/);
@@ -98,8 +102,9 @@ test('exit 2 for a spec that does not parse', (t) => {
   assert.match(result.stderr, /Parse error/);
 });
 
-test('--json prints only the report object', () => {
-  const bad = runCli(['--json', w001Dir, path.join(w001Dir, 'bad.spec.ts')]);
+test('--json prints only the report object', (t) => {
+  const out = tempDir(t, 'qa-core-verify-cli-out-');
+  const bad = runCli(['--json', '--out', out, w001Dir, path.join(w001Dir, 'bad.spec.ts')]);
   assert.equal(bad.status, 1);
   const parsed = JSON.parse(bad.stdout);
   assert.equal(parsed.schemaVersion, 1);
@@ -110,7 +115,7 @@ test('--json prints only the report object', () => {
   assert.doesNotMatch(bad.stdout, /Discovery/);
   assert.match(bad.stderr, /Discovery:/);
 
-  const good = runCli(['--json', w001Dir, path.join(w001Dir, 'good.spec.ts')]);
+  const good = runCli(['--json', '--out', out, w001Dir, path.join(w001Dir, 'good.spec.ts')]);
   assert.equal(good.status, 0);
   const clean = JSON.parse(good.stdout);
   assert.equal(clean.tests.length, 3);
@@ -149,11 +154,13 @@ test('a bad config file is a tool error', (t) => {
   assert.match(badPattern.stderr, /Invalid assertFunctionPatterns/);
 });
 
-test('does not modify the project files', () => {
+test('does not modify the project files', (t) => {
+  const out = tempDir(t, 'qa-core-verify-cli-out-');
   const before = hashTree(w001Dir);
-  const result = runCli([w001Dir]);
+  const result = runCli(['--out', out, w001Dir]);
   assert.equal(result.status, 1);
   assert.equal(hashTree(w001Dir), before);
+  assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
 });
 
 test('prints No tests found when no spec files match, and keeps exit 0', (t) => {
@@ -188,11 +195,40 @@ test('prints No tests found when spec files contain no tests, and keeps exit 0',
   assert.doesNotMatch(result.stdout, /QCV-W001/);
 });
 
-test('an extended test with no assertion exits 1', () => {
+test('an extended test with no assertion exits 1', (t) => {
+  const out = tempDir(t, 'qa-core-verify-cli-out-');
   const file = path.join(repoRoot, 'tests/fixtures/parser/extend.spec.ts');
-  const result = runCli([path.dirname(file), file]);
+  const result = runCli(['--out', out, path.dirname(file), file]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /chained extend without assertion/);
   assert.match(result.stdout, /Summary: 1 trusted, 0 review, 1 untrusted, 0 baseline-red, 0 not-run\. 1 error, 0 warnings, 0 info findings\./);
   assert.doesNotMatch(result.stderr, /No tests found/);
+  assert.equal(fs.existsSync(path.join(path.dirname(file), '.qa-core')), false);
+});
+
+test('unknown --only and --keep-workspace without it are tool errors', () => {
+  const unknown = runCli(['--only', 'trace', w001Dir]);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /Unknown --only check/);
+  assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
+
+  const keep = runCli(['--keep-workspace', w001Dir]);
+  assert.equal(keep.status, 2);
+  assert.match(keep.stderr, /--keep-workspace requires --only locator-evidence/);
+  assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
+});
+
+test('--only locator-evidence rejects --json, --format, and --fail-on', () => {
+  const cases = [
+    ['--only', 'locator-evidence', '--json', w001Dir],
+    ['--only', 'locator-evidence', '--format', 'console', w001Dir],
+    ['--only', 'locator-evidence', '--fail-on', 'warn', w001Dir],
+  ];
+  for (const args of cases) {
+    const result = runCli(args);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /--only locator-evidence does not support --json, --format, or --fail-on/);
+    assert.equal(result.stdout, '');
+    assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
+  }
 });
