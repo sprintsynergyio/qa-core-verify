@@ -19,14 +19,50 @@ function callStack() {
   return new Error().stack || '';
 }
 
-async function record(store, locator, phase, call, negated) {
-  let matchCount = null;
+function assertWorkspaceWrite(file) {
+  const root = process.env.QCV_WORKSPACE_DIR || '';
+  if (!root) throw new Error('Refusing to write ' + file + ' because the temp workspace is not set.');
+  const realRoot = fs.realpathSync(root);
+  let stat = null;
   try {
-    matchCount = await locator.count();
-  } catch {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') throw error;
+  }
+  if (stat) {
+    if (!stat.isFile()) throw new Error('Refusing to write ' + file + ' because it is not a regular file in the temp workspace.');
+    const realFile = fs.realpathSync(file);
+    const relative = path.relative(realRoot, realFile);
+    if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+      throw new Error('Refusing to write ' + file + ' because it is outside the temp workspace.');
+    }
     return;
   }
-  if (typeof matchCount !== 'number') return;
+  const parent = path.dirname(file);
+  const parentStat = fs.lstatSync(parent);
+  if (!parentStat.isDirectory()) throw new Error('Refusing to write ' + file + ' because its parent is not a real directory in the temp workspace.');
+  const realParent = fs.realpathSync(parent);
+  const relativeParent = path.relative(realRoot, realParent);
+  if (relativeParent === '..' || relativeParent.startsWith('..' + path.sep) || path.isAbsolute(relativeParent)) {
+    throw new Error('Refusing to write ' + file + ' because it is outside the temp workspace.');
+  }
+}
+
+async function record(store, locator, phase, call, negated, succeeded) {
+  let matchCount = null;
+  let counted = false;
+  try {
+    matchCount = await locator.count();
+    counted = typeof matchCount === 'number';
+  } catch {
+    counted = false;
+  }
+  const actionSucceeded = phase === 'action' && succeeded === true;
+  if (actionSucceeded && (!counted || matchCount === 0)) {
+    matchCount = 1;
+    counted = true;
+  }
+  if (!counted) return;
   let url = '';
   try {
     const owner = typeof locator.page === 'function' ? locator.page() : store.page;
@@ -43,6 +79,7 @@ async function record(store, locator, phase, call, negated) {
     phase,
     call,
     negated,
+    actionSucceeded,
     stack: callStack(),
     testFile: store.testInfo.file,
     testLine: store.testInfo.line,
@@ -67,8 +104,14 @@ function wrapLocator(locator, store) {
     const original = locator[name];
     if (typeof original !== 'function') continue;
     locator[name] = async function (...args) {
-      await record(store, locator, 'action', name, false);
-      return original.apply(locator, args);
+      try {
+        const result = await original.apply(locator, args);
+        await record(store, locator, 'action', name, false, true);
+        return result;
+      } catch (error) {
+        await record(store, locator, 'action', name, false, false);
+        throw error;
+      }
     };
   }
   return locator;
@@ -105,7 +148,7 @@ function wrapMatcherResult(result, actual, store, negated) {
         try {
           return await value.apply(target, args);
         } finally {
-          await record(store, actual, 'assertion', String(prop), negated);
+          await record(store, actual, 'assertion', String(prop), negated, false);
         }
       };
     },
@@ -129,7 +172,9 @@ export const test = base.extend({
       if (evidenceDir) {
         fs.mkdirSync(evidenceDir, { recursive: true });
         const name = [testInfo.testId, String(testInfo.retry), String(testInfo.repeatEachIndex)].join('-').replace(/[^A-Za-z0-9._-]+/g, '_');
-        fs.writeFileSync(path.join(evidenceDir, name + '.json'), JSON.stringify(store.bucket));
+        const file = path.join(evidenceDir, name + '.json');
+        assertWorkspaceWrite(file);
+        fs.writeFileSync(file, JSON.stringify(store.bucket));
       }
     }
   },

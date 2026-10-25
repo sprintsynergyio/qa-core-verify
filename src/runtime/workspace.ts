@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +6,105 @@ import { fileURLToPath } from 'node:url';
 import { ToolError } from '../tool-error.js';
 
 const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git']);
+
+interface ActiveWorkspace {
+  keep: boolean;
+  child?: ChildProcess;
+}
+
+const activeWorkspaces = new Map<string, ActiveWorkspace>();
+let signalHooksInstalled = false;
+
+function installSignalCleanup(): void {
+  if (signalHooksInstalled) return;
+  signalHooksInstalled = true;
+  const stop = (signal: NodeJS.Signals): void => {
+    for (const [dir, state] of activeWorkspaces) {
+      if (state.keep) continue;
+      try {
+        state.child?.kill('SIGTERM');
+      } catch {
+        // The Playwright process may already be gone.
+      }
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Still exit below so the signal does not leave this process running.
+      }
+    }
+    activeWorkspaces.clear();
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.once('SIGINT', () => stop('SIGINT'));
+  process.once('SIGTERM', () => stop('SIGTERM'));
+}
+
+function isOutsideRoot(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/**
+ * Refuse to write `file` unless it is a regular file inside `workspaceDir`.
+ * A missing file is allowed only when its parent is a real directory inside the workspace.
+ * A symlink fails this check, including one that points outside the temp copy.
+ */
+export function assertWorkspaceFile(workspaceDir: string, file: string): void {
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(workspaceDir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ToolError(`Refusing to write ${file}: ${message}`);
+  }
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    const code = error instanceof Error && 'code' in error ? String(error.code) : '';
+    if (code !== 'ENOENT') {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ToolError(`Refusing to write ${file}: ${message}`);
+    }
+  }
+  if (stat) {
+    if (!stat.isFile()) {
+      throw new ToolError(`Refusing to write ${file} because it is not a regular file in the temp workspace.`);
+    }
+    let realFile: string;
+    try {
+      realFile = fs.realpathSync(file);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ToolError(`Refusing to write ${file}: ${message}`);
+    }
+    if (isOutsideRoot(realRoot, realFile)) {
+      throw new ToolError(`Refusing to write ${file} because it is outside the temp workspace.`);
+    }
+    return;
+  }
+  const parent = path.dirname(file);
+  let parentStat: fs.Stats;
+  try {
+    parentStat = fs.lstatSync(parent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ToolError(`Refusing to write ${file}: ${message}`);
+  }
+  if (!parentStat.isDirectory()) {
+    throw new ToolError(`Refusing to write ${file} because its parent is not a real directory in the temp workspace.`);
+  }
+  let realParent: string;
+  try {
+    realParent = fs.realpathSync(parent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ToolError(`Refusing to write ${file}: ${message}`);
+  }
+  if (isOutsideRoot(realRoot, realParent)) {
+    throw new ToolError(`Refusing to write ${file} because it is outside the temp workspace.`);
+  }
+}
 
 export interface PlaywrightRun {
   exitCode: number;
@@ -62,12 +161,17 @@ export async function runPlaywrightInWorkspace(
     keep: boolean;
     env?: NodeJS.ProcessEnv;
     prepare?: (workspaceDir: string) => void;
+    /** Runs after the copy is ready and before Playwright starts. */
+    onWorkspace?: (workspaceDir: string) => void;
     /** Runs after Playwright exits and before the workspace is removed. */
     after?: (workspaceDir: string, playwright: PlaywrightRun) => void;
   },
 ): Promise<WorkspaceRun> {
   const source = path.resolve(projectDir);
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-workspace-'));
+  const state: ActiveWorkspace = { keep: options.keep };
+  activeWorkspaces.set(workspaceDir, state);
+  installSignalCleanup();
   const modules = resolveNodeModules(source);
   try {
     copyProject(source, workspaceDir);
@@ -75,28 +179,38 @@ export async function runPlaywrightInWorkspace(
     if (fs.existsSync(link)) fs.rmSync(link, { recursive: true, force: true });
     fs.symlinkSync(modules, link, 'dir');
     options.prepare?.(workspaceDir);
-    const playwright = await runPlaywright(workspaceDir, options.env);
+    options.onWorkspace?.(workspaceDir);
+    const playwright = await runPlaywright(workspaceDir, options.env, (child) => {
+      state.child = child;
+    });
     options.after?.(workspaceDir, playwright);
     if (!options.keep) fs.rmSync(workspaceDir, { recursive: true, force: true });
     return { workspaceDir, kept: options.keep, playwright };
   } catch (error) {
     if (!options.keep) fs.rmSync(workspaceDir, { recursive: true, force: true });
     throw error;
+  } finally {
+    activeWorkspaces.delete(workspaceDir);
   }
 }
 
 function copyProject(source: string, dest: string): void {
   fs.cpSync(source, dest, {
     recursive: true,
+    dereference: true,
     filter: (src) => src === source || !SKIP_COPY.has(path.basename(src)),
   });
 }
 
-function runPlaywright(workspaceDir: string, extraEnv: NodeJS.ProcessEnv | undefined): Promise<PlaywrightRun> {
+function runPlaywright(
+  workspaceDir: string,
+  extraEnv: NodeJS.ProcessEnv | undefined,
+  onChild: (child: ChildProcess) => void,
+): Promise<PlaywrightRun> {
   const cli = path.join(workspaceDir, 'node_modules', 'playwright', 'cli.js');
   if (!fs.existsSync(cli)) throw new ToolError(`Playwright CLI is missing at ${cli}.`);
   const outputDir = path.join(workspaceDir, 'test-results');
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, FORCE_COLOR: '0' };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, FORCE_COLOR: '0', QCV_WORKSPACE_DIR: workspaceDir };
   delete env.NO_COLOR;
   if (typeof env.QCV_EVIDENCE_DIR === 'string' && env.QCV_EVIDENCE_DIR.length > 0 && !path.isAbsolute(env.QCV_EVIDENCE_DIR)) {
     env.QCV_EVIDENCE_DIR = path.resolve(workspaceDir, env.QCV_EVIDENCE_DIR);
@@ -108,6 +222,7 @@ function runPlaywright(workspaceDir: string, extraEnv: NodeJS.ProcessEnv | undef
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    onChild(child);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => {

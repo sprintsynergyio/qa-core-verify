@@ -10,6 +10,8 @@ export interface EvidenceRecord {
   phase: 'action' | 'assertion';
   call: string;
   negated: boolean;
+  /** True when this action returned. Assertions are false. A true record has matchCount of at least 1. */
+  actionSucceeded: boolean;
   file: string;
   line: number;
   column: number;
@@ -35,6 +37,7 @@ export interface RawEvidencePart {
   phase: string;
   call: string;
   negated: boolean;
+  actionSucceeded?: boolean;
   stack: string;
   testFile: string;
   testLine: number;
@@ -91,11 +94,12 @@ export function buildEvidence(input: {
     if (record) records.push(record);
   }
   records.sort(compareRecords);
+  const labeled = displayText(projectDirLabel(input.projectDir));
   return {
     schemaVersion: 1,
     tool: input.tool,
     playwrightVersion: input.playwrightVersion,
-    project: { dir: projectDirLabel(input.projectDir) },
+    project: { dir: labeled.length === 0 ? '.' : labeled },
     playwrightExitCode: input.playwrightExitCode,
     records,
   };
@@ -119,6 +123,7 @@ function normalizePart(part: RawEvidencePart, workspaceDir: string): EvidenceRec
     phase: part.phase,
     call: displayText(part.call),
     negated: part.negated === true,
+    actionSucceeded: part.actionSucceeded === true,
     file: callFile,
     line: site?.line ?? part.testLine,
     column: site?.column ?? 1,
@@ -147,6 +152,7 @@ function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
     'url',
     'matchCount',
     'negated',
+    'actionSucceeded',
     'testFile',
     'testLine',
     'testTitle',

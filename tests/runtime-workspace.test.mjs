@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildEvidence, callSiteFromStack } from '../dist/runtime/locator-evidence/evidence.js';
 import { collectLocatorEvidence, rewritePlaywrightImports } from '../dist/runtime/locator-evidence/injected-fixture.js';
+import { assertWorkspaceFile } from '../dist/runtime/workspace.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sauceDemo = path.join(repoRoot, 'example-project/saucedemo');
@@ -112,8 +113,34 @@ test('call sites and evidence paths stay project relative and drop control chara
   assert.equal(record.testFile, 'tests/a.spec.ts');
   assert.equal(record.testTitle, 'banner hidden');
   assert.equal(record.matchCount, 0);
+  assert.equal(record.actionSucceeded, false);
   assert.equal(JSON.stringify(evidence).includes('\u202E'), false);
   assert.equal(JSON.stringify(evidence).includes('\u009B'), false);
+});
+
+test('project.dir strips control characters and bidi marks', () => {
+  const marked = buildEvidence({
+    parts: [],
+    workspaceDir: '/tmp/qcv-workspace-example',
+    projectDir: '/tmp/pre\u202Epost\u009B',
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    playwrightExitCode: 0,
+  });
+  assert.equal(marked.project.dir, 'prepost');
+  assert.equal(JSON.stringify(marked).includes('\u202E'), false);
+  assert.equal(JSON.stringify(marked).includes('\u009B'), false);
+
+  const blank = buildEvidence({
+    parts: [],
+    workspaceDir: '/tmp/qcv-workspace-example',
+    projectDir: '/tmp/\u0001\u202E',
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    playwrightExitCode: 0,
+  });
+  assert.equal(blank.project.dir, '.');
+  assert.equal(JSON.stringify(blank).includes('\u0001'), false);
 });
 
 test('import rewrite points specs at the fixture and leaves the config import alone', () => {
@@ -239,14 +266,226 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   assert.equal(fs.existsSync(run.workspaceDir), false);
   const banner = run.evidence.records.find((record) => record.selector.includes('#login-error-banner'));
   const locked = run.evidence.records.find(
-    (record) => record.selector.includes('[data-test="error"]') && record.testTitle.includes('locked out user'),
+    (record) =>
+      record.testTitle.includes('locked out user') &&
+      (record.api === "getByTestId('error')" || record.selector === 'internal:testid=[data-test="error"s]'),
   );
   assert.ok(banner, 'missing #login-error-banner');
   assert.equal(banner.matchCount, 0);
   assert.ok(locked, 'missing locked out error locator');
   assert.equal(locked.matchCount, 1);
+  assert.equal(
+    run.evidence.records.some((record) => record.actionSucceeded === true && record.matchCount === 0),
+    false,
+  );
   assert.equal(run.evidence.records.every((record) => !record.file.startsWith('/') && !record.testFile.startsWith('/')), true);
 });
+
+const HELPER_SOURCE = `import { expect } from '@playwright/test';
+export function ping() {
+  expect(1).toBe(1);
+  return 1;
+}
+`;
+
+const HELPER_SPEC = `import { test } from '@playwright/test';
+import { ping } from './helper.js';
+test('pings', () => {
+  ping();
+});
+`;
+
+function writeHelperProject(project, helperTarget) {
+  fs.mkdirSync(path.join(project, 'tests'), { recursive: true });
+  fs.symlinkSync(helperTarget, path.join(project, 'tests', 'helper.ts'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: './tests' });\n",
+  );
+  fs.writeFileSync(path.join(project, 'tests', 'uses-helper.spec.ts'), HELPER_SPEC);
+}
+
+function runKeptEvidence(t, project) {
+  const out = tempDir(t, 'qcv-symlink-out-');
+  const cli = path.join(repoRoot, 'dist/cli.js');
+  const result = spawnSync(
+    process.execPath,
+    [cli, project, '--only', 'locator-evidence', '--keep-workspace', '--out', out],
+    { cwd: repoRoot, encoding: 'utf8' },
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const match = /Workspace: (\S+)/.exec(result.stdout);
+  assert.ok(match, result.stdout);
+  const workspace = match[1];
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  return workspace;
+}
+
+test('a symlink inside the project is copied as a file and the original stays unchanged', (t) => {
+  const project = tempDir(t, 'qcv-symlink-in-');
+  fs.mkdirSync(path.join(project, 'support'));
+  const helperPath = path.join(project, 'support', 'helper.ts');
+  fs.writeFileSync(helperPath, HELPER_SOURCE);
+  const before = fs.readFileSync(helperPath);
+  writeHelperProject(project, path.join('..', 'support', 'helper.ts'));
+  const workspace = runKeptEvidence(t, project);
+  assert.equal(fs.readFileSync(helperPath).equals(before), true);
+  assert.match(fs.readFileSync(helperPath, 'utf8'), /from '@playwright\/test'/);
+  assert.equal(fs.lstatSync(path.join(project, 'tests', 'helper.ts')).isSymbolicLink(), true);
+  const copied = path.join(workspace, 'tests', 'helper.ts');
+  assert.equal(fs.lstatSync(copied).isSymbolicLink(), false);
+  assert.equal(fs.lstatSync(copied).isFile(), true);
+  assert.match(fs.readFileSync(copied, 'utf8'), /qcv-locator-fixture\.js/);
+  assert.equal(fs.readFileSync(copied, 'utf8').includes('@playwright/test'), false);
+});
+
+test('a symlink pointing outside the project does not change the outside file', (t) => {
+  const project = tempDir(t, 'qcv-symlink-outproj-');
+  const outside = tempDir(t, 'qcv-symlink-outside-');
+  const outsideFile = path.join(outside, 'helper.ts');
+  fs.writeFileSync(outsideFile, HELPER_SOURCE);
+  const before = fs.readFileSync(outsideFile);
+  writeHelperProject(project, outsideFile);
+  const workspace = runKeptEvidence(t, project);
+  assert.equal(fs.readFileSync(outsideFile).equals(before), true);
+  assert.match(fs.readFileSync(outsideFile, 'utf8'), /from '@playwright\/test'/);
+  assert.equal(fs.lstatSync(path.join(project, 'tests', 'helper.ts')).isSymbolicLink(), true);
+  const copied = path.join(workspace, 'tests', 'helper.ts');
+  assert.equal(fs.lstatSync(copied).isSymbolicLink(), false);
+  assert.equal(fs.lstatSync(copied).isFile(), true);
+  const copiedText = fs.readFileSync(copied, 'utf8');
+  assert.match(copiedText, /qcv-locator-fixture\.js/);
+  assert.equal(copiedText.includes('@playwright/test'), false);
+  const realCopied = fs.realpathSync(copied);
+  assert.equal(realCopied.startsWith(`${workspace}${path.sep}`), true);
+  assert.equal(realCopied === fs.realpathSync(outsideFile), false);
+});
+
+test('assertWorkspaceFile refuses a symlink and a file reached through a directory symlink', (t) => {
+  const root = tempDir(t, 'qcv-guard-');
+  const inside = path.join(root, 'real.ts');
+  fs.writeFileSync(inside, 'export const n = 1;\n');
+  assert.doesNotThrow(() => assertWorkspaceFile(root, inside));
+
+  const link = path.join(root, 'link.ts');
+  fs.symlinkSync(inside, link);
+  assert.throws(() => assertWorkspaceFile(root, link), /not a regular file/);
+
+  const outside = tempDir(t, 'qcv-guard-out-');
+  const outsideFile = path.join(outside, 'secret.ts');
+  fs.writeFileSync(outsideFile, 'export const n = 2;\n');
+  fs.symlinkSync(outside, path.join(root, 'out'));
+  assert.throws(() => assertWorkspaceFile(root, path.join(root, 'out', 'secret.ts')), /outside the temp workspace/);
+});
+
+test('a successful action that removes its target is recorded as matched', async (t) => {
+  const project = tempDir(t, 'qcv-action-');
+  writeProject(project, {
+    spec: `import { test } from '@playwright/test';
+test('click removes the button', async ({ page }) => {
+  await page.setContent('<button id="gone">Go</button>');
+  await page.locator('#gone').evaluate((element) => {
+    element.addEventListener('click', () => element.remove());
+  });
+  await page.locator('#gone').click();
+});
+test('click missing fails', async ({ page }) => {
+  await page.setContent('<p>none</p>');
+  await page.locator('#missing').click({ timeout: 300 });
+});
+`,
+  });
+  const run = await collectLocatorEvidence({
+    projectDir: project,
+    outDir: path.join(project, '.qa-core', 'verify'),
+    keepWorkspace: false,
+  });
+  assert.equal(run.evidence.playwrightExitCode, 1);
+  const gone = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#gone');
+  assert.ok(gone, 'missing click that removes its target');
+  assert.equal(gone.actionSucceeded, true);
+  assert.equal(gone.matchCount, 1);
+  const missing = run.evidence.records.find((record) => record.call === 'click' && record.selector === '#missing');
+  assert.ok(missing, 'missing failed click');
+  assert.equal(missing.actionSucceeded, false);
+  assert.equal(missing.matchCount, 0);
+  assert.equal(
+    run.evidence.records.some((record) => record.actionSucceeded === true && record.matchCount === 0),
+    false,
+  );
+});
+
+test('SIGINT and SIGTERM remove the temp workspace', { timeout: 60_000 }, async (t) => {
+  const project = tempDir(t, 'qcv-signal-project-');
+  writeProject(project, {
+    spec: `import { test } from '@playwright/test';
+test('hangs', () => new Promise(() => {}));
+`,
+  });
+  const runnerDir = tempDir(t, 'qcv-signal-runner-');
+  const runner = path.join(runnerDir, 'run.mjs');
+  const workspaceModule = path.join(repoRoot, 'dist/runtime/workspace.js');
+  fs.writeFileSync(
+    runner,
+    `import fs from 'node:fs';
+import { runPlaywrightInWorkspace } from ${JSON.stringify(workspaceModule)};
+const marker = process.argv[2];
+const projectDir = process.argv[3];
+await runPlaywrightInWorkspace(projectDir, {
+  keep: false,
+  onWorkspace(dir) {
+    fs.writeFileSync(marker, dir);
+  },
+});
+`,
+  );
+  const expected = { SIGINT: 130, SIGTERM: 143 };
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const marker = path.join(tempDir(t, 'qcv-signal-marker-'), 'dir.txt');
+    const child = spawn(process.execPath, [runner, marker, project], { stdio: 'ignore' });
+    const workspace = await waitForFile(marker, 20_000);
+    assert.equal(fs.existsSync(workspace), true, workspace);
+    const exitedPromise = waitForExit(child, 10_000);
+    child.kill(signal);
+    const exited = await exitedPromise;
+    assert.equal(exited.code, expected[signal], `${signal} exited ${exited.code} signal ${exited.signal}`);
+    assert.equal(fs.existsSync(workspace), false);
+  }
+});
+
+function waitForFile(file, timeoutMs) {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      if (fs.existsSync(file)) {
+        const text = fs.readFileSync(file, 'utf8').trim();
+        if (text) {
+          resolve(text);
+          return;
+        }
+      }
+      if (Date.now() - started > timeoutMs) {
+        reject(new Error(`timed out waiting for ${file}`));
+        return;
+      }
+      setTimeout(poll, 50);
+    };
+    poll();
+  });
+}
+
+function waitForExit(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('child did not exit'));
+    }, timeoutMs);
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
+}
 
 function hashTree(dir) {
   const files = sourceFiles(dir);

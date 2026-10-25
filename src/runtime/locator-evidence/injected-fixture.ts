@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readToolIdentity } from '../../report/model.js';
 import { ToolError } from '../../tool-error.js';
-import { readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
+import { assertWorkspaceFile, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
 import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './evidence.js';
 import { locatorFixtureSource } from './fixture-source.js';
 
@@ -35,6 +35,7 @@ export async function collectLocatorEvidence(options: {
     env: { QCV_EVIDENCE_DIR: PARTS_DIR },
     prepare: (workspaceDir) => {
       const fixturePath = path.join(workspaceDir, FIXTURE_NAME);
+      assertWorkspaceFile(workspaceDir, fixturePath);
       fs.writeFileSync(fixturePath, locatorFixtureSource());
       rewriteProjectImports(workspaceDir, fixturePath);
       fs.mkdirSync(path.join(workspaceDir, PARTS_DIR), { recursive: true });
@@ -82,7 +83,10 @@ function rewriteProjectImports(workspaceDir: string, fixturePath: string): void 
       if (!/\.(ts|tsx|js|jsx|mjs|cjs|cts|mts)$/.test(entry.name)) continue;
       const text = fs.readFileSync(full, 'utf8');
       const next = rewritePlaywrightImports(text, specifierFor(full, fixturePath));
-      if (next !== text) fs.writeFileSync(full, next);
+      if (next !== text) {
+        assertWorkspaceFile(workspaceDir, full);
+        fs.writeFileSync(full, next);
+      }
     }
   };
   walk(workspaceDir);
@@ -124,6 +128,9 @@ function asPart(value: unknown): RawEvidencePart {
   if (typeof record.testTitle !== 'string' || typeof record.matchCount !== 'number' || typeof record.testLine !== 'number') {
     throw new ToolError('Locator evidence part is missing a number field.');
   }
+  if (typeof record.actionSucceeded !== 'boolean') {
+    throw new ToolError('Locator evidence part is missing actionSucceeded.');
+  }
   return {
     selector: record.selector,
     api: record.api,
@@ -132,6 +139,7 @@ function asPart(value: unknown): RawEvidencePart {
     phase,
     call: record.call,
     negated: record.negated === true,
+    actionSucceeded: record.actionSucceeded,
     stack: record.stack,
     testFile: record.testFile,
     testLine: record.testLine,

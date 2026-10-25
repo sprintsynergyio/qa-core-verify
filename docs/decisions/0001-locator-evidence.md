@@ -2,13 +2,13 @@
 
 This spike compares three ways to record how many elements a Playwright locator matched. The runs used Playwright 1.60.0 and the SauceDemo demo suite in `example-project/saucedemo`. That suite has 19 tests. On every run below, 18 passed and 1 was skipped (`skipped inventory check`). The site was `https://www.saucedemo.com`.
 
-The prototype is option A. `--only locator-evidence` copies the project to a temp directory, symlinks `node_modules`, rewrites `@playwright/test` imports, and writes `locator-evidence.json`.
+The prototype is option A. `--only locator-evidence` copies the project to a temp directory, follows symlinks so the copy holds regular files, symlinks `node_modules`, rewrites `@playwright/test` imports, and writes `locator-evidence.json`. A file is written in that copy only when `lstat` says it is a regular file and `realpath` keeps it inside the copy.
 
 ## Option A Injected Fixture
 
 A generated module extends the `page` fixture. Locator actions are wrapped, and `expect` on a wrapped locator is wrapped. `count()` is not wrapped, so the sample does not call itself.
 
-Actions call `count()` before the action. Assertions call `count()` after the matcher settles, including when the matcher throws. One earlier build sampled assertions before the matcher. On that build, one of three default-worker runs recorded `matchCount` 0 for two passing `toHaveText` assertions (`getByTestId('title')` on the inventory page, and `getByTestId('inventory-item-name')` on the checkout overview). The assertions still passed. The shipped prototype samples assertions after the matcher so those settled counts stay in the file.
+Actions run first. `count()` runs after the action returns. A successful Playwright action is strict, so one element matched when it ran. If that later count is 0, or if `count()` throws after a successful action, the record uses `matchCount` 1 and `actionSucceeded` true. A failed action keeps the count taken after the throw, which can be 0, and sets `actionSucceeded` false. Assertions call `count()` after the matcher settles, including when the matcher throws, and a count of 0 stays 0. One earlier build sampled assertions before the matcher. On that build, one of three default-worker runs recorded `matchCount` 0 for two passing `toHaveText` assertions (`getByTestId('title')` on the inventory page, and `getByTestId('inventory-item-name')` on the checkout overview). The assertions still passed. The shipped prototype samples assertions after the matcher so those settled counts stay in the file. An earlier build also sampled actions before Playwright waited, so five successful demo actions were stored with `matchCount` 0, including the add-to-cart click in `add to cart updates the cart badge`. The shipped prototype does not do that.
 
 The selector stored is the locator's `_selector` string. That field is not a public Playwright API. `toString()` is stored as `api`. The first project stack frame supplies the file and line. Frames in `node_modules` and in `qcv-locator-fixture.ts` are skipped.
 
@@ -77,7 +77,9 @@ On these nine runs the injected Playwright times are not above the baseline time
 
 Reading the 18 trace zips from the earlier `--trace=on` run (2,777,932 bytes) by unzipping them and counting JSON lines in `0-trace.trace` took 69 ms and saw 821 events. That is the read cost only. It is not an offline selector engine.
 
-Shipped CLI, unmodified demo project, default worker count, `--only locator-evidence`, three runs. Each exited 0 with 47 records. Wall times were 6809 ms, 6770 ms, and 7004 ms. The three `locator-evidence.json` files were byte-identical, 23368 bytes, sha256 `ebef5b50e2edf6a51fc46e2521d455aaaa08ac6d52181bfefb94d87332b9ba31`.
+Shipped CLI, unmodified demo project, default worker count, `--only locator-evidence`, three runs before the action-count fix. Each exited 0 with 47 records. Wall times were 6809 ms, 6770 ms, and 7004 ms. Those three `locator-evidence.json` files were byte-identical, 23368 bytes, sha256 `ebef5b50e2edf6a51fc46e2521d455aaaa08ac6d52181bfefb94d87332b9ba31`.
+
+The same command after the action-count fix, three runs. Each exited 0 with 47 records. No record with `actionSucceeded` true has `matchCount` 0. The five actions that had been stored as `matchCount` 0 are now `matchCount` 1 with `actionSucceeded` true: `tests/good/shopping.spec.ts` lines 17, 37, 43, and 44, and `tests/ai-style/weak-assertions.spec.ts` line 38. The three files were byte-identical, 24931 bytes, sha256 `4763d59659370726b798a6b10bfd3ea39dee6bc79deaca2b6fdf6d6f6fc4bfdb`. Wall times for these three runs were 7184 ms, 7185 ms, and 7203 ms. The earlier wall times above stay as measured.
 
 ## The Choice
 
@@ -89,8 +91,11 @@ The demo suite result did not change on the measured injected runs: 18 passed, 1
 
 - `count()` is an extra call. These SauceDemo runs stayed green. That does not prove a timing-sensitive suite would stay green.
 - A count taken before a retrying assertion can be 0 while the assertion later passes. That happened in the earlier build described above. The shipped code counts an assertion after the matcher settles, so a node that disappears after the assertion can be missed the other way. That case was not observed here.
+- A successful action is counted after it returns. If the element is gone by then, `matchCount` is still 1 and `actionSucceeded` is true, because the action itself is strict. The add-to-cart button and the checkout click are that case. A failed action can still have `matchCount` 0. An assertion count of 0 stays 0. No successful demo action is stored with `matchCount` 0.
 - `_selector` is private. `getByTestId('error')` is stored as `internal:testid=[data-test="error"s]`.
 - Only locators created from the `page` fixture are wrapped. `browser.newPage()` is not wrapped.
 - The fixture does not re-export other `@playwright/test` names. A value import of `chromium`, for example, fails in the temp copy. `import type` is erased by the compiler. The demo suite only imports `test` and `expect` as values.
 - `expect.configure` is returned as the original function. An expect created from it is not wrapped.
-- The evidence file has no timestamps, so these runs can match. Paths are relative to the project copy. Control characters are stripped with the same `displayText` rules as the reports.
+- The evidence file has no timestamps, so these runs can match. Paths are relative to the project copy. Control characters and bidi overrides are stripped with the same `displayText` rules as the reports, including `project.dir`.
+- `--only locator-evidence` does not accept `--json`, `--format`, or `--fail-on`. Those flags exit 2 before Playwright starts.
+- SIGINT and SIGTERM remove the temp copy unless `--keep-workspace` was set, and they stop the Playwright child. SIGINT exits 130. SIGTERM exits 143.

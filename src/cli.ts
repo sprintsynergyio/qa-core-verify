@@ -21,14 +21,17 @@ Audit a Playwright suite for weak assertions (QCV-W000 through QCV-W010).
 
 Options:
   --json              Print the JSON report to stdout and nothing else to stdout.
+                      Not accepted with --only locator-evidence.
   --format <list>     Comma-separated outputs: console, json, md, html.
                       The default is console,json,md,html.
+                      Not accepted with --only locator-evidence.
   --out <dir>         Directory for the report files, or for locator-evidence.json.
                       The default is <project>/.qa-core/verify.
                       Inside the project, the console prints paths relative to that folder.
                       Outside the project, the console prints the --out path as it was typed.
   --fail-on <level>   Exit with code 1 when a finding is at or above this level.
                       Levels are error (default), warn, and info.
+                      Not accepted with --only locator-evidence.
   --only <name>       Run one check instead of the static audit. The name is locator-evidence.
                       That check runs Playwright in a temp copy and writes locator-evidence.json.
   --keep-workspace    Keep the temp copy. Requires --only locator-evidence.
@@ -45,8 +48,10 @@ interface CliOptions {
   help: boolean;
   json: boolean;
   formats: ReportFormat[];
+  formatSet: boolean;
   outDir: string | undefined;
   failOn: Severity;
+  failOnSet: boolean;
   only: string | undefined;
   keepWorkspace: boolean;
   projectDir: string | undefined;
@@ -181,8 +186,10 @@ function parseCli(argv: readonly string[]): CliOptions {
     help: values.help === true,
     json: values.json === true,
     formats: parseFormats(values.format),
+    formatSet: values.format !== undefined,
     outDir: values.out,
     failOn: requested,
+    failOnSet: values['fail-on'] !== undefined,
     only: values.only,
     keepWorkspace: values['keep-workspace'] === true,
     projectDir,
@@ -191,6 +198,10 @@ function parseCli(argv: readonly string[]): CliOptions {
 }
 
 async function runLocatorEvidence(options: CliOptions, cwd: string): Promise<number> {
+  if (options.json || options.formatSet || options.failOnSet) {
+    console.error('--only locator-evidence does not support --json, --format, or --fail-on.');
+    return 2;
+  }
   if (!options.projectDir) {
     console.error('Missing project directory.');
     console.error(HELP);

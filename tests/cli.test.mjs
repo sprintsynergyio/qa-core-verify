@@ -217,3 +217,18 @@ test('unknown --only and --keep-workspace without it are tool errors', () => {
   assert.match(keep.stderr, /--keep-workspace requires --only locator-evidence/);
   assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
 });
+
+test('--only locator-evidence rejects --json, --format, and --fail-on', () => {
+  const cases = [
+    ['--only', 'locator-evidence', '--json', w001Dir],
+    ['--only', 'locator-evidence', '--format', 'console', w001Dir],
+    ['--only', 'locator-evidence', '--fail-on', 'warn', w001Dir],
+  ];
+  for (const args of cases) {
+    const result = runCli(args);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /--only locator-evidence does not support --json, --format, or --fail-on/);
+    assert.equal(result.stdout, '');
+    assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
+  }
+});
