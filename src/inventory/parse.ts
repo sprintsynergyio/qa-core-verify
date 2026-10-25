@@ -74,6 +74,10 @@ const HOOKS = new Set([
   'info',
 ]);
 
+const SUITE_HOOK_NAMES = new Set(['beforeEach', 'afterEach', 'beforeAll', 'afterAll']);
+
+const TIMER_NAMES = new Set(['setTimeout', 'setInterval', 'setImmediate']);
+
 /**
  * Read one spec with the TypeScript parser. The file is not executed.
  * `test` and `expect` must be imported. Named imports may come from
@@ -82,6 +86,8 @@ const HOOKS = new Set([
  * test binding, and `expect.configure`, become bindings too. Condition-only
  * `skip`, `fixme`, `fail`, and `slow` calls are annotations. At suite level,
  * callbacks passed to other calls are searched so data-driven tests are found.
+ * Callbacks of beforeEach, afterEach, beforeAll, afterAll, setTimeout,
+ * setInterval, and setImmediate are not searched.
  */
 export function parseSpecFile(filePath: string, config: VerifyConfig): SuiteInventory {
   const absolute = path.resolve(filePath);
@@ -134,7 +140,8 @@ function walkSuite(
       return;
     }
     if (kind?.type === 'annotation') return;
-    // Data-driven tests: forEach, map, and other callbacks at suite level.
+    // forEach and map can declare tests. Hook and timer callbacks do not.
+    if (isSuiteHookCall(node) || isTimerCall(node)) return;
     for (const arg of node.arguments) {
       if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) {
         walkSuite(arg.body, ctx, sourceFile, bindings, config, tests);
@@ -146,6 +153,23 @@ function walkSuite(
   }
   if (isNestedFunction(node)) return;
   ts.forEachChild(node, (child) => walkSuite(child, ctx, sourceFile, bindings, config, tests));
+}
+
+function callCalleeName(call: ts.CallExpression): string | undefined {
+  const expr = unwrapExpression(call.expression);
+  if (ts.isIdentifier(expr)) return expr.text;
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  return undefined;
+}
+
+function isSuiteHookCall(call: ts.CallExpression): boolean {
+  const name = callCalleeName(call);
+  return name !== undefined && SUITE_HOOK_NAMES.has(name);
+}
+
+function isTimerCall(call: ts.CallExpression): boolean {
+  const name = callCalleeName(call);
+  return name !== undefined && TIMER_NAMES.has(name);
 }
 
 function recordTest(

@@ -1,0 +1,99 @@
+[
+  {
+    "file": "tests/ai-style/cannot-fail.spec.ts",
+    "line": 7,
+    "ruleId": "QCV-F001",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/cannot-fail.spec.ts",
+    "line": 14,
+    "ruleId": "QCV-F002",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/locators.spec.ts",
+    "line": 10,
+    "ruleId": "QCV-L002",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/locators.spec.ts",
+    "line": 16,
+    "ruleId": "QCV-L003",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/locators.spec.ts",
+    "line": 23,
+    "ruleId": "QCV-L004",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 5,
+    "ruleId": "QCV-W001",
+    "status": "active"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 12,
+    "ruleId": "QCV-W002",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 18,
+    "ruleId": "QCV-W003",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 26,
+    "ruleId": "QCV-W004",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 33,
+    "ruleId": "QCV-W005",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 44,
+    "ruleId": "QCV-W006",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 52,
+    "ruleId": "QCV-W007",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 60,
+    "ruleId": "QCV-W008",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 67,
+    "ruleId": "QCV-W009",
+    "status": "pending",
+    "reason": "Playwright skips this test, so the run does not count it as passed."
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 72,
+    "ruleId": "QCV-W001",
+    "status": "active"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 75,
+    "ruleId": "QCV-W010",
+    "status": "pending"
+  }
+]
