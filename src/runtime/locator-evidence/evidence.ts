@@ -1,12 +1,13 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { displayText, projectDirLabel } from '../../report/paths.js';
+import { displayText, escapeSelector, projectDirLabel } from '../../report/paths.js';
 
 export interface EvidenceRecord {
   selector: string;
   api: string;
   url: string;
-  matchCount: number;
+  /** Null when `count()` threw after a successful action. */
+  matchCount: number | null;
   phase: 'action' | 'assertion';
   call: string;
   negated: boolean;
@@ -17,6 +18,10 @@ export interface EvidenceRecord {
    * Derived only from `actionSucceeded`. It is not a substitute for `matchCount`.
    */
   resolvedOnAction: boolean;
+  /** Count of the locator before `.first()`, `.last()`, or `.nth()`. Null when this use was not narrowed. */
+  parentCount: number | null;
+  /** The number passed to `toHaveCount`, when that matcher was used. */
+  countExpected: number | null;
   file: string;
   line: number;
   column: number;
@@ -38,11 +43,13 @@ export interface RawEvidencePart {
   selector: string;
   api: string;
   url: string;
-  matchCount: number;
+  matchCount: number | null;
   phase: string;
   call: string;
   negated: boolean;
   actionSucceeded?: boolean;
+  parentCount?: number | null;
+  countExpected?: number | null;
   stack: string;
   testFile: string;
   testLine: number;
@@ -110,26 +117,49 @@ export function buildEvidence(input: {
   };
 }
 
+function countOrNull(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value) || value < 0) return null;
+  return value;
+}
+
+/** Drop a query string so two runs of the same page compare equal. The hash stays. */
+export function evidenceUrl(value: string): string {
+  const cleaned = displayText(value);
+  if (!cleaned.includes('?')) return cleaned;
+  try {
+    const url = new URL(cleaned);
+    url.search = '';
+    return url.toString();
+  } catch {
+    const query = cleaned.indexOf('?');
+    return query === -1 ? cleaned : cleaned.slice(0, query);
+  }
+}
+
 function normalizePart(part: RawEvidencePart, workspaceDir: string): EvidenceRecord | undefined {
   if (part.phase !== 'action' && part.phase !== 'assertion') return undefined;
-  if (!Number.isInteger(part.matchCount) || part.matchCount < 0) return undefined;
+  const matchCount = part.matchCount === null ? null : countOrNull(part.matchCount);
+  if (part.matchCount !== null && matchCount === null) return undefined;
   const site = callSiteFromStack(part.stack, workspaceDir);
   const testFile = projectFile(part.testFile, workspaceDir);
   const callFile = site ? projectFile(site.file, workspaceDir) : testFile;
   if (!testFile || !callFile) return undefined;
-  const selector = displayText(part.selector);
+  const selector = escapeSelector(part.selector);
   const api = displayText(part.api);
   if (selector.length === 0) return undefined;
   return {
     selector,
     api,
-    url: displayText(part.url),
-    matchCount: part.matchCount,
+    url: evidenceUrl(part.url),
+    matchCount,
     phase: part.phase,
     call: displayText(part.call),
     negated: part.negated === true,
     actionSucceeded: part.actionSucceeded === true,
     resolvedOnAction: part.actionSucceeded === true,
+    parentCount: countOrNull(part.parentCount),
+    countExpected: countOrNull(part.countExpected),
     file: callFile,
     line: site?.line ?? part.testLine,
     column: site?.column ?? 1,
@@ -174,6 +204,15 @@ export function evidenceWithoutActionMatchCount(evidence: EvidenceFile): {
  * Deterministic order: file, line, column, test title, then kind (`phase`, then `call`).
  * `matchCount` is not a key. An action count can be 0 or 1 on different runs, and sorting by it swaps records that share a call site.
  */
+function compareValue(left: string | number | boolean | null, right: string | number | boolean | null): number {
+  if (left === right) return 0;
+  if (left === null) return -1;
+  if (right === null) return 1;
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
   const fields: Array<keyof EvidenceRecord> = [
     'file',
@@ -190,12 +229,12 @@ function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
     'negated',
     'actionSucceeded',
     'resolvedOnAction',
+    'parentCount',
+    'countExpected',
   ];
   for (const field of fields) {
-    const a = left[field];
-    const b = right[field];
-    if (a < b) return -1;
-    if (a > b) return 1;
+    const order = compareValue(left[field], right[field]);
+    if (order !== 0) return order;
   }
   return 0;
 }

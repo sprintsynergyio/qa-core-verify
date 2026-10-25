@@ -1,6 +1,6 @@
 import type { Report, ReportFinding, ReportTest } from './model.js';
 import { trustNote } from './model.js';
-import { collapseNewlines, displayText } from './paths.js';
+import { collapseNewlines, displayText, preserveBlock } from './paths.js';
 
 export function formatMarkdown(report: Report): string {
   const lines: string[] = [];
@@ -60,6 +60,14 @@ function formatTest(test: ReportTest): string[] {
   lines.push('');
   lines.push(`- File: ${inline(displayText(test.file))}:${test.line}`);
   lines.push(`- Verdict: ${test.verdict}`);
+  if (test.locators && test.locators.length > 0) {
+    lines.push('- Locators:');
+    for (const locator of test.locators) {
+      const counts = locator.counts.length === 0 ? 'count unknown' : `count ${locator.counts.join(', ')}`;
+      const parent = locator.parentCounts.length === 0 ? '' : `, parent ${locator.parentCounts.join(', ')}`;
+      lines.push(`  - ${locator.status}: ${inline(locator.api)} (${counts}${parent})`);
+    }
+  }
   if (test.findings.length === 0) {
     lines.push('- Findings: none');
     lines.push('');
@@ -80,7 +88,7 @@ function formatFinding(finding: ReportFinding): string[] {
     `- Message: ${inline(finding.message)}`,
   ];
   if (finding.relatedLintRule) lines.push(`- Related Lint Rule: ${inline(finding.relatedLintRule)}`);
-  lines.push('- Evidence:', '', fence(displayText(finding.evidence)), '', '- Fix:', '', fence(displayText(finding.fixHint)), '');
+  lines.push('- Evidence:', '', fence(preserveBlock(finding.evidence)), '', '- Fix:', '', fence(preserveBlock(finding.fixHint)), '');
   return lines;
 }
 

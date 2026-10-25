@@ -406,6 +406,133 @@ info
 
 `no-wait-for-timeout`
 
+## QCV-L001 Locator Never Matched
+
+### What
+
+A locator used in an action or a positive assertion matched 0 elements in every recorded use. A strict action that returned is not a zero match, because Playwright had resolved one element at action time.
+
+### Why
+
+The test asked for an element that was not there. A click that fails does go red. A positive assertion that is not awaited, or that is swallowed, can stay green.
+
+### Bad Example
+
+```ts
+expect(page.getByText('Products')).toBeTruthy();
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('error')).toHaveText('Epic sadface: Sorry, this user has been locked out.');
+```
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None. The fix hint says to run qa-core-heal.
+
+## QCV-L002 Absence Assertion On An Unseen Locator
+
+### What
+
+The locator is used only in absence assertions, and it never matched. The absence assertions are `toBeHidden`, `not.toBeVisible`, `not.toBeAttached`, and `toHaveCount(0)`.
+
+### Why
+
+This test stays green even if this element does not exist. Check the locator against a state where the element is shown.
+
+### Bad Example
+
+```ts
+await expect(page.locator('#login-error-banner')).toBeHidden();
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('error')).toBeVisible();
+await expect(page.getByTestId('error')).toBeHidden();
+```
+
+The second check is the absence. The first check has already shown that the locator can match.
+
+### Severity
+
+warn
+
+### Related Lint Rule
+
+None.
+
+## QCV-L003 Ambiguous Locator
+
+### What
+
+The locator matched more than one element and the test did not account for that count with `toHaveCount`, or the test called `.first()`, `.last()`, or `.nth()` on a locator whose parent matched more than one element.
+
+### Why
+
+The test can keep passing while it talks to a different element than the one a reader expects.
+
+### Bad Example
+
+```ts
+await expect(page.locator('div').first()).toBeVisible();
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('inventory-item')).toHaveCount(6);
+```
+
+### Severity
+
+warn
+
+### Related Lint Rule
+
+None. The evidence lists the match counts that were seen.
+
+## QCV-L004 Brittle CSS Or XPath
+
+### What
+
+A `locator()` or `frameLocator()` string is an XPath, uses `nth-child` or `nth-of-type`, has more than two CSS combinators, or uses a class.
+
+Playwright's locator guide prefers a role, label, text, or test id over CSS and XPath: https://playwright.dev/docs/locators
+
+A class in that string is reported as a styling class. This is a static check. It does not open a browser.
+
+### Why
+
+A long CSS chain or a class used for styling changes when the page is restyled, and the test fails for a reason that is not the feature.
+
+### Bad Example
+
+```ts
+await expect(page.locator('div#root > div.login_container > div.login_wrapper > div.form')).toBeVisible();
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('login-button')).toBeVisible();
+```
+
+### Severity
+
+info
+
+### Related Lint Rule
+
+None.
+
 ## Known Limits
 
 An `expect` in `beforeEach`, `afterEach`, `beforeAll`, or `afterAll` does not count as an assertion for the test. The hook is not part of the test body. A test that only asserts in `beforeEach` is still QCV-W001.

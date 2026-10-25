@@ -143,6 +143,7 @@ function installSignalCleanup(): void {
       for (const [runRoot, state] of entries) {
         if (state.keep) {
           removeBrowserTemp(state);
+          removeRunExtras(runRoot);
           fs.writeSync(2, workspaceLine(runRoot));
           continue;
         }
@@ -173,12 +174,15 @@ function removeBrowserTemp(state: ActiveWorkspace): void {
 
 /**
  * Absolute path for the Workspace line.
- * C0 (U+0000 through U+001F) and C1 (U+007F through U+009F) are written as
- * `\u` plus four lowercase hex digits. The path is not rewritten with `~`.
+ * A backslash is doubled first, so a later `\u` escape cannot be confused with
+ * those two characters already in the path. C0, DEL, C1, U+2028, U+2029, and
+ * bidi controls (U+200E, U+200F, U+202A through U+202E, U+2066 through U+2069)
+ * are then written as `\u` plus four lowercase hex digits. The path is not rewritten with `~`.
  */
 export function formatWorkspacePath(dir: string): string {
   const resolved = path.resolve(dir);
-  return resolved.replace(/[\u0000-\u001F\u007F-\u009F]/g, (char) => {
+  const slashed = resolved.replaceAll('\\', '\\\\');
+  return slashed.replace(/[\u0000-\u001F\u007F-\u009F\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g, (char) => {
     return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
   });
 }
@@ -269,6 +273,10 @@ export interface WorkspaceRun {
   workspaceDir: string;
   kept: boolean;
   playwright: PlaywrightRun;
+  /** Set when a baseline Playwright process ran before the evidence process. */
+  baseline?: PlaywrightRun;
+  /** Symlinks that were not copied because they were dangling or looped. Paths are relative to the project. */
+  skippedLinks: string[];
 }
 
 /** `node_modules` that contains `@playwright/test`, preferring the project's own. */
@@ -303,48 +311,83 @@ export function readPlaywrightVersion(nodeModules: string): string {
   return version;
 }
 
+export interface WorkspacePhase {
+  env?: NodeJS.ProcessEnv;
+  /** Replaces the default `test --retries=0 --reporter=line` arguments. */
+  playwrightArgs?: string[];
+  prepare?: (workspaceDir: string) => void;
+  after?: (workspaceDir: string, playwright: PlaywrightRun) => void;
+}
+
 /**
  * Copy `projectDir` to a temp folder, symlink `node_modules`, and run Playwright there with `--retries=0`.
  * The copy is removed afterwards unless `keep` is set. The original project is not written.
+ * `second` runs another Playwright process in the same copy, after the first one exits.
  */
 export async function runPlaywrightInWorkspace(
   projectDir: string,
   options: {
     keep: boolean;
     env?: NodeJS.ProcessEnv;
+    /** Project-relative Playwright `--config`, also skipped by the import rewrite. */
+    configFile?: string;
     prepare?: (workspaceDir: string) => void;
     /** Runs after the copy is ready and before Playwright starts. */
     onWorkspace?: (workspaceDir: string) => void;
     /** Runs after Playwright exits and before the workspace is removed. */
     after?: (workspaceDir: string, playwright: PlaywrightRun) => void;
+    playwrightArgs?: string[];
+    /** A second Playwright process in the same copy. The returned `playwright` is this run. */
+    second?: WorkspacePhase;
   },
 ): Promise<WorkspaceRun> {
+  sweepStaleRuns();
   const source = path.resolve(projectDir);
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-run-'));
   const workspaceDir = path.join(runRoot, 'project');
   fs.mkdirSync(workspaceDir);
+  fs.writeFileSync(path.join(runRoot, 'owner.pid'), `${process.pid}\n`);
   const state: ActiveWorkspace = { keep: options.keep, projectCopy: workspaceDir };
   activeWorkspaces.set(runRoot, state);
   installSignalCleanup();
   const modules = resolveNodeModules(source);
   try {
-    copyProject(source, workspaceDir);
+    const skippedLinks = copyProject(source, workspaceDir);
     const link = path.join(workspaceDir, 'node_modules');
     if (fs.existsSync(link)) fs.rmSync(link, { recursive: true, force: true });
     fs.symlinkSync(modules, link, 'dir');
     options.prepare?.(workspaceDir);
     options.onWorkspace?.(workspaceDir);
-    const playwright = await runPlaywright(workspaceDir, options.env, state, (child) => {
+    const first = await runPlaywright(workspaceDir, options.env, state, (child) => {
       state.child = child;
-    });
-    options.after?.(workspaceDir, playwright);
+    }, commandArgs(workspaceDir, options.playwrightArgs, options.configFile));
+    options.after?.(workspaceDir, first);
+    let playwright = first;
+    let baseline: PlaywrightRun | undefined;
+    if (options.second) {
+      baseline = first;
+      if (!signalStop) removeBrowserTemp(state);
+      options.second.prepare?.(workspaceDir);
+      playwright = await runPlaywright(
+        workspaceDir,
+        { ...options.env, ...options.second.env },
+        state,
+        (child) => {
+          state.child = child;
+        },
+        commandArgs(workspaceDir, options.second.playwrightArgs, options.configFile),
+      );
+      options.second.after?.(workspaceDir, playwright);
+    }
     if (!signalStop) removeBrowserTemp(state);
     if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
+    else if (options.keep && !signalStop) removeRunExtras(runRoot);
     if (signalStop) await new Promise(() => {});
-    return { runRoot, workspaceDir, kept: options.keep, playwright };
+    return { runRoot, workspaceDir, kept: options.keep, playwright, baseline, skippedLinks };
   } catch (error) {
     if (!signalStop) removeBrowserTemp(state);
     if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
+    else if (options.keep && !signalStop) removeRunExtras(runRoot);
     if (signalStop) await new Promise(() => {});
     throw error;
   } finally {
@@ -352,12 +395,321 @@ export async function runPlaywrightInWorkspace(
   }
 }
 
-function copyProject(source: string, dest: string): void {
-  fs.cpSync(source, dest, {
-    recursive: true,
-    dereference: true,
-    filter: (src) => src === source || !SKIP_COPY.has(path.basename(src)),
-  });
+function commandArgs(workspaceDir: string, args: string[] | undefined, configFile: string | undefined): string[] {
+  const outputDir = path.join(workspaceDir, 'test-results');
+  const command = args ?? ['test', '--retries=0', '--reporter=line', `--output=${outputDir}`];
+  if (!configFile) return command;
+  const resolved = path.resolve(workspaceDir, configFile);
+  return [...command, `--config=${resolved}`];
+}
+
+function removeRunExtras(runRoot: string): void {
+  for (const name of ['owner.pid', 'qcv-supervisor.mjs']) {
+    try {
+      fs.rmSync(path.join(runRoot, name), { force: true });
+    } catch {
+      // The signal path may already have removed the run.
+    }
+  }
+}
+
+/**
+ * Remove temp runs whose owner process is gone.
+ * A `qcv-run-*` directory without `owner.pid` is a kept workspace and is left alone.
+ * `qcv-workspace-*` is the older prefix. Those directories are removed when they have no live owner.
+ */
+export function sweepStaleRuns(tmpDir = os.tmpdir()): string[] {
+  const removed: string[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(tmpDir);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const legacy = name.startsWith('qcv-workspace-');
+    const current = name.startsWith('qcv-run-');
+    if (!legacy && !current) continue;
+    const dir = path.join(tmpDir, name);
+    let pidText = '';
+    try {
+      pidText = fs.readFileSync(path.join(dir, 'owner.pid'), 'utf8').trim();
+    } catch {
+      pidText = '';
+    }
+    if (pidText) {
+      const pid = Number(pidText);
+      if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) continue;
+    } else if (current) {
+      continue;
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed.push(dir);
+    } catch {
+      // Another process may be deleting it.
+    }
+  }
+  return removed;
+}
+
+interface SkippedLink {
+  relativePath: string;
+  reason: 'dangling' | 'loop';
+}
+
+function copyProject(source: string, dest: string): string[] {
+  const skipped: SkippedLink[] = [];
+  const seen = new Set<string>();
+  const walk = (from: string, to: string): void => {
+    const base = path.basename(from);
+    if (from !== source && SKIP_COPY.has(base)) return;
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(from);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === 'ENOENT') return;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ToolError(`Cannot copy ${from}: ${message}`);
+    }
+    if (stat.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = fs.realpathSync(from);
+      } catch (error) {
+        const code = errorCode(error);
+        const relativePath = path.relative(source, from).split(path.sep).join('/');
+        if (code === 'ENOENT' || code === 'ELOOP') {
+          skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new ToolError(`Cannot copy symlink ${relativePath}: ${message}`);
+      }
+      if (seen.has(real)) {
+        skipped.push({
+          relativePath: path.relative(source, from).split(path.sep).join('/'),
+          reason: 'loop',
+        });
+        return;
+      }
+      let targetStat: fs.Stats;
+      try {
+        targetStat = fs.statSync(real);
+      } catch (error) {
+        const code = errorCode(error);
+        if (code === 'ENOENT' || code === 'ELOOP') {
+          skipped.push({
+            relativePath: path.relative(source, from).split(path.sep).join('/'),
+            reason: code === 'ELOOP' ? 'loop' : 'dangling',
+          });
+          return;
+        }
+        throw new ToolError(`Cannot copy symlink ${from}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (targetStat.isDirectory()) {
+        seen.add(real);
+        copyDirectory(real, to, seen, skipped, source);
+        return;
+      }
+      if (targetStat.isFile()) {
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.copyFileSync(real, to);
+        return;
+      }
+      skipped.push({
+        relativePath: path.relative(source, from).split(path.sep).join('/'),
+        reason: 'dangling',
+      });
+      return;
+    }
+    if (stat.isDirectory()) {
+      try {
+        seen.add(fs.realpathSync(from));
+      } catch {
+        seen.add(from);
+      }
+      copyDirectory(from, to, seen, skipped, source);
+      return;
+    }
+    if (stat.isFile()) {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+    }
+  };
+  walk(source, dest);
+  return skipped.map((item) => `${item.relativePath} (${item.reason})`);
+}
+
+function copyDirectory(from: string, to: string, seen: Set<string>, skipped: SkippedLink[], source: string): void {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from)) {
+    if (SKIP_COPY.has(entry)) continue;
+    const child = path.join(from, entry);
+    const destChild = path.join(to, entry);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(child);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === 'ENOENT') continue;
+      throw new ToolError(`Cannot copy ${child}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (stat.isSymbolicLink()) {
+      let real = '';
+      try {
+        real = fs.realpathSync(child);
+      } catch (error) {
+        const code = errorCode(error);
+        const relativePath = path.relative(source, child).split(path.sep).join('/');
+        if (code === 'ENOENT' || code === 'ELOOP') {
+          skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+          continue;
+        }
+        throw new ToolError(`Cannot copy symlink ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (seen.has(real)) {
+        skipped.push({
+          relativePath: path.relative(source, child).split(path.sep).join('/'),
+          reason: 'loop',
+        });
+        continue;
+      }
+      let target: fs.Stats;
+      try {
+        target = fs.statSync(real);
+      } catch (error) {
+        const code = errorCode(error);
+        if (code === 'ENOENT' || code === 'ELOOP') {
+          skipped.push({
+            relativePath: path.relative(source, child).split(path.sep).join('/'),
+            reason: code === 'ELOOP' ? 'loop' : 'dangling',
+          });
+          continue;
+        }
+        throw new ToolError(`Cannot copy symlink ${child}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (target.isDirectory()) {
+        seen.add(real);
+        copyDirectory(real, destChild, seen, skipped, source);
+      } else if (target.isFile()) {
+        fs.copyFileSync(real, destChild);
+      }
+      continue;
+    }
+    if (stat.isDirectory()) {
+      try {
+        seen.add(fs.realpathSync(child));
+      } catch {
+        seen.add(child);
+      }
+      copyDirectory(child, destChild, seen, skipped, source);
+      continue;
+    }
+    if (stat.isFile()) fs.copyFileSync(child, destChild);
+  }
+}
+
+function errorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) return String(error.code);
+  return '';
+}
+
+const SUPERVISOR_SOURCE = `import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+
+const parent = Number(process.env.QCV_PARENT_PID || '0');
+const runRoot = process.env.QCV_RUN_ROOT || '';
+const keep = process.env.QCV_KEEP === '1';
+const browserTmp = process.env.QCV_BROWSER_TMP || '';
+const args = process.argv.slice(2);
+const child = spawn(process.execPath, args, {
+  cwd: process.cwd(),
+  env: process.env,
+  stdio: ['ignore', 'inherit', 'inherit'],
+  detached: true,
+});
+
+function parentAlive(pid) {
+  if (!pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !!(error && error.code === 'EPERM');
+  }
+}
+
+function ppidOf(pid) {
+  try {
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return Number(rest[1] || '0');
+  } catch {
+    return 0;
+  }
+}
+
+function killTree(root) {
+  const pending = [root];
+  const seen = new Set();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
+    let names = [];
+    try { names = fs.readdirSync('/proc'); } catch { names = []; }
+    for (const name of names) {
+      if (!/^[0-9]+$/.test(name)) continue;
+      const pid = Number(name);
+      if (ppidOf(pid) === current) pending.push(pid);
+    }
+  }
+  for (const pid of seen) {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* not a group leader */ }
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+function stopChild() {
+  const pid = child.pid;
+  if (!pid) return;
+  killTree(pid);
+}
+
+const timer = setInterval(() => {
+  if (parentAlive(parent)) return;
+  clearInterval(timer);
+  stopChild();
+  if (browserTmp) {
+    try { fs.rmSync(browserTmp, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
+  if (!keep && runRoot) {
+    try { fs.rmSync(runRoot, { recursive: true, force: true }); } catch { /* already gone */ }
+  } else if (keep && runRoot) {
+    for (const name of ['owner.pid', 'qcv-supervisor.mjs']) {
+      try { fs.rmSync(runRoot + '/' + name, { force: true }); } catch { /* already gone */ }
+    }
+  }
+  process.exit(1);
+}, 250);
+
+child.on('error', (error) => {
+  clearInterval(timer);
+  try { fs.writeSync(2, String(error && error.message ? error.message : error) + '\\n'); } catch { /* stderr closed */ }
+  process.exit(1);
+});
+
+child.on('exit', (code) => {
+  clearInterval(timer);
+  process.exit(code === null || code === undefined ? 1 : code);
+});
+`;
+
+/** Parent-death watchdog started in front of Playwright. Tests spawn this source directly. */
+export function playwrightSupervisorSource(): string {
+  return SUPERVISOR_SOURCE;
 }
 
 function runPlaywright(
@@ -365,20 +717,27 @@ function runPlaywright(
   extraEnv: NodeJS.ProcessEnv | undefined,
   state: ActiveWorkspace,
   onChild: (child: ChildProcess) => void,
+  args: string[],
 ): Promise<PlaywrightRun> {
   const cli = path.join(workspaceDir, 'node_modules', 'playwright', 'cli.js');
   if (!fs.existsSync(cli)) throw new ToolError(`Playwright CLI is missing at ${cli}.`);
-  const outputDir = path.join(workspaceDir, 'test-results');
   // A signal kills Chromium before it can remove its profile. Keep that profile, and any
   // .org.chromium.Chromium.* file, in a sibling of the project copy. The copy itself stays
   // the user's tree, so a kept workspace does not carry this directory into the next run.
-  const browserTmp = fs.mkdtempSync(path.join(path.dirname(workspaceDir), '.qcv-browser-'));
+  const browserTmp = state.browserTmp ?? fs.mkdtempSync(path.join(path.dirname(workspaceDir), '.qcv-browser-'));
   state.browserTmp = browserTmp;
+  const runRoot = path.dirname(workspaceDir);
+  const supervisor = path.join(runRoot, 'qcv-supervisor.mjs');
+  fs.writeFileSync(supervisor, SUPERVISOR_SOURCE);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...extraEnv,
     FORCE_COLOR: '0',
     QCV_WORKSPACE_DIR: workspaceDir,
+    QCV_PARENT_PID: String(process.pid),
+    QCV_RUN_ROOT: runRoot,
+    QCV_KEEP: state.keep ? '1' : '0',
+    QCV_BROWSER_TMP: browserTmp,
     TMPDIR: browserTmp,
     TMP: browserTmp,
     TEMP: browserTmp,
@@ -389,7 +748,7 @@ function runPlaywright(
   }
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, 'test', '--retries=0', '--reporter=line', `--output=${outputDir}`], {
+    const child = spawn(process.execPath, [supervisor, cli, ...args], {
       cwd: workspaceDir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],

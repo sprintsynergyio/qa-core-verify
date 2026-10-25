@@ -94,6 +94,31 @@
         "findings": {
           "type": "array",
           "items": { "$ref": "#/$defs/finding" }
+        },
+        "locators": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/locator" }
+        }
+      }
+    },
+    "locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "api", "status", "file", "line", "column", "counts", "parentCounts"],
+      "properties": {
+        "selector": { "type": "string", "minLength": 1 },
+        "api": { "type": "string" },
+        "status": { "enum": ["unique", "ambiguous", "never-matched"] },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "counts": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "parentCounts": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
         }
       }
     },

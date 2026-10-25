@@ -1,0 +1,334 @@
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { locatorFixtureSource } from '../dist/runtime/locator-evidence/fixture-source.js';
+import { collectLocatorEvidence, installFixture } from '../dist/runtime/locator-evidence/injected-fixture.js';
+import { playwrightSupervisorSource, sweepStaleRuns } from '../dist/runtime/workspace.js';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const cli = path.join(repoRoot, 'dist/cli.js');
+
+function tempDir(t, prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function runCli(args, env) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env,
+  });
+}
+
+function writeTiny(dir, spec) {
+  fs.writeFileSync(
+    path.join(dir, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: '.', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(path.join(dir, 'sample.spec.ts'), spec);
+}
+
+const ADD_SPEC = `import { test, expect } from '@playwright/test';
+test('adds', () => {
+  expect(1 + 1).toBe(2);
+});
+`;
+
+test('the fixture re-exports @playwright/test and skips playwright config files', (t) => {
+  const source = locatorFixtureSource();
+  assert.match(source, /export \* from '@playwright\/test'/);
+  assert.match(source, /function wrapFrame/);
+  assert.match(source, /context\.newPage/);
+  assert.match(source, /context\.on\('page'/);
+  assert.match(source, /if \(counted === null && !actionSucceeded\) return/);
+  assert.match(source, /const stack = callStack\(\)/);
+  assert.match(source, /fs\.writeSync\(fd, JSON\.stringify\(entry\)/);
+  const project = tempDir(t, 'qcv-config-skip-');
+  fs.writeFileSync(path.join(project, 'playwright.config.cts'), "import { devices } from '@playwright/test';\nexport default { projects: [{ name: 'c', use: devices['Desktop Chrome'] }] };\n");
+  fs.writeFileSync(path.join(project, 'custom.config.ts'), "import { defineConfig } from '@playwright/test';\nexport default defineConfig({});\n");
+  fs.writeFileSync(path.join(project, 'sample.spec.ts'), "import { test } from '@playwright/test';\ntest('x', () => {});\n");
+  installFixture(project, 'custom.config.ts');
+  assert.match(fs.readFileSync(path.join(project, 'playwright.config.cts'), 'utf8'), /@playwright\/test/);
+  assert.match(fs.readFileSync(path.join(project, 'custom.config.ts'), 'utf8'), /@playwright\/test/);
+  assert.equal(fs.readFileSync(path.join(project, 'sample.spec.ts'), 'utf8').includes('@playwright/test'), false);
+});
+
+test('a stale qcv-run is swept and a live owner or a kept run is not', (t) => {
+  const root = tempDir(t, 'qcv-sweep-');
+  const dead = path.join(root, 'qcv-run-dead');
+  const live = path.join(root, 'qcv-run-live');
+  const kept = path.join(root, 'qcv-run-kept');
+  const legacy = path.join(root, 'qcv-workspace-old');
+  for (const dir of [dead, live, kept, legacy]) fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dead, 'owner.pid'), '2147483646\n');
+  fs.writeFileSync(path.join(live, 'owner.pid'), `${process.pid}\n`);
+  fs.writeFileSync(path.join(legacy, 'note.txt'), 'old\n');
+  const removed = sweepStaleRuns(root);
+  assert.equal(fs.existsSync(dead), false);
+  assert.equal(fs.existsSync(legacy), false);
+  assert.equal(fs.existsSync(live), true);
+  assert.equal(fs.existsSync(kept), true);
+  assert.equal(removed.includes(dead), true);
+  assert.equal(removed.includes(legacy), true);
+});
+
+test('the parent-death watchdog stops the child and removes the run', { skip: process.platform !== 'linux' }, async (t) => {
+  const root = tempDir(t, 'qcv-watch-');
+  const runRoot = path.join(root, 'qcv-run-watched');
+  fs.mkdirSync(runRoot);
+  const script = path.join(root, 'qcv-supervisor.mjs');
+  fs.writeFileSync(script, playwrightSupervisorSource());
+  const child = spawn(process.execPath, [script, process.execPath, '-e', 'setInterval(() => {}, 1000)'], {
+    env: {
+      ...process.env,
+      QCV_PARENT_PID: '2147483646',
+      QCV_RUN_ROOT: runRoot,
+      QCV_KEEP: '0',
+      QCV_BROWSER_TMP: '',
+    },
+    stdio: 'ignore',
+  });
+  t.after(() => {
+    try {
+      process.kill(child.pid, 'SIGKILL');
+    } catch {
+      // The watchdog already stopped it.
+    }
+  });
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), 4000);
+    child.once('exit', (exitCode) => {
+      clearTimeout(timer);
+      resolve(exitCode);
+    });
+  });
+  assert.equal(code, 1);
+  assert.equal(fs.existsSync(runRoot), false);
+});
+
+test('a broken config prints the Playwright tail when no records were written', (t) => {
+  const project = tempDir(t, 'qcv-broken-');
+  const scratch = tempDir(t, 'qcv-broken-tmp-');
+  const out = tempDir(t, 'qcv-broken-out-');
+  fs.writeFileSync(path.join(project, 'playwright.config.ts'), 'export default {\n');
+  fs.writeFileSync(path.join(project, 'sample.spec.ts'), ADD_SPEC);
+  const result = runCli([project, '--only', 'locator-evidence', '--out', out], {
+    ...process.env,
+    TMPDIR: scratch,
+    TMP: scratch,
+    TEMP: scratch,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Records: 0/);
+  assert.match(result.stderr, /Playwright produced no locator records/);
+  assert.match(result.stderr, /BABEL_PARSE_ERROR|UnexpectedToken|SyntaxError|playwright\.config/);
+  assert.equal(result.stderr.split('\n').filter((line) => line.trim().length > 0).length > 1, true);
+});
+
+test('two cli evidence runs with no --out are byte identical and leave the suite unchanged', (t) => {
+  const project = tempDir(t, 'qcv-bytes-');
+  const scratch = tempDir(t, 'qcv-bytes-tmp-');
+  writeTiny(project, ADD_SPEC);
+  const before = fs.readFileSync(path.join(project, 'sample.spec.ts'));
+  const env = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+  const first = runCli([project, '--only', 'locator-evidence'], env);
+  assert.equal(first.status, 0, first.stderr);
+  const evidencePath = path.join(project, '.qa-core', 'verify', 'locator-evidence.json');
+  const bytes = fs.readFileSync(evidencePath);
+  const second = runCli([project, '--only', 'locator-evidence'], env);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(fs.readFileSync(evidencePath).equals(bytes), true);
+  assert.equal(fs.readFileSync(path.join(project, 'sample.spec.ts')).equals(before), true);
+  assert.match(first.stdout, /Locator evidence:/);
+});
+
+test('a typed --out with a control character is escaped on the console', (t) => {
+  const project = tempDir(t, 'qcv-out-');
+  const scratch = tempDir(t, 'qcv-out-tmp-');
+  const parent = tempDir(t, 'qcv-out-parent-');
+  writeTiny(project, ADD_SPEC);
+  const out = path.join(parent, 'rep\u0001ort');
+  const result = runCli([project, '--only', 'locator-evidence', '--out', out], {
+    ...process.env,
+    TMPDIR: scratch,
+    TMP: scratch,
+    TEMP: scratch,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.includes('\u0001'), false);
+  assert.match(result.stdout, /\\u0001/);
+  assert.equal(fs.existsSync(path.join(out, 'locator-evidence.json')), true);
+  assert.equal(result.stdout.includes(out), false);
+});
+
+test('a missing project with --keep-workspace prints no Workspace line', (t) => {
+  const scratch = tempDir(t, 'qcv-missing-');
+  const result = runCli([path.join(scratch, 'missing'), '--only', 'locator-evidence', '--keep-workspace'], {
+    ...process.env,
+    TMPDIR: scratch,
+    TMP: scratch,
+    TEMP: scratch,
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /does not exist/);
+  assert.doesNotMatch(result.stderr, /Workspace:/);
+  assert.equal(result.stdout, '');
+});
+
+test('wrapped pages, frames, parent counts, and skipped links are recorded', async (t) => {
+  const project = tempDir(t, 'qcv-carry-');
+  const scratch = tempDir(t, 'qcv-carry-tmp-');
+  writeTiny(
+    project,
+    `import { test, expect, devices, chromium } from '@playwright/test';
+
+test('exports names', () => {
+  expect(devices['Desktop Chrome'].defaultBrowserType).toBe('chromium');
+  expect(typeof chromium.launch).toBe('function');
+});
+
+test('frame button', async ({ page }) => {
+  await page.setContent('<iframe srcdoc="<button id=ok>Ok</button>"></iframe>');
+  await page.frameLocator('iframe').locator('#ok').click();
+});
+
+test('second page', async ({ page }) => {
+  const created = await page.context().newPage();
+  await created.setContent('<button id="p">P</button>');
+  await created.locator('#p').click();
+});
+
+test('closes popup', async ({ page }) => {
+  await page.setContent('<button id="open">open</button>');
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.locator('#open').evaluate((button) => {
+      button.addEventListener('click', () => window.open('about:blank'));
+      button.click();
+    }),
+  ]);
+  await popup.setContent('<button id="x">x</button>');
+  await popup.locator('#x').evaluate((element) => {
+    element.addEventListener('click', () => window.close());
+  });
+  await popup.locator('#x').click();
+});
+
+test('narrows', async ({ page }) => {
+  await page.setContent('<button id="a">A</button><button id="b">B</button>');
+  await page.locator('button').first().click();
+});
+
+test('floating expect', async ({ page }) => {
+  await page.setContent('<p>Products</p>');
+  expect(page.getByText('Products')).toBeTruthy();
+});
+
+test('keeps a control in the test id', async ({ page }) => {
+  await page.setContent('<div data-testid="a\\u0085b">z</div>');
+  await page.getByTestId('a\\u0085b').click();
+});
+
+test('two clicks', async ({ page }) => {
+  await page.setContent('<button id="a">A</button><button id="b">B</button>');
+  await page.locator('#a').click();
+  await page.locator('#b').click();
+});
+`,
+  );
+  fs.symlinkSync(path.join(project, 'no-such-target'), path.join(project, 'dangling-link'));
+  fs.symlinkSync('self-loop', path.join(project, 'self-loop'));
+  const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+  process.env.TMPDIR = scratch;
+  process.env.TMP = scratch;
+  process.env.TEMP = scratch;
+  let run;
+  try {
+    run = await collectLocatorEvidence({
+      projectDir: project,
+      outDir: path.join(project, '.qa-core', 'verify'),
+      keepWorkspace: true,
+    });
+  } finally {
+    for (const key of ['TMPDIR', 'TMP', 'TEMP']) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+  t.after(() => fs.rmSync(run.runRoot, { recursive: true, force: true }));
+  assert.equal(run.evidence.playwrightExitCode, 0, `${run.stderr}\n${run.stdout}`);
+  assert.equal(run.skippedLinks.some((link) => link.includes('dangling-link') && link.includes('dangling')), true);
+  assert.equal(run.skippedLinks.some((link) => link.includes('self-loop') && link.includes('loop')), true);
+  const records = run.evidence.records;
+  assert.equal(records.some((record) => record.testTitle === 'frame button' && record.selector.includes('#ok')), true);
+  assert.equal(records.some((record) => record.testTitle === 'second page' && record.selector.includes('#p')), true);
+  const narrowed = records.find((record) => record.testTitle === 'narrows');
+  assert.ok(narrowed);
+  assert.equal(narrowed.parentCount, 2);
+  assert.equal(narrowed.matchCount, 1);
+  const floatingLine = fs.readFileSync(path.join(project, 'sample.spec.ts'), 'utf8').split('\n').findIndex((line) => line.includes('toBeTruthy()')) + 1;
+  const floating = records.find((record) => record.testTitle === 'floating expect' && record.call === 'toBeTruthy');
+  assert.ok(floating, JSON.stringify(records.filter((record) => record.testTitle === 'floating expect')));
+  assert.equal(floating.line, floatingLine);
+  assert.equal(floating.column > 1, true);
+  const marked = records.find((record) => record.testTitle === 'keeps a control in the test id');
+  assert.ok(marked);
+  assert.equal(marked.selector.includes('\u0085'), false);
+  assert.match(marked.selector, /\\u0085/);
+  assert.equal(marked.selector.includes('ab') && !marked.selector.includes('a\\u0085b') && marked.selector === 'ab', false);
+  const closed = records.find((record) => record.testTitle === 'closes popup' && record.selector.includes('#x'));
+  assert.ok(closed, JSON.stringify(records.filter((record) => record.testTitle === 'closes popup')));
+  assert.equal(closed.actionSucceeded, true);
+  assert.equal(closed.matchCount, null);
+  const partsDir = path.join(run.workspaceDir, '.qa-core', 'locator-parts');
+  const partText = fs.readdirSync(partsDir)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => fs.readFileSync(path.join(partsDir, name), 'utf8'))
+    .join('\n');
+  assert.equal(partText.includes('\n{') || partText.trim().split('\n').length > 1, true);
+  assert.equal(partText.trim().startsWith('['), false);
+});
+
+test('a baseline failure is baseline-red and gets no locator finding', (t) => {
+  const project = tempDir(t, 'qcv-base-');
+  const scratch = tempDir(t, 'qcv-base-tmp-');
+  const out = tempDir(t, 'qcv-base-out-');
+  writeTiny(
+    project,
+    `import { test, expect } from '@playwright/test';
+test('missing banner', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#nope')).toBeHidden();
+});
+test('clicks nothing', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await page.locator('#gone').click({ timeout: 300 });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], {
+    ...process.env,
+    TMPDIR: scratch,
+    TMP: scratch,
+    TEMP: scratch,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const hidden = report.tests.find((entry) => entry.titlePath.join(' > ') === 'missing banner');
+  const missed = report.tests.find((entry) => entry.titlePath.join(' > ') === 'clicks nothing');
+  assert.equal(hidden.verdict, 'review');
+  assert.equal(hidden.findings.some((finding) => finding.ruleId === 'QCV-L002'), true);
+  assert.equal(hidden.findings.some((finding) => finding.ruleId === 'QCV-L001'), false);
+  assert.equal(missed.verdict, 'baseline-red');
+  assert.deepEqual(missed.findings, []);
+  assert.equal(missed.locators, undefined);
+  assert.match(result.stdout, /baseline-red/);
+  assert.match(result.stdout, /This test stays green even if this element does not exist/);
+  assert.match(result.stderr, /Baseline:/);
+});
