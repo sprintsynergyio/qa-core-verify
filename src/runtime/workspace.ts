@@ -326,7 +326,19 @@ function runPlaywright(
   const cli = path.join(workspaceDir, 'node_modules', 'playwright', 'cli.js');
   if (!fs.existsSync(cli)) throw new ToolError(`Playwright CLI is missing at ${cli}.`);
   const outputDir = path.join(workspaceDir, 'test-results');
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, FORCE_COLOR: '0', QCV_WORKSPACE_DIR: workspaceDir };
+  // A signal kills Chromium before it can remove its profile. Keep that profile, and any
+  // .org.chromium.Chromium.* file, inside the workspace this process deletes after the child exits.
+  const browserTmp = path.join(workspaceDir, '.qcv-tmp');
+  fs.mkdirSync(browserTmp);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...extraEnv,
+    FORCE_COLOR: '0',
+    QCV_WORKSPACE_DIR: workspaceDir,
+    TMPDIR: browserTmp,
+    TMP: browserTmp,
+    TEMP: browserTmp,
+  };
   delete env.NO_COLOR;
   if (typeof env.QCV_EVIDENCE_DIR === 'string' && env.QCV_EVIDENCE_DIR.length > 0 && !path.isAbsolute(env.QCV_EVIDENCE_DIR)) {
     env.QCV_EVIDENCE_DIR = path.resolve(workspaceDir, env.QCV_EVIDENCE_DIR);
