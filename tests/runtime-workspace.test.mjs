@@ -518,8 +518,8 @@ test('resolvedOnAction is derived from actionSucceeded and matchCount is not cla
   assert.equal(stripped.includes('"resolvedOnAction":true'), true);
 });
 
-test('record order does not follow action matchCount', () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-order-'));
+test('record order does not follow action matchCount', (t) => {
+  const workspace = tempDir(t, 'qcv-order-');
   const stack = `Error\n    at login (${workspace}/support/login.ts:8:5)`;
   const part = (title, line, matchCount) => ({
     selector: '#login-button',
