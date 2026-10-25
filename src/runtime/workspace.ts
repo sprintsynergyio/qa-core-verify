@@ -3,13 +3,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { displayText } from '../report/paths.js';
 import { ToolError } from '../tool-error.js';
 
-const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git', '.qcv-tmp']);
+const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git']);
 
 interface ActiveWorkspace {
   keep: boolean;
   child?: ChildProcess;
+  /** Project copy. `--keep-workspace` retains this directory and not its parent. */
+  projectCopy: string;
+  /** Chromium temp directory. A sibling of `projectCopy`, never a path inside the copy. */
+  browserTmp?: string;
 }
 
 const activeWorkspaces = new Map<string, ActiveWorkspace>();
@@ -136,10 +141,14 @@ function installSignalCleanup(): void {
       for (const [, state] of entries) {
         if (state.child) await terminateChild(state.child);
       }
-      for (const [dir, state] of entries) {
-        if (state.keep) continue;
+      for (const [runRoot, state] of entries) {
+        if (state.keep) {
+          removeBrowserTemp(state);
+          if (signal === 'SIGINT') fs.writeSync(2, `Workspace: ${redactHomePath(state.projectCopy)}\n`);
+          continue;
+        }
         try {
-          fs.rmSync(dir, { recursive: true, force: true });
+          fs.rmSync(runRoot, { recursive: true, force: true });
         } catch {
           // Still exit below so the signal does not leave this process running.
         }
@@ -151,6 +160,26 @@ function installSignalCleanup(): void {
   process.on('SIGINT', () => stop('SIGINT'));
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGHUP', () => stop('SIGHUP'));
+}
+
+function removeBrowserTemp(state: ActiveWorkspace): void {
+  if (!state.browserTmp) return;
+  try {
+    fs.rmSync(state.browserTmp, { recursive: true, force: true });
+  } catch {
+    // The run directory removal covers this when the workspace is not kept.
+  }
+  state.browserTmp = undefined;
+}
+
+/** Show `~` for a path inside the home directory. Other paths stay absolute. */
+export function redactHomePath(dir: string): string {
+  const home = path.resolve(os.homedir());
+  const resolved = path.resolve(dir);
+  let shown = resolved;
+  if (resolved === home) shown = '~';
+  else if (resolved.startsWith(`${home}${path.sep}`)) shown = `~${path.sep}${resolved.slice(home.length + 1)}`;
+  return displayText(shown);
 }
 
 function isOutsideRoot(root: string, target: string): boolean {
@@ -282,9 +311,11 @@ export async function runPlaywrightInWorkspace(
   },
 ): Promise<WorkspaceRun> {
   const source = path.resolve(projectDir);
-  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-workspace-'));
-  const state: ActiveWorkspace = { keep: options.keep };
-  activeWorkspaces.set(workspaceDir, state);
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-run-'));
+  const workspaceDir = path.join(runRoot, 'project');
+  fs.mkdirSync(workspaceDir);
+  const state: ActiveWorkspace = { keep: options.keep, projectCopy: workspaceDir };
+  activeWorkspaces.set(runRoot, state);
   installSignalCleanup();
   const modules = resolveNodeModules(source);
   try {
@@ -294,19 +325,21 @@ export async function runPlaywrightInWorkspace(
     fs.symlinkSync(modules, link, 'dir');
     options.prepare?.(workspaceDir);
     options.onWorkspace?.(workspaceDir);
-    const playwright = await runPlaywright(workspaceDir, options.env, (child) => {
+    const playwright = await runPlaywright(workspaceDir, options.env, state, (child) => {
       state.child = child;
     });
     options.after?.(workspaceDir, playwright);
-    if (!options.keep && !signalStop) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (!signalStop) removeBrowserTemp(state);
+    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
     if (signalStop) await new Promise(() => {});
     return { workspaceDir, kept: options.keep, playwright };
   } catch (error) {
-    if (!options.keep && !signalStop) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (!signalStop) removeBrowserTemp(state);
+    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
     if (signalStop) await new Promise(() => {});
     throw error;
   } finally {
-    if (!signalStop) activeWorkspaces.delete(workspaceDir);
+    if (!signalStop) activeWorkspaces.delete(runRoot);
   }
 }
 
@@ -321,16 +354,17 @@ function copyProject(source: string, dest: string): void {
 function runPlaywright(
   workspaceDir: string,
   extraEnv: NodeJS.ProcessEnv | undefined,
+  state: ActiveWorkspace,
   onChild: (child: ChildProcess) => void,
 ): Promise<PlaywrightRun> {
   const cli = path.join(workspaceDir, 'node_modules', 'playwright', 'cli.js');
   if (!fs.existsSync(cli)) throw new ToolError(`Playwright CLI is missing at ${cli}.`);
   const outputDir = path.join(workspaceDir, 'test-results');
   // A signal kills Chromium before it can remove its profile. Keep that profile, and any
-  // .org.chromium.Chromium.* file, inside the workspace this process deletes after the child exits.
-  // mkdtemp avoids EEXIST when the copied project already contains a browser temp directory.
-  // .qcv-tmp is not copied, so a user's directory of that name is left untouched.
-  const browserTmp = fs.mkdtempSync(path.join(workspaceDir, '.qcv-browser-'));
+  // .org.chromium.Chromium.* file, in a sibling of the project copy. The copy itself stays
+  // the user's tree, so a kept workspace does not carry this directory into the next run.
+  const browserTmp = fs.mkdtempSync(path.join(path.dirname(workspaceDir), '.qcv-browser-'));
+  state.browserTmp = browserTmp;
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...extraEnv,
