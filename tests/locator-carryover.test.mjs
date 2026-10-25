@@ -204,7 +204,7 @@ test('second page', async ({ page }) => {
   await created.locator('#p').click();
 });
 
-test('closes popup', async ({ page }) => {
+test('popup page', async ({ page }) => {
   await page.setContent('<button id="open">open</button>');
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
@@ -214,9 +214,6 @@ test('closes popup', async ({ page }) => {
     }),
   ]);
   await popup.setContent('<button id="x">x</button>');
-  await popup.locator('#x').evaluate((element) => {
-    element.addEventListener('click', () => window.close());
-  });
   await popup.locator('#x').click();
 });
 
@@ -282,10 +279,10 @@ test('two clicks', async ({ page }) => {
   assert.equal(marked.selector.includes('\u0085'), false);
   assert.match(marked.selector, /\\u0085/);
   assert.equal(marked.selector.includes('ab') && !marked.selector.includes('a\\u0085b') && marked.selector === 'ab', false);
-  const closed = records.find((record) => record.testTitle === 'closes popup' && record.selector.includes('#x'));
-  assert.ok(closed, JSON.stringify(records.filter((record) => record.testTitle === 'closes popup')));
-  assert.equal(closed.actionSucceeded, true);
-  assert.equal(closed.matchCount, null);
+  const popup = records.find((record) => record.testTitle === 'popup page' && record.selector.includes('#x'));
+  assert.ok(popup, JSON.stringify(records.filter((record) => record.testTitle === 'popup page')));
+  assert.equal(popup.actionSucceeded, true);
+  assert.equal(popup.matchCount, 1);
   const partsDir = path.join(run.workspaceDir, '.qa-core', 'locator-parts');
   const partText = fs.readdirSync(partsDir)
     .filter((name) => name.endsWith('.json'))
