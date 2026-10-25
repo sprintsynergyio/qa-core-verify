@@ -116,11 +116,21 @@ async function terminateChild(child: ChildProcess): Promise<void> {
   }
 }
 
+function signalExitCode(signal: NodeJS.Signals): number {
+  if (signal === 'SIGINT') return 130;
+  if (signal === 'SIGHUP') return 129;
+  return 143;
+}
+
 function installSignalCleanup(): void {
   if (signalHooksInstalled) return;
   signalHooksInstalled = true;
+  let cleanupStarted = false;
   const stop = (signal: NodeJS.Signals): void => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
     signalStop = true;
+    const exitCode = signalExitCode(signal);
     const entries = [...activeWorkspaces.entries()];
     void (async () => {
       for (const [, state] of entries) {
@@ -135,11 +145,12 @@ function installSignalCleanup(): void {
         }
       }
       activeWorkspaces.clear();
-      process.exit(signal === 'SIGINT' ? 130 : 143);
+      process.exit(exitCode);
     })();
   };
-  process.once('SIGINT', () => stop('SIGINT'));
-  process.once('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGINT', () => stop('SIGINT'));
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGHUP', () => stop('SIGHUP'));
 }
 
 function isOutsideRoot(root: string, target: string): boolean {

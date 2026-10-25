@@ -150,6 +150,7 @@ function projectFile(file: string, workspaceDir: string): string | undefined {
  * Copy for comparing two runs. Action `matchCount` is left out.
  * That count is taken after the action, so a click that navigates or removes its target can change it.
  * Every other field, including assertion `matchCount` and `resolvedOnAction`, stays.
+ * Records are sorted again here, with the same order as `buildEvidence`, so a file sorted by `matchCount` still compares equal.
  */
 export function evidenceWithoutActionMatchCount(evidence: EvidenceFile): {
   schemaVersion: EvidenceFile['schemaVersion'];
@@ -161,7 +162,7 @@ export function evidenceWithoutActionMatchCount(evidence: EvidenceFile): {
 } {
   return {
     ...evidence,
-    records: evidence.records.map((record) => {
+    records: [...evidence.records].sort(compareRecords).map((record) => {
       if (record.phase !== 'action') return record;
       const { matchCount: _actionMatchCount, ...rest } = record;
       return rest;
@@ -169,23 +170,26 @@ export function evidenceWithoutActionMatchCount(evidence: EvidenceFile): {
   };
 }
 
+/**
+ * Deterministic order: file, line, column, test title, then kind (`phase`, then `call`).
+ * `matchCount` is not a key. An action count can be 0 or 1 on different runs, and sorting by it swaps records that share a call site.
+ */
 function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
   const fields: Array<keyof EvidenceRecord> = [
     'file',
     'line',
     'column',
+    'testTitle',
     'phase',
     'call',
+    'testFile',
+    'testLine',
     'selector',
     'api',
     'url',
-    'matchCount',
     'negated',
     'actionSucceeded',
     'resolvedOnAction',
-    'testFile',
-    'testLine',
-    'testTitle',
   ];
   for (const field of fields) {
     const a = left[field];

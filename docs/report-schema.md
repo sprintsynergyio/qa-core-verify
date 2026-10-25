@@ -57,7 +57,7 @@ The default directory is `<project>/.qa-core/verify`. `--out <dir>` changes that
 
 `locator-evidence.json` is a separate file from `report.json`. `--only locator-evidence` writes it. `schemaVersion` is 1. It has no timestamps. Paths are relative to the project copy. `project.dir` is the project folder's base name after the same `displayText` cleaning as the report paths.
 
-Each record is one locator action or one locator assertion.
+Each record is one locator action or one locator assertion. Records are sorted by file, line, column, test title, and kind (`phase`, then `call`), then the other fields except `matchCount`. `matchCount` is not a sort key, because an action count can change from run to run and would otherwise swap records that share a call site.
 
 - `matchCount` is the raw number returned by `count()` after that call. For an action, the count is taken after the action returns. The prototype does not change that number. An action that navigates, or that removes its target, can record 0. The same action can record a different `matchCount` on the next run. That field is the non-deterministic part of an action record. Assertion counts are taken after the matcher settles.
 - `actionSucceeded` is true when the action returned, and false for a failed action and for every assertion.

@@ -518,7 +518,57 @@ test('resolvedOnAction is derived from actionSucceeded and matchCount is not cla
   assert.equal(stripped.includes('"resolvedOnAction":true'), true);
 });
 
-test('SIGINT and SIGTERM remove the temp workspace after the page is open', { timeout: 90_000 }, async (t) => {
+test('record order does not follow action matchCount', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-order-'));
+  const stack = `Error\n    at login (${workspace}/support/login.ts:8:5)`;
+  const part = (title, line, matchCount) => ({
+    selector: '#login-button',
+    api: "getByRole('button', { name: 'Login' })",
+    url: 'https://www.saucedemo.com/',
+    matchCount,
+    phase: 'action',
+    call: 'click',
+    negated: false,
+    actionSucceeded: true,
+    stack,
+    testFile: `${workspace}/tests/good/shopping.spec.ts`,
+    testLine: line,
+    testTitle: title,
+  });
+  const input = {
+    workspaceDir: workspace,
+    projectDir: '/anywhere/demo',
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    playwrightExitCode: 0,
+  };
+  const lowThenHigh = buildEvidence({
+    ...input,
+    parts: [part('checks out', 37, 1), part('adds a product', 17, 0)],
+  });
+  const highThenLow = buildEvidence({
+    ...input,
+    parts: [part('checks out', 37, 0), part('adds a product', 17, 1)],
+  });
+  const titles = (evidence) => evidence.records.map((record) => record.testTitle);
+  assert.deepEqual(titles(lowThenHigh), ['adds a product', 'checks out']);
+  assert.deepEqual(titles(highThenLow), titles(lowThenHigh));
+  const sortedByCount = {
+    ...lowThenHigh,
+    records: [...lowThenHigh.records].sort((left, right) => right.matchCount - left.matchCount),
+  };
+  assert.deepEqual(titles(sortedByCount), ['checks out', 'adds a product']);
+  assert.equal(
+    JSON.stringify(evidenceWithoutActionMatchCount(sortedByCount)),
+    JSON.stringify(evidenceWithoutActionMatchCount(lowThenHigh)),
+  );
+  assert.equal(
+    JSON.stringify(evidenceWithoutActionMatchCount(highThenLow)),
+    JSON.stringify(evidenceWithoutActionMatchCount(lowThenHigh)),
+  );
+});
+
+test('SIGINT, a second SIGINT, SIGTERM, and SIGHUP remove the temp workspace after the page is open', { timeout: 120_000 }, async (t) => {
   const project = tempDir(t, 'qcv-signal-project-');
   const token = `qcv-signal-marker-${process.pid}.txt`;
   fs.writeFileSync(path.join(project, token), 'marker');
@@ -531,8 +581,13 @@ test('hang', async ({ page }) => {
 `,
   });
   const cli = path.join(repoRoot, 'dist/cli.js');
-  const expected = { SIGINT: 130, SIGTERM: 143 };
-  for (const signal of ['SIGINT', 'SIGTERM']) {
+  const cases = [
+    { signal: 'SIGINT', code: 130, again: false },
+    { signal: 'SIGINT', code: 130, again: true },
+    { signal: 'SIGTERM', code: 143, again: false },
+    { signal: 'SIGHUP', code: 129, again: false },
+  ];
+  for (const item of cases) {
     const out = tempDir(t, 'qcv-signal-out-');
     const child = spawn(process.execPath, [cli, project, '--only', 'locator-evidence', '--out', out], {
       stdio: 'ignore',
@@ -546,15 +601,24 @@ test('hang', async ({ page }) => {
     });
     const workspace = await waitForMarkedWorkspace(token, 20_000);
     const browserUp = await waitForBrowser(child.pid, 20_000);
-    assert.equal(browserUp, true, 'browser did not start');
+    assert.equal(browserUp, true, `${item.signal} browser did not start`);
     await new Promise((resolve) => setTimeout(resolve, 500));
     const exitedPromise = waitForExit(child, 15_000);
-    child.kill(signal);
+    child.kill(item.signal);
+    if (item.again) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        child.kill(item.signal);
+      } catch {
+        // The first signal may already have exited the CLI.
+      }
+    }
     const exited = await exitedPromise;
-    assert.equal(exited.code, expected[signal], `${signal} exited ${exited.code} signal ${exited.signal}`);
+    const label = item.again ? `${item.signal} twice` : item.signal;
+    assert.equal(exited.code, item.code, `${label} exited ${exited.code} signal ${exited.signal}`);
     assert.equal(fs.existsSync(workspace), false, workspace);
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    assert.equal(fs.existsSync(workspace), false, workspace);
+    assert.equal(fs.existsSync(workspace), false, `${label} left ${workspace}`);
   }
 });
 
