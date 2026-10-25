@@ -1,5 +1,5 @@
 import type { InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W007_RULE_ID = 'QCV-W007';
 
@@ -21,6 +21,7 @@ export function findConditionalExpects(tests: readonly InventoryTest[]): Finding
         evidence: expect.evidence,
         fixHint: 'Move the expect out of the branch or loop so a missing step fails the test.',
         relatedLintRule: 'no-conditional-expect',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

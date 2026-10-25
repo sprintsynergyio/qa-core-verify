@@ -1,5 +1,6 @@
 import ts from 'typescript';
 import {
+  functionIsAsync,
   isPageType,
   isRelativeSpecifier,
   loadRelative,
@@ -9,6 +10,7 @@ import {
   type FunctionBody,
   type ImportRef,
 } from './resolve.js';
+import { chainCall, isAwaited } from './settled.js';
 import type {
   BodyEvent,
   ExpectCall,
@@ -39,6 +41,10 @@ export interface AnalyzeOptions<Bindings> {
   isLocatorCall: (call: ts.CallExpression, locatorNames: Set<string>) => boolean;
   isLocatorExpression: (expr: ts.Expression, locatorNames: Set<string>) => boolean;
   readHelper: (call: ts.CallExpression, bindings: Bindings, file: ts.SourceFile) => HelperCall | null;
+  /** Const aliases of `expect` from the file or an enclosing describe. */
+  expectAliases?: ReadonlySet<string>;
+  isExpectName: (name: string, bindings: Bindings) => boolean;
+  withExpectAliases: (bindings: Bindings, aliases: ReadonlySet<string>) => Bindings;
 }
 
 export interface BodyAnalysis {
@@ -47,6 +53,7 @@ export interface BodyAnalysis {
   helpers: HelperCall[];
   events: BodyEvent[];
   unresolved: UnresolvedHelper[];
+  floatingCalls: SourceFact[];
 }
 
 const PAGE_READS = new Set<PageReadKind>(['textContent', 'innerText', 'getAttribute', 'inputValue', 'count']);
@@ -69,8 +76,8 @@ const LOCATOR_ACTIONS = new Set([
   'dragTo',
 ]);
 
+// page.goto is navigation, so it is not a user action and does not count as the last action.
 const PAGE_ACTIONS = new Set([
-  'goto',
   'goBack',
   'goForward',
   'reload',
@@ -123,6 +130,7 @@ interface SavedScope {
   returnIsAwaited: boolean;
   conditional: boolean;
   swallowed: boolean;
+  expectAliases: Set<string>;
   eventCount: number;
 }
 
@@ -155,11 +163,13 @@ class BodyWalker<Bindings> {
   private readonly frames: Array<{ fn: ts.Node; counts: boolean }> = [];
   private conditional = false;
   private swallowed = false;
+  private expectAliases: Set<string>;
   private readonly expects: ExpectCall[] = [];
   private readonly locators: LocatorCall[] = [];
   private readonly helpers: HelperCall[] = [];
   private readonly events: BodyEvent[] = [];
   private readonly unresolved: UnresolvedHelper[] = [];
+  private readonly floatingCalls: SourceFact[] = [];
   private readonly unresolvedKeys = new Set<string>();
   private readonly stack = new Set<string>();
   private readonly kindStack = new Set<string>();
@@ -170,6 +180,7 @@ class BodyWalker<Bindings> {
     this.sourceFile = options.sourceFile;
     this.fileIndex = indexParsedFile(options.sourceFile);
     this.bindings = options.bindings;
+    this.expectAliases = new Set(options.expectAliases ?? []);
     seedPageNames(options.parameters, this.pageNames);
   }
 
@@ -184,6 +195,7 @@ class BodyWalker<Bindings> {
       helpers: this.helpers,
       events: this.events,
       unresolved: this.unresolved,
+      floatingCalls: this.floatingCalls,
     };
   }
 
@@ -254,10 +266,15 @@ class BodyWalker<Bindings> {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
       const initializer = unwrap(node.initializer);
       if ((ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) && initializer.body) {
-        this.localFns.set(node.name.text, this.makeLocal(node.name.text, initializer.parameters, initializer.body));
+        this.localFns.set(
+          node.name.text,
+          this.makeLocal(node.name.text, initializer.parameters, initializer.body, functionIsAsync(initializer)),
+        );
         this.noteArrayConst(node);
+        this.shadowAlias(node.name.text);
         return;
       }
+      this.noteAlias(node);
       this.applyBinding(node.name.text, this.valueKind(node.initializer));
       this.noteArrayConst(node);
     }
@@ -281,7 +298,8 @@ class BodyWalker<Bindings> {
 
   private walkFunction(node: ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration | ts.MethodDeclaration): void {
     if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && ts.isIdentifier(node.name) && node.body) {
-      this.localFns.set(node.name.text, this.makeLocal(node.name.text, node.parameters, node.body));
+      this.localFns.set(node.name.text, this.makeLocal(node.name.text, node.parameters, node.body, functionIsAsync(node)));
+      this.shadowAlias(node.name.text);
       return;
     }
     const body = node.body;
@@ -289,8 +307,10 @@ class BodyWalker<Bindings> {
     const savedReturn = this.returnCounts;
     const savedReturnAwaited = this.returnIsAwaited;
     const savedConditional = this.conditional;
+    const savedAliases = this.expectAliases;
     this.returnCounts = false;
     this.returnIsAwaited = false;
+    this.expectAliases = new Set(savedAliases);
     this.frames.push({ fn: node, counts: false });
     const receiver = iterationReceiver(node);
     if (receiver && this.iterationMayBeEmpty(receiver)) this.conditional = true;
@@ -299,6 +319,7 @@ class BodyWalker<Bindings> {
     this.returnCounts = savedReturn;
     this.returnIsAwaited = savedReturnAwaited;
     this.conditional = savedConditional;
+    this.expectAliases = savedAliases;
   }
 
   private onCall(call: ts.CallExpression): 'done' | 'children' {
@@ -307,20 +328,29 @@ class BodyWalker<Bindings> {
       if (callback) {
         const savedReturn = this.returnCounts;
         const savedReturnAwaited = this.returnIsAwaited;
-        const stepSettled = isAwaited(call) || this.isReturnedNode(call);
+        const savedAliases = this.expectAliases;
+        const stepSettled = isAwaited(call) || this.isReturnedNode(call) || this.returnedThroughChain(call);
+        const beforeExpects = this.expects.length;
+        const beforeHelpers = this.helpers.length;
+        const fact = this.fact(call);
         this.returnCounts = false;
         this.returnIsAwaited = stepSettled;
+        this.expectAliases = new Set(savedAliases);
         this.frames.push({ fn: callback, counts: false });
         this.walk(callback.body);
         this.frames.pop();
         this.returnCounts = savedReturn;
         this.returnIsAwaited = savedReturnAwaited;
+        this.expectAliases = savedAliases;
+        const tiedToStep = this.expects.slice(beforeExpects).some((expect) => expect.awaited || expect.returned);
+        const addedHelpers = this.helpers.length > beforeHelpers;
+        if (!stepSettled && ts.isBlock(callback.body) && (tiedToStep || addedHelpers)) this.floatingCalls.push(fact);
       }
       return 'done';
     }
     if (this.options.isIgnoredSuiteCall(call, this.bindings)) return 'done';
 
-    const parts = this.options.readExpect(call, this.sourceFile, this.bindings);
+    const parts = this.options.readExpect(call, this.sourceFile, this.bound());
     if (parts) {
       this.decorateExpect(parts.expect, parts.subject, call);
       this.expects.push(parts.expect);
@@ -368,7 +398,7 @@ class BodyWalker<Bindings> {
     }
     const subjectText = subject ? subject.getText(this.sourceFile) : '';
     expect.sameSource = subjectText.length > 0 && subjectText === expect.argumentSource;
-    expect.returned = this.isReturnedNode(call);
+    expect.returned = this.isReturnedNode(call) || this.returnedThroughChain(call);
     this.settlePromiseAll(expect, call);
     if (this.returnIsAwaited && this.isReturnPosition(call)) expect.awaited = true;
     expect.conditional = this.conditional;
@@ -383,17 +413,25 @@ class BodyWalker<Bindings> {
       return;
     }
     const awaited = isAwaited(call);
-    const returned = this.isReturnedNode(call);
+    const returned = this.isReturnedNode(call) || this.returnedThroughChain(call);
+    const callFact = this.fact(call);
+    const beforeExpects = this.expects.length;
+    const beforeHelpers = this.helpers.length;
     this.stack.add(key);
     const saved = this.save();
     this.install(fn);
     this.walk(fn.body);
+    const addedHelpers = this.helpers.length > beforeHelpers;
     for (let index = saved.eventCount; index < this.events.length; index += 1) {
       const event = this.events[index];
       if (!event || event.type !== 'expect' || !event.expect.returned) continue;
       event.expect.awaited = event.expect.awaited || awaited;
       event.expect.returned = returned;
     }
+    // Flag the call when an assertion stays tied to the helper promise.
+    // An assertion that is itself not awaited is already a finding, so the call is not flagged again.
+    const stillTied = this.expects.slice(beforeExpects).some((expect) => expect.awaited || expect.returned);
+    if (fn.isAsync && !awaited && !returned && (stillTied || addedHelpers)) this.floatingCalls.push(callFact);
     this.restore(saved);
     this.stack.delete(key);
   }
@@ -703,18 +741,64 @@ class BodyWalker<Bindings> {
     };
   }
 
-  private makeLocal(name: string, parameters: readonly ts.ParameterDeclaration[], body: ts.ConciseBody): FunctionBody {
+  private makeLocal(
+    name: string,
+    parameters: readonly ts.ParameterDeclaration[],
+    body: ts.ConciseBody,
+    isAsync: boolean,
+  ): FunctionBody {
     return {
       name,
       sourceFile: this.sourceFile,
       filePath: this.sourceFile.fileName,
       parameters,
       body,
+      isAsync,
       exported: true,
       thisPage: this.thisPage,
       ownerClass: this.ownerClass,
       index: this.fileIndex,
     };
+  }
+
+  private bound(): Bindings {
+    return this.options.withExpectAliases(this.bindings, this.expectAliases);
+  }
+
+  private isExpectIdentifier(name: string): boolean {
+    if (this.expectAliases.has(name)) return true;
+    return this.options.isExpectName(name, this.bindings);
+  }
+
+  /** A `const` alias of `expect` in this test. `let` and `var` are not aliases. */
+  private noteAlias(node: ts.VariableDeclaration): void {
+    if (!ts.isIdentifier(node.name)) return;
+    const name = node.name.text;
+    if (isConst(node) && node.initializer) {
+      const init = unwrap(node.initializer);
+      if (ts.isIdentifier(init) && this.isExpectIdentifier(init.text)) {
+        this.expectAliases.add(name);
+        return;
+      }
+    }
+    this.shadowAlias(name);
+  }
+
+  private shadowAlias(name: string): void {
+    if (this.expectAliases.has(name)) this.expectAliases.delete(name);
+  }
+
+  private returnedThroughChain(node: ts.Node): boolean {
+    let current: ts.Node | undefined = node;
+    const seen = new Set<ts.Node>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const next = chainCall(current);
+      if (!next) return false;
+      if (this.isReturnedNode(next)) return true;
+      current = next;
+    }
+    return false;
   }
 
   private install(fn: FunctionBody): void {
@@ -731,6 +815,7 @@ class BodyWalker<Bindings> {
     this.ownerClass = fn.ownerClass;
     this.returnCounts = true;
     this.returnIsAwaited = false;
+    this.expectAliases = new Set();
     seedPageNames(fn.parameters, this.pageNames);
   }
 
@@ -751,6 +836,7 @@ class BodyWalker<Bindings> {
       returnIsAwaited: this.returnIsAwaited,
       conditional: this.conditional,
       swallowed: this.swallowed,
+      expectAliases: this.expectAliases,
       eventCount: this.events.length,
     };
   }
@@ -771,6 +857,7 @@ class BodyWalker<Bindings> {
     this.returnIsAwaited = saved.returnIsAwaited;
     this.conditional = saved.conditional;
     this.swallowed = saved.swallowed;
+    this.expectAliases = saved.expectAliases;
   }
 
   private withConditional(run: () => void): void {
@@ -854,21 +941,40 @@ function forMayBeEmpty(node: ts.ForStatement): boolean {
   return true;
 }
 
+/**
+ * A catch rethrows only when every path throws.
+ * `catch (e) { if (x) throw e; }` still swallows when `x` is false.
+ * `catch (e) { if (x) throw e; else throw e; }` rethrows on every path.
+ * A switch counts only when it has a default and each clause throws on its own.
+ * Fall-through is not treated as a rethrow.
+ */
 function catchRethrows(clause: ts.CatchClause): boolean {
-  return blockThrows(clause.block);
+  return blockAlwaysThrows(clause.block);
 }
 
-function blockThrows(block: ts.Block): boolean {
+function blockAlwaysThrows(block: ts.Block): boolean {
   for (const statement of block.statements) {
-    if (statementThrows(statement)) return true;
+    if (alwaysThrows(statement)) return true;
   }
   return false;
 }
 
-function statementThrows(statement: ts.Statement): boolean {
-  if (ts.isThrowStatement(statement)) return true;
-  if (ts.isBlock(statement)) return blockThrows(statement);
+function alwaysThrows(node: ts.Node | undefined): boolean {
+  if (!node) return false;
+  if (ts.isThrowStatement(node)) return true;
+  if (ts.isBlock(node)) return blockAlwaysThrows(node);
+  if (ts.isIfStatement(node)) {
+    if (!node.elseStatement) return false;
+    return alwaysThrows(node.thenStatement) && alwaysThrows(node.elseStatement);
+  }
+  if (ts.isSwitchStatement(node)) return switchAlwaysThrows(node);
   return false;
+}
+
+function switchAlwaysThrows(node: ts.SwitchStatement): boolean {
+  const clauses = node.caseBlock.clauses;
+  if (!clauses.some((clause) => ts.isDefaultClause(clause))) return false;
+  return clauses.every((clause) => clause.statements.some((statement) => alwaysThrows(statement)));
 }
 
 function iterationReceiver(node: ts.Node): ts.Expression | undefined {
@@ -1018,12 +1124,6 @@ function callbackOf(call: ts.CallExpression): ts.ArrowFunction | ts.FunctionExpr
     if (arg && (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))) return arg;
   }
   return undefined;
-}
-
-function isAwaited(node: ts.Node): boolean {
-  let parent = node.parent;
-  while (parent && isTransparent(parent) && !ts.isAwaitExpression(parent)) parent = parent.parent;
-  return !!parent && ts.isAwaitExpression(parent);
 }
 
 function isTransparent(node: ts.Node): boolean {

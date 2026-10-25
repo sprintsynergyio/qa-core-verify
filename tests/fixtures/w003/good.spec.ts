@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { checkTitle } from './check-title.js';
 
 test('awaited visibility', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Login' })).toBeVisible();
@@ -47,4 +48,43 @@ test('returns promise all', async ({ page }) => {
 
 test('returns a step', async ({ page }) => {
   return test.step('x', () => expect(page.getByTestId('title')).toHaveText('Products'));
+});
+
+test('awaited then', async ({ page }) => {
+  await expect(page).toHaveTitle('Swag Labs').then(() => undefined);
+});
+
+test('awaited catch', async ({ page }) => {
+  await expect(page).toHaveTitle('Swag Labs').catch(() => undefined);
+});
+
+test('awaited finally', async ({ page }) => {
+  await expect(page).toHaveTitle('Swag Labs').finally(() => undefined);
+});
+
+test('awaited resolves', async () => {
+  await expect(Promise.resolve(1)).resolves.toBe(1);
+});
+
+test('awaited rejects', async () => {
+  await expect(Promise.reject(new Error('nope'))).rejects.toThrow('nope');
+});
+
+test('awaited helper', async ({ page }) => {
+  await checkTitle(page);
+});
+
+test('returned helper', async ({ page }) => {
+  return checkTitle(page);
+});
+
+test('awaited step block', async ({ page }) => {
+  await test.step('title', async () => {
+    await expect(page.getByTestId('title')).toHaveText('Products');
+  });
+});
+
+test('const alias', async ({ page }) => {
+  const e = expect;
+  await e(page).toHaveTitle('Swag Labs');
 });

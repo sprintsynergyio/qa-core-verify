@@ -17,7 +17,7 @@ npm run demo:saucedemo -- tests/good
 
 ## Checker
 
-This command does not open a browser. It reports the static weak assertion rules in [docs/rules.md](../../docs/rules.md). `tests/good` is written to stay clear of those rules.
+This command does not open a browser. It reports the static weak assertion rules in [docs/rules.md](../../docs/rules.md). `tests/good` is written to stay clear of those rules. The checker writes `report.json`, `report.md`, and `report.html` under `.qa-core/verify` in this folder.
 
 ```sh
 npm run build

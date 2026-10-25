@@ -1,5 +1,5 @@
 import type { InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W010_RULE_ID = 'QCV-W010';
 
@@ -23,6 +23,7 @@ export function findHardWaits(tests: readonly InventoryTest[]): Finding[] {
         evidence: event.fact.source,
         fixHint: 'Replace `page.waitForTimeout` with a web-first assertion such as `await expect(locator).toBeVisible()`.',
         relatedLintRule: 'no-wait-for-timeout',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

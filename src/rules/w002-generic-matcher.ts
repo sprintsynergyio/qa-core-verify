@@ -1,5 +1,5 @@
 import type { ExpectCall, InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W002_RULE_ID = 'QCV-W002';
 
@@ -24,6 +24,7 @@ export function findGenericLocatorMatchers(tests: readonly InventoryTest[]): Fin
         evidence: expect.evidence,
         fixHint: 'Use `await expect(locator).toBeVisible()` or assert its text.',
         relatedLintRule: 'no-unnecessary-assertions',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

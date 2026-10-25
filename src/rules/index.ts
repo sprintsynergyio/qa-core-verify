@@ -1,4 +1,4 @@
-import type { InventoryTest } from '../inventory/parse.js';
+import type { InventoryTest, SkippedDescribe } from '../inventory/parse.js';
 import { findUnresolvedHelpers } from './w000-unresolved.js';
 import { findTestsWithNoAssertion } from './w001-no-assertion.js';
 import { findGenericLocatorMatchers } from './w002-generic-matcher.js';
@@ -12,7 +12,12 @@ import { findSkipOrFocus } from './w009-skip-only.js';
 import { findHardWaits } from './w010-wait-for-timeout.js';
 import type { Finding } from './types.js';
 
-export function collectFindings(tests: readonly InventoryTest[]): Finding[] {
+export const CHECKS_RUN = ['weak-assertion'] as const;
+
+export function collectFindings(
+  tests: readonly InventoryTest[],
+  skippedDescribes: readonly SkippedDescribe[] = [],
+): Finding[] {
   const findings = [
     ...findUnresolvedHelpers(tests),
     ...findTestsWithNoAssertion(tests),
@@ -23,7 +28,7 @@ export function collectFindings(tests: readonly InventoryTest[]): Finding[] {
     ...findPresenceOnly(tests),
     ...findConditionalExpects(tests),
     ...findSwallowedExpects(tests),
-    ...findSkipOrFocus(tests),
+    ...findSkipOrFocus(tests, skippedDescribes),
     ...findHardWaits(tests),
   ];
   return findings.sort((left, right) => {

@@ -1,5 +1,5 @@
 import type { BodyEvent, ExpectCall, InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W006_RULE_ID = 'QCV-W006';
 
@@ -45,6 +45,7 @@ function presenceFinding(test: InventoryTest): Finding | undefined {
     message: 'After the last action, the test only checks presence.',
     evidence: first.evidence,
     fixHint: 'Assert the text, value, URL, title, count, checked state, or enabled state the action should change.',
+    ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
   };
 }
 

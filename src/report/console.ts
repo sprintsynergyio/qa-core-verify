@@ -1,37 +1,51 @@
 import path from 'node:path';
-import type { Finding } from '../rules/types.js';
+import type { Report, ReportSummary } from './model.js';
 
-export function formatConsoleReport(findings: readonly Finding[], testsScanned: number): string {
+export function formatConsoleReport(report: Report, reportPaths: readonly string[]): string {
   const lines: string[] = [];
-  const byFile = new Map<string, Finding[]>();
-  for (const finding of findings) {
-    const list = byFile.get(finding.file) ?? [];
-    list.push(finding);
-    byFile.set(finding.file, list);
-  }
-
-  for (const file of [...byFile.keys()].sort((left, right) => left.localeCompare(right))) {
-    lines.push(file);
-    for (const finding of byFile.get(file) ?? []) {
-      lines.push(
-        `  ${finding.line}:${finding.column}  ${finding.ruleId}  ${finding.severity}  ${finding.testTitle}  ${finding.message}`,
-      );
+  for (const test of report.tests) {
+    lines.push(`${test.verdict}  ${test.file}:${test.line}  ${test.titlePath.join(' > ')}`);
+    for (const finding of test.findings) {
+      lines.push(`  ${finding.ruleId}  ${finding.severity}  ${finding.line}:${finding.column}  ${finding.message}`);
+      lines.push(`    Evidence: ${oneLine(finding.evidence)}`);
+      lines.push(`    Fix: ${oneLine(finding.fixHint)}`);
     }
     lines.push('');
   }
-
-  const counts = { error: 0, warn: 0, info: 0 };
-  for (const finding of findings) counts[finding.severity] += 1;
-  lines.push(
-    `Summary: ${countLabel(counts.error, 'error', 'errors')}, ${countLabel(counts.warn, 'warning', 'warnings')}, ${countLabel(counts.info, 'info finding', 'info findings')}. ${countLabel(testsScanned, 'test', 'tests')} scanned.`,
-  );
+  lines.push(summaryLine(report.summary));
+  lines.push(reportsLine(reportPaths));
   return lines.join('\n');
+}
+
+export function summaryLine(summary: ReportSummary): string {
+  const verdict = summary.verdict;
+  const severity = summary.severity;
+  return [
+    'Summary:',
+    `${verdict.trusted} trusted,`,
+    `${verdict.review} review,`,
+    `${verdict.untrusted} untrusted,`,
+    `${verdict['baseline-red']} baseline-red,`,
+    `${verdict['not-run']} not-run.`,
+    `${countLabel(severity.error, 'error', 'errors')},`,
+    `${countLabel(severity.warn, 'warning', 'warnings')},`,
+    `${countLabel(severity.info, 'info finding', 'info findings')}.`,
+  ].join(' ');
+}
+
+export function reportsLine(reportPaths: readonly string[]): string {
+  if (reportPaths.length === 0) return 'Reports: none.';
+  return `Reports: ${reportPaths.map((file) => file.split(path.sep).join('/')).join(', ')}.`;
 }
 
 export function toDisplayPath(file: string, cwd: string): string {
   const relative = path.relative(cwd, file);
   if (relative.startsWith('..') || path.isAbsolute(relative)) return file.split(path.sep).join('/');
   return relative.split(path.sep).join('/');
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function countLabel(count: number, singular: string, plural: string): string {

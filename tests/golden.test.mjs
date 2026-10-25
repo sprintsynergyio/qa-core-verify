@@ -99,10 +99,13 @@ function runPipeline() {
   const discovery = discoverSpecs(projectDir, []);
   const config = loadVerifyConfig(projectDir);
   const tests = [];
+  const skippedDescribes = [];
   for (const file of discovery.files) {
-    tests.push(...parseSpecFile(file, config).tests);
+    const inventory = parseSpecFile(file, config);
+    tests.push(...inventory.tests);
+    skippedDescribes.push(...inventory.skippedDescribes);
   }
-  return { discovery, tests, findings: collectFindings(tests) };
+  return { discovery, tests, findings: collectFindings(tests, skippedDescribes) };
 }
 
 function findingKey(file, line, ruleId) {
@@ -117,7 +120,7 @@ function hashTree(dir) {
   const files = [];
   const walk = (current) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === 'test-results' || entry.name === 'playwright-report') continue;
+      if (entry.name === 'node_modules' || entry.name === 'test-results' || entry.name === 'playwright-report' || entry.name === '.qa-core') continue;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
       else files.push(full);
@@ -162,6 +165,7 @@ test('reports every active expected finding and no findings under tests/good', (
   };
   for (const finding of findings) {
     assert.equal(finding.severity, severityByRule[finding.ruleId], `${finding.ruleId} ${finding.file}:${finding.line}`);
+    if (finding.ruleId === 'QCV-W003') assert.equal(finding.message, 'Async assertion is not awaited.');
   }
 });
 
@@ -214,19 +218,36 @@ test('the demo config is read and the cli agrees with the static pipeline', () =
   assert.equal(result.status, 1);
   assert.match(result.stdout, /opens the login page and stops/);
   assert.match(result.stdout, /waits and then ends/);
-  assert.doesNotMatch(result.stdout, /login lands on the inventory page/);
-  assert.doesNotMatch(result.stdout, /add to cart updates the cart badge/);
-  assert.doesNotMatch(result.stdout, /locked out user sees the error/);
-  assert.doesNotMatch(result.stdout, /checkout overview shows the backpack item total/);
+  assert.match(result.stdout, /trusted[^\n]*login lands on the inventory page/);
+  assert.match(result.stdout, /trusted[^\n]*add to cart updates the cart badge/);
+  assert.match(result.stdout, /trusted[^\n]*locked out user sees the error/);
+  assert.match(result.stdout, /trusted[^\n]*checkout overview shows the backpack item total/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*login lands on the inventory page/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*add to cart updates the cart badge/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*locked out user sees the error/);
+  assert.doesNotMatch(result.stdout, /untrusted[^\n]*checkout overview shows the backpack item total/);
   const counts = { error: 0, warn: 0, info: 0 };
+  const verdicts = { trusted: 0, review: 0, untrusted: 0, 'baseline-red': 0, 'not-run': 0 };
   for (const finding of findings) counts[finding.severity] += 1;
+  for (const entry of tests) {
+    const owned = findings.filter((finding) => finding.testTitle === entry.titlePath.join(' > ') && finding.file === entry.file);
+    if (entry.modifiers.includes('skip') || entry.modifiers.includes('fixme')) verdicts['not-run'] += 1;
+    else if (owned.some((finding) => finding.severity === 'error')) verdicts.untrusted += 1;
+    else if (owned.length > 0) verdicts.review += 1;
+    else verdicts.trusted += 1;
+  }
   const summary = [
     'Summary:',
+    `${verdicts.trusted} trusted,`,
+    `${verdicts.review} review,`,
+    `${verdicts.untrusted} untrusted,`,
+    `${verdicts['baseline-red']} baseline-red,`,
+    `${verdicts['not-run']} not-run.`,
     countLabel(counts.error, 'error', 'errors') + ',',
     countLabel(counts.warn, 'warning', 'warnings') + ',',
     countLabel(counts.info, 'info finding', 'info findings') + '.',
-    countLabel(tests.length, 'test', 'tests') + ' scanned.',
   ].join(' ');
   assert.ok(result.stdout.includes(summary), result.stdout);
+  assert.match(result.stdout, /Reports: example-project\/saucedemo\/\.qa-core\/verify\/report\.json/);
   assert.doesNotMatch(result.stderr, /No tests found/);
 });

@@ -15,6 +15,11 @@ test('visible with no action', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Login' })).toBeVisible();
 });
 
+test('visible after goto', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('login-button')).toBeVisible();
+});
+
 test('hidden after click', async ({ page }) => {
   await page.getByRole('button', { name: 'Close' }).click();
   await expect(page.getByTestId('error')).toBeHidden();

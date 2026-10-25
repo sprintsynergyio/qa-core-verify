@@ -1,0 +1,9 @@
+trusted  fixture/a.spec.ts:3  passes
+
+untrusted  fixture/a.spec.ts:8  needs a look
+  QCV-W001  error  8:1  Test has no assertion.
+    Evidence: No expect call and no configured assertion helper in this test.
+    Fix: Add an expect assertion, or call a helper named in qa-core-verify.config.json.
+
+Summary: 1 trusted, 0 review, 1 untrusted, 0 baseline-red, 0 not-run. 1 error, 0 warnings, 0 info findings.
+Reports: fixture/.qa-core/verify/report.json, fixture/.qa-core/verify/report.md, fixture/.qa-core/verify/report.html.

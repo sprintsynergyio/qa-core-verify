@@ -1,5 +1,5 @@
 import type { ExpectCall, InventoryTest } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W005_RULE_ID = 'QCV-W005';
 
@@ -23,6 +23,7 @@ export function findExistenceOnly(tests: readonly InventoryTest[]): Finding[] {
         message: 'Existence check does not verify the page value.',
         evidence: expect.evidence,
         fixHint: 'Assert the expected text, attribute, input value, or count.',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }

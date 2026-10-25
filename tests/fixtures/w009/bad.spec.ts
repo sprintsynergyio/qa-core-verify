@@ -16,7 +16,13 @@ test.describe.skip('skipped suite', () => {
   test('inside skip', async ({ page }) => {
     await expect(page.getByTestId('title')).toHaveText('Products');
   });
+
+  test('also inside skip', async ({ page }) => {
+    await expect(page.getByTestId('title')).toHaveText('Products');
+  });
 });
+
+test.describe.skip('empty skipped suite', () => {});
 
 test.describe.only('focused suite', () => {
   test('inside only', async ({ page }) => {

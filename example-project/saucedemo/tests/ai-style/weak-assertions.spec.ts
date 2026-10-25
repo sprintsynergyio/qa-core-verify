@@ -15,7 +15,6 @@ test('truthy locator', async ({ page }) => {
 test('does not await visibility', async ({ page }) => {
   await page.goto('/');
   // SEEDED: QCV-W003 the visibility assertion is not awaited
-  // SEEDED: QCV-W006 after goto the only assertion checks visibility
   expect(page.getByTestId('login-button')).toBeVisible();
   // SEEDED: QCV-W010 waitForTimeout keeps the page open and no assertion follows it
   await page.waitForTimeout(1000);
@@ -58,7 +57,6 @@ test('swallows a failed assertion', async ({ page }) => {
   await page.goto('/');
   try {
     // SEEDED: QCV-W008 the catch discards the assertion failure
-    // SEEDED: QCV-W006 after goto the only assertion checks visibility
     await expect(page.locator('#login-error-banner')).toBeVisible({ timeout: 1000 });
   } catch {
     // The failure is discarded.

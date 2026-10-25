@@ -1,5 +1,5 @@
 import type { ExpectCall, InventoryTest, ScalarLiteral } from '../inventory/parse.js';
-import type { Finding } from './types.js';
+import { ownerIdFor, type Finding } from './types.js';
 
 export const W004_RULE_ID = 'QCV-W004';
 
@@ -22,6 +22,7 @@ export function findTautologies(tests: readonly InventoryTest[]): Finding[] {
         message: 'Assertion compares a value to itself.',
         evidence: expect.evidence,
         fixHint: 'Compare the page value to the expected text, number, or state.',
+        ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
     }
   }
