@@ -8,7 +8,7 @@ export interface BaselineSummary {
   passed: number;
   failed: number;
   skipped: number;
-  /** `path/file.ts:line` for a test whose Playwright status is `unexpected`. */
+  /** `path/file.ts:line:column` for a test whose Playwright status is `unexpected`. The column is Playwright's. */
   failedKeys: Set<string>;
   /**
    * `path/file.ts:line:column` for every spec in the JSON report.
@@ -87,7 +87,7 @@ export function parseBaseline(
   const states = new Map<string, LocationState>();
   for (const suite of suites) walkSuite(suite, summary, roots, workspaceDir, states);
   for (const [key, state] of states) {
-    if (state.failed) summary.failedKeys.add(state.lineKey);
+    if (state.failed) summary.failedKeys.add(key);
     else if (state.skipped && !state.ran) summary.skippedKeys?.add(key);
   }
   summary.ok = true;

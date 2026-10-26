@@ -97,6 +97,16 @@ export function formatHtml(report: Report): string {
     parts.push(
       `<p class="meta">${escapeHtml(displayText(test.file))}:${test.line} <span class="badge verdict-${test.verdict}">${escapeHtml(test.verdict)}</span></p>`,
     );
+    if (test.assertions && test.assertions.length > 0) {
+      parts.push('<ul class="assertions">');
+      for (const assertion of test.assertions) {
+        const reason = assertion.reason ? ` (${escapeHtml(assertion.reason)})` : '';
+        parts.push(
+          `<li>${escapeHtml(assertion.outcome)} ${escapeHtml(assertion.matcher)} at ${assertion.line}:${assertion.column}${reason}</li>`,
+        );
+      }
+      parts.push('</ul>');
+    }
     if (test.locators && test.locators.length > 0) {
       parts.push('<ul class="locators">');
       for (const locator of test.locators) {

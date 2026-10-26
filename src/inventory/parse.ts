@@ -133,6 +133,8 @@ interface Bindings {
   /** Const names bound to `expect.soft`. `let` and `var` are never added. */
   softLocals: Set<string>;
   namespaces: Set<string>;
+  /** Names bound to `mergeTests` from `@playwright/test` or a fixture file. */
+  mergeLocals: Set<string>;
 }
 
 interface SuiteContext {
@@ -399,7 +401,13 @@ function withExpectAliases(
   for (const name of aliases) expectLocals.add(name);
   const softLocals = new Set(bindings.softLocals);
   for (const name of softAliases) softLocals.add(name);
-  return { testLocals: bindings.testLocals, expectLocals, softLocals, namespaces: bindings.namespaces };
+  return {
+    testLocals: bindings.testLocals,
+    expectLocals,
+    softLocals,
+    namespaces: bindings.namespaces,
+    mergeLocals: bindings.mergeLocals,
+  };
 }
 
 function readExpectParts(
@@ -711,16 +719,19 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   const expectLocals = new Set<string>();
   const softLocals = new Set<string>();
   const namespaces = new Set<string>();
-  const bindings: Bindings = { testLocals, expectLocals, softLocals, namespaces };
+  const mergeLocals = new Set<string>();
+  const bindings: Bindings = { testLocals, expectLocals, softLocals, namespaces, mergeLocals };
 
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
-      bindImport(node.importClause, isPlaywrightSpecifier(node.moduleSpecifier), testLocals, expectLocals, namespaces);
+      bindImport(node.importClause, isPlaywrightSpecifier(node.moduleSpecifier), testLocals, expectLocals, namespaces, mergeLocals);
     }
     if (ts.isVariableDeclaration(node)) {
-      bindRequire(node, testLocals, expectLocals, namespaces);
+      bindRequire(node, testLocals, expectLocals, namespaces, mergeLocals);
       if (ts.isIdentifier(node.name) && node.initializer) {
-        if (isTestExtend(node.initializer, bindings)) testLocals.add(node.name.text);
+        if (isTestExtend(node.initializer, bindings) || isMergeTestsCall(node.initializer, bindings)) {
+          testLocals.add(node.name.text);
+        }
         if (isExpectConfigure(node.initializer, bindings)) expectLocals.add(node.name.text);
         const init = unwrapExpression(node.initializer);
         const list = node.parent;
@@ -739,7 +750,7 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
       node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
       ts.isIdentifier(node.left)
     ) {
-      if (isTestExtend(node.right, bindings)) testLocals.add(node.left.text);
+      if (isTestExtend(node.right, bindings) || isMergeTestsCall(node.right, bindings)) testLocals.add(node.left.text);
       if (isExpectConfigure(node.right, bindings)) expectLocals.add(node.left.text);
     }
     ts.forEachChild(node, visit);
@@ -786,10 +797,20 @@ function isTestReceiver(expr: ts.Expression, bindings: Bindings): boolean {
   const unwrapped = unwrapExpression(expr);
   if (ts.isIdentifier(unwrapped) && bindings.testLocals.has(unwrapped.text)) return true;
   if (ts.isCallExpression(unwrapped) && isTestExtend(unwrapped, bindings)) return true;
+  if (ts.isCallExpression(unwrapped) && isMergeTestsCall(unwrapped, bindings)) return true;
   const chain = propertyChain(unwrapped);
   if (!chain) return false;
   const canon = canonical(chain, bindings);
   return canon?.[0] === 'test' && canon.length === 1;
+}
+
+function isMergeTestsCall(expr: ts.Expression, bindings: Bindings): boolean {
+  const unwrapped = unwrapExpression(expr);
+  if (!ts.isCallExpression(unwrapped)) return false;
+  const callee = unwrapExpression(unwrapped.expression);
+  if (!ts.isIdentifier(callee) || !bindings.mergeLocals.has(callee.text)) return false;
+  if (unwrapped.arguments.length === 0) return false;
+  return unwrapped.arguments.every((arg) => isTestReceiver(arg, bindings));
 }
 
 function isExpectConfigure(expr: ts.Expression, bindings: Bindings): boolean {
@@ -819,6 +840,7 @@ function bindImport(
   testLocals: Set<string>,
   expectLocals: Set<string>,
   namespaces: Set<string>,
+  mergeLocals: Set<string>,
 ): void {
   // A default or namespace import is the Playwright test object only for the Playwright package.
   // A named import from a relative fixture file is still the test binding. The import is not loaded.
@@ -833,6 +855,7 @@ function bindImport(
     const imported = element.propertyName?.text ?? element.name.text;
     if (imported === 'test') testLocals.add(element.name.text);
     if (imported === 'expect') expectLocals.add(element.name.text);
+    if (imported === 'mergeTests') mergeLocals.add(element.name.text);
   }
 }
 
@@ -841,6 +864,7 @@ function bindRequire(
   testLocals: Set<string>,
   expectLocals: Set<string>,
   namespaces: Set<string>,
+  mergeLocals: Set<string>,
 ): void {
   if (!declaration.initializer || !isTestRequire(declaration.initializer)) return;
   const playwright = isPlaywrightRequire(declaration.initializer);
@@ -857,6 +881,7 @@ function bindRequire(
       element.propertyName && ts.isIdentifier(element.propertyName) ? element.propertyName.text : element.name.text;
     if (imported === 'test') testLocals.add(element.name.text);
     if (imported === 'expect') expectLocals.add(element.name.text);
+    if (imported === 'mergeTests') mergeLocals.add(element.name.text);
   }
 }
 

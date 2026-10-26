@@ -10,6 +10,7 @@ import { parseSpecFile, type InventoryTest, type SkippedDescribe } from './inven
 import { buildReport } from './report/model.js';
 import { consoleReportPaths, escapeControls } from './report/paths.js';
 import { consoleText, parseFormats, reportJson, writeReportFiles, type ReportFormat } from './report/write.js';
+import { collectInversion } from './runtime/inversion/run.js';
 import { BaselineStartError, collectLocatorCheck } from './runtime/locator-check.js';
 import { collectLocatorEvidence } from './runtime/locator-evidence/injected-fixture.js';
 import { workspaceLine } from './runtime/workspace.js';
@@ -17,10 +18,11 @@ import { CHECKS_RUN, collectFindings } from './rules/index.js';
 import type { Severity } from './rules/types.js';
 import { ToolError } from './tool-error.js';
 
-export const HELP = `qa-core-verify <project-dir> [spec globs...] [--json] [--format console,json,md,html] [--out <dir>] [--fail-on error|warn|info] [--only locator|locator-evidence] [--config <file>] [--keep-workspace]
+export const HELP = `qa-core-verify <project-dir> [spec globs...] [--json] [--format console,json,md,html] [--out <dir>] [--fail-on error|warn|info] [--only locator|locator-evidence|inversion] [--config <file>] [--max-runs <n>] [--keep-workspace]
 
 Audit a Playwright suite for weak assertions (QCV-W000 through QCV-W010).
 --only locator runs QCV-L001 through QCV-L004 against a temp copy of the suite.
+--only inversion runs QCV-F001 by inverting one assertion at a time in a temp copy.
 
 Options:
   --json              Print the JSON report to stdout and nothing else to stdout.
@@ -39,12 +41,20 @@ Options:
   --only <name>       Run one check instead of the static audit.
                       locator runs the hallucinated locator check and writes the report.
                       locator-evidence runs Playwright in a temp copy and writes locator-evidence.json.
+                      inversion runs the cannot-fail check and writes the report.
+                      Each inversion run is one assertion. The plan line prints the mutant count and the run count before those runs start.
   --config <file>     Playwright config forwarded to the temp run and not rewritten.
                       A directory uses the playwright.config file inside that directory.
+                      The project directory itself is accepted, including --config .
+                      A directory that holds no playwright.config file is refused before the temp copy.
+                      Playwright would run that directory with its defaults. This checker refuses it and exits 2.
                       A path that is not a config file is refused before the temp copy is made.
-                      Requires --only locator or --only locator-evidence.
                       playwright.config.ts, .js, .mts, .mjs, .cts, and .cjs are never rewritten.
-  --keep-workspace    Keep the temp run directory. Requires --only locator-evidence or --only locator.
+                      Requires --only locator, --only locator-evidence, or --only inversion.
+  --max-runs <n>      Stop inversion after n mutant runs. Requires --only inversion.
+                      n is a whole number, zero or greater. Unchecked assertions are not-run.
+                      stderr prints Stopped at limit when the cap is hit.
+  --keep-workspace    Keep the temp run directory. Requires --only locator-evidence, --only locator, or --only inversion.
                       stderr prints Workspace: and the absolute qcv-run directory.
                       That directory contains project, the copied tree.
                       The same line is printed after SIGINT, SIGTERM, and SIGHUP.
@@ -70,6 +80,7 @@ interface CliOptions {
   failOnSet: boolean;
   only: string | undefined;
   configFile: string | undefined;
+  maxRuns: number | undefined;
   keepWorkspace: boolean;
   projectDir: string | undefined;
   specArgs: string[];
@@ -92,19 +103,24 @@ export function run(
     console.log(HELP);
     return 0;
   }
-  const locatorMode = options.only === 'locator' || options.only === 'locator-evidence';
-  if (options.keepWorkspace && !locatorMode) {
-    console.error('--keep-workspace requires --only locator-evidence or --only locator.');
+  const runtimeMode = options.only === 'locator' || options.only === 'locator-evidence' || options.only === 'inversion';
+  if (options.keepWorkspace && !runtimeMode) {
+    console.error('--keep-workspace requires --only locator-evidence, --only locator, or --only inversion.');
     return 2;
   }
-  if (options.configFile && !locatorMode) {
-    console.error('--config requires --only locator-evidence or --only locator.');
+  if (options.configFile && !runtimeMode) {
+    console.error('--config requires --only locator-evidence, --only locator, or --only inversion.');
     return 2;
   }
-  if (options.only !== undefined && !locatorMode) {
-    console.error(`Unknown --only check "${options.only}". Use locator or locator-evidence.`);
+  if (options.maxRuns !== undefined && options.only !== 'inversion') {
+    console.error('--max-runs requires --only inversion.');
     return 2;
   }
+  if (options.only !== undefined && !runtimeMode) {
+    console.error(`Unknown --only check "${options.only}". Use locator, locator-evidence, or inversion.`);
+    return 2;
+  }
+  if (options.only === 'inversion') return runInversion(options, cwd, now);
   if (options.only === 'locator') return runLocatorCheck(options, cwd, now);
   if (options.only === 'locator-evidence') return runLocatorEvidence(options, cwd);
   if (!options.projectDir) {
@@ -175,9 +191,10 @@ function parseCli(argv: readonly string[]): CliOptions {
     out?: string;
     'fail-on'?: string;
         only?: string;
-        config?: string;
-        'keep-workspace'?: boolean;
-      };
+    config?: string;
+    'max-runs'?: string;
+    'keep-workspace'?: boolean;
+  };
   let positionals: string[];
   try {
     const parsed = parseArgs({
@@ -190,6 +207,7 @@ function parseCli(argv: readonly string[]): CliOptions {
         'fail-on': { type: 'string' },
         only: { type: 'string' },
         config: { type: 'string' },
+        'max-runs': { type: 'string' },
         'keep-workspace': { type: 'boolean', default: false },
       },
       allowPositionals: true,
@@ -217,6 +235,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     failOnSet: values['fail-on'] !== undefined,
     only: values.only,
     configFile: values.config,
+    maxRuns: parseMaxRuns(values['max-runs']),
     keepWorkspace: values['keep-workspace'] === true,
     projectDir,
     specArgs: positionals.slice(1),
@@ -341,8 +360,80 @@ async function runLocatorCheck(options: CliOptions, cwd: string, now: () => Date
   }
 }
 
+function parseMaxRuns(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new ToolError(`Unknown --max-runs value "${value}". Use a whole number, zero or greater.`);
+  }
+  return Number(value);
+}
+
+/**
+ * The last 20 lines, plus the first error line when that line is not already in the tail.
+ * A broken config can fill the tail with stack frames and hide the message.
+ */
 function outputTail(text: string): string {
-  return text.trim().split('\n').slice(-20).join('\n').slice(-2000);
+  const lines = text.trim().split('\n');
+  const tailLines = lines.slice(-20);
+  const tail = tailLines.join('\n').slice(-2000);
+  const firstError = lines.find((line) => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('at ') || trimmed.startsWith('at\t')) return false;
+    return /Error|error TS|SyntaxError|failed|Failed|Cannot|Unexpected/.test(trimmed);
+  });
+  if (!firstError || tailLines.some((line) => line.trim() === firstError)) return tail;
+  return `${firstError}\n${tail}`.slice(-4000);
+}
+
+async function runInversion(options: CliOptions, cwd: string, now: () => Date): Promise<number> {
+  if (!options.projectDir) {
+    console.error('Missing project directory.');
+    console.error(HELP);
+    return 2;
+  }
+  if (options.specArgs.length > 0) {
+    console.error('--only inversion runs the whole Playwright project. Do not pass spec paths.');
+    return 2;
+  }
+  try {
+    const projectDir = path.resolve(cwd, options.projectDir);
+    if (!fs.existsSync(projectDir)) throw new ToolError(`Path does not exist: ${options.projectDir}`);
+    if (!fs.statSync(projectDir).isDirectory()) throw new ToolError(`Not a directory: ${options.projectDir}`);
+    const outDir = options.outDir ? path.resolve(cwd, options.outDir) : path.join(projectDir, '.qa-core', 'verify');
+    const result = await collectInversion({
+      projectDir,
+      keepWorkspace: options.keepWorkspace,
+      configFile: options.configFile,
+      cwd,
+      now,
+      maxRuns: options.maxRuns,
+    });
+    for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);
+    console.error(
+      `Baseline: ${result.baseline.passed} passed, ${result.baseline.failed} failed, ${result.baseline.skipped} skipped.`,
+    );
+    const written = writeReportFiles(result.report, outDir, options.formats);
+    const shown = consoleReportPaths(written, projectDir, options.outDir, cwd);
+    if (options.json) {
+      process.stdout.write(reportJson(result.report));
+    } else if (options.formats.includes('console')) {
+      process.stdout.write(`${consoleText(result.report, shown)}\n`);
+    }
+    if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
+    return exitCodeFor(result.findings, options.failOn);
+  } catch (error) {
+    if (error instanceof BaselineStartError) {
+      console.error('Playwright produced no baseline report.');
+      const detail = outputTail(`${error.run.stderr}\n${error.run.stdout}`);
+      if (detail) console.error(detail);
+      return error.run.exitCode === 1 ? 1 : 2;
+    }
+    if (error instanceof ToolError) {
+      console.error(error.message);
+      return 2;
+    }
+    throw error;
+  }
 }
 
 function emptySuiteNotice(specFileCount: number, testCount: number): string | undefined {

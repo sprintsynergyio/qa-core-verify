@@ -91,6 +91,9 @@ function absorbIds(tracked, rootPid) {
 // The test process shares its session with the runner, so that session is not
 // required to be empty. Processes recorded from this test's tree must be gone,
 // including a detached child whose process group or session is not the test's.
+// A failing check kills those processes before it throws, so they are not left alive.
+// A grandchild that calls setsid before noteTree runs is not in this set: a double
+// fork into a new session is not seen, and this check cannot kill it.
 function assertNoLeftovers(tracked, label) {
   const left = [];
   for (const name of fs.readdirSync('/proc')) {
@@ -104,8 +107,15 @@ function assertNoLeftovers(tracked, label) {
     }
     if (tracked.pids.has(pid) || tracked.pgrps.has(info.pgrp) || tracked.sids.has(info.sid)) left.push(pid);
   }
-  assert.deepEqual(left, [], `${label} left pids ${left.join(',')}`);
   const descendants = listDescendantPids(process.pid);
+  for (const pid of [...left, ...descendants]) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+  assert.deepEqual(left, [], `${label} left pids ${left.join(',')}`);
   assert.deepEqual(descendants, [], `${label} left descendants ${descendants.join(',')}`);
 }
 
@@ -517,7 +527,7 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   const run = await withPrivateTemp(t, () => collectLocatorEvidence({ projectDir: copy, outDir: out, keepWorkspace: false }));
   assert.equal(hashTree(sauceDemo), before);
   assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), false);
-  assert.equal(run.evidence.playwrightExitCode, 0);
+  assert.equal(run.evidence.playwrightExitCode, 0, `${run.stderr}\n${run.stdout}`);
   assert.equal(fs.existsSync(run.workspaceDir), false);
   const banner = run.evidence.records.find((record) => record.selector.includes('#login-error-banner'));
   const locked = run.evidence.records.find(

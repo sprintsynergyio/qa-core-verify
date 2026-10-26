@@ -175,13 +175,20 @@ export function evaluateLocatorCheck(
     const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
     const columns = columnsFor(test);
     const siblingsOnLine = siblings.get(`${relative}:${test.line}`) ?? 1;
-    if (baseline.failedKeys.has(baselineKey(relative, test.line))) {
+    if (keyHits(baseline.failedKeys, relative, test.line, columns, siblingsOnLine)) {
       baselineRed.add(id);
     } else if (baselineSkipped(baseline, relative, test.line, columns, siblingsOnLine)) {
       notRun.add(id);
     } else if (!baselineSaw(baseline, relative, test.line, columns, siblingsOnLine)) {
       notRun.add(id);
     } else live.push(test);
+  }
+  if (evidence.records.length === 0 && evidence.playwrightExitCode !== 0) {
+    live.length = 0;
+    for (const test of tests) {
+      const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
+      if (!baselineRed.has(id)) notRun.add(id);
+    }
   }
   const groups = groupRecords(evidence.records);
   const findings = [
@@ -205,7 +212,30 @@ export function evaluateLocatorCheck(
       summaries.set(id, list);
     }
   }
+  alignBrittleCallSites(projectDir, findings, summaries);
   return { findings, baselineRed, notRun, summaries };
+}
+
+/**
+ * QCV-L004 is reported on the `expect(` call. The evidence stack points at the matcher.
+ * When both describe the same locator, the summary uses the finding's call site.
+ */
+function alignBrittleCallSites(projectDir: string, findings: readonly Finding[], summaries: Map<string, ReportLocator[]>): void {
+  for (const finding of findings) {
+    if (finding.ruleId !== 'QCV-L004') continue;
+    const list = summaries.get(finding.ownerId);
+    if (!list) continue;
+    const file = path.relative(projectDir, finding.file).split(path.sep).join('/');
+    for (const locator of list) {
+      if (locator.file !== file) continue;
+      const same =
+        (locator.selector.length > 0 && finding.evidence.includes(locator.selector)) ||
+        (locator.api.length > 0 && finding.evidence.includes(locator.api));
+      if (!same) continue;
+      locator.line = finding.line;
+      locator.column = finding.column;
+    }
+  }
 }
 
 /** A test ran when the baseline report contains it. One row on a line accepts any column from that line. */
@@ -239,7 +269,9 @@ function keyHits(
   columns: readonly number[],
   siblings: number,
 ): boolean {
-  const prefix = `${baselineKey(file, line)}:`;
+  const lineKey = baselineKey(file, line);
+  if (siblings <= 1 && keys.has(lineKey)) return true;
+  const prefix = `${lineKey}:`;
   let hits = 0;
   let columnHit = false;
   for (const key of keys) {

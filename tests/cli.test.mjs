@@ -214,7 +214,7 @@ test('unknown --only and --keep-workspace without it are tool errors', () => {
 
   const keep = runCli(['--keep-workspace', w001Dir]);
   assert.equal(keep.status, 2);
-  assert.match(keep.stderr, /--keep-workspace requires --only locator-evidence/);
+  assert.match(keep.stderr, /--keep-workspace requires --only locator-evidence, --only locator, or --only inversion/);
   assert.equal(fs.existsSync(path.join(w001Dir, '.qa-core')), false);
 });
 

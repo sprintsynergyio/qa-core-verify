@@ -473,7 +473,7 @@ None.
 
 ### What
 
-The locator matched more than one element and the test did not account for that count with `toHaveCount`, or the test called `.first()`, `.last()`, or `.nth()` on a locator whose parent matched more than one element.
+The locator matched more than one element and the test did not account for that count. `toHaveCount(n)` accounts for it when n equals the match count. An array passed to `toHaveText` or `toContainText` accounts for it when the array length equals the match count. `.nth(index)` with a stated index is narrowed. `.first()` and `.last()` are not narrowed: the parent count is the signal, and those calls still warn.
 
 ### Why
 
@@ -507,7 +507,7 @@ A `locator()` or `frameLocator()` string is an XPath, uses `nth-child` or `nth-o
 
 Playwright's locator guide prefers a role, label, text, or test id over CSS and XPath: https://playwright.dev/docs/locators
 
-A class in that string is reported as a styling class. This is a static check. It does not open a browser.
+Every class in a `locator()` or `frameLocator()` string counts, including a class that names a component. The finding calls it a styling class. This is a static check. It does not open a browser.
 
 ### Why
 
@@ -532,6 +532,42 @@ info
 ### Related Lint Rule
 
 None.
+
+## QCV-F001 Assertion Cannot Fail
+
+### What
+
+An assertion in a green test was inverted and the test still passed. Inversion adds `.not` when it is absent and removes `.not` when it is present. `.soft` and `.poll` stay. `toPass` is not inverted, and neither is a custom matcher. Those are info, with the reason on the assertion row.
+
+### Why
+
+A test that stays green when its assertion is negated does not go red when the feature breaks.
+
+### Bad Example
+
+```ts
+await page.goto('/');
+return;
+await expect(page).toHaveTitle('not the login page');
+```
+
+The expect is after `return`. Inverting it still does not run, so the test stays green.
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('login-button')).toBeVisible();
+```
+
+Inverting this check fails the test, so the assertion is `killed`.
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None. The check runs Playwright. It is not part of the static audit.
 
 ## Known Limits
 

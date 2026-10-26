@@ -79,10 +79,13 @@ export function statusOf(uses: readonly EvidenceRecord[]): ReportLocator['status
  */
 export function isAbsence(use: EvidenceRecord): boolean {
   if (use.phase !== 'assertion') return false;
-  if (use.optionAbsence && (use.call === 'toBeVisible' || use.call === 'toBeAttached')) return true;
-  if (use.call === 'toBeHidden' && !use.negated) return true;
-  if (use.call === 'toBeVisible' && use.negated) return true;
-  if (use.call === 'toBeAttached' && use.negated) return true;
+  if (use.call === 'toBeHidden') return !use.negated;
+  if (use.call === 'toBeVisible' || use.call === 'toBeAttached') {
+    const optionSaysAbsence = use.optionAbsence === true;
+    if (optionSaysAbsence && use.negated) return false;
+    if (optionSaysAbsence || use.negated) return true;
+    return false;
+  }
   if (use.call === 'toHaveCount' && !use.negated && use.countExpected === 0) return true;
   return false;
 }
@@ -97,14 +100,24 @@ export function neverMatched(uses: readonly EvidenceRecord[]): boolean {
 
 /**
  * `toHaveCount(n)` with the same n the page returned is the test naming that count.
- * `.first()`, `.last()`, and `.nth()` are not that kind of narrowing: the parent count is the signal.
+ * An array passed to `toHaveText` or `toContainText` is the same kind of count when its length equals the match count.
+ * `.nth(index)` with a stated index is narrowed. `.first()` and `.last()` are not: the parent count is the signal.
  */
 export function multiMatchUnaccounted(uses: readonly EvidenceRecord[]): boolean {
   const multi = uses.filter((use) => (use.matchCount !== null && use.matchCount > 1) || (use.parentCount !== null && use.parentCount > 1));
   if (multi.length === 0) return false;
   return multi.some((use) => {
-    if (use.parentCount !== null && use.parentCount > 1) return true;
-    return !(use.phase === 'assertion' && use.call === 'toHaveCount' && !use.negated && use.countExpected === use.matchCount);
+    if (use.parentCount !== null && use.parentCount > 1) {
+      if (typeof use.nthIndex === 'number') return false;
+      return true;
+    }
+    const namedCount =
+      use.phase === 'assertion' &&
+      !use.negated &&
+      use.countExpected !== null &&
+      use.countExpected === use.matchCount &&
+      (use.call === 'toHaveCount' || use.call === 'toHaveText' || use.call === 'toContainText');
+    return !namedCount;
   });
 }
 

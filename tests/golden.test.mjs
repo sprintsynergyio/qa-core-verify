@@ -198,7 +198,7 @@ test('QCV-W001 through QCV-W010 are active, and the skipped test records why it 
   const activeLocator = [...new Set(manifest.filter((entry) => entry.status === 'active' && entry.ruleId.startsWith('QCV-L')).map((entry) => entry.ruleId))].sort();
   assert.deepEqual(activeLocator, ['QCV-L002', 'QCV-L003', 'QCV-L004']);
   const pendingRules = [...new Set(manifest.filter((entry) => entry.status === 'pending').map((entry) => entry.ruleId))].sort();
-  assert.deepEqual(pendingRules, ['QCV-F001', 'QCV-F002']);
+  assert.deepEqual(pendingRules, ['QCV-F002']);
   const covered = new Set(manifest.map((entry) => entry.ruleId));
   for (const ruleId of SEEDED_RULES) assert.equal(covered.has(ruleId), true, ruleId);
   const withReason = manifest.filter((entry) => entry.reason !== undefined);

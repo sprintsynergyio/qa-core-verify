@@ -285,8 +285,8 @@ test('spec.file relative to testDir maps onto the project and is not trusted', (
   assert.equal(baseline.ok, true);
   assert.equal(baseline.passed, 1);
   assert.equal(baseline.failed, 2);
-  assert.equal(baseline.failedKeys.has('tests/b.spec.ts:6'), true);
-  assert.equal(baseline.failedKeys.has('other/c.spec.ts:4'), true);
+  assert.equal(baseline.failedKeys.has('tests/b.spec.ts:6:0'), true);
+  assert.equal(baseline.failedKeys.has('other/c.spec.ts:4:0'), true);
   assert.equal(baseline.failedKeys.has('b.spec.ts:6'), false);
   const tests = [
     inventory('clicks nothing', 'tests/b.spec.ts', { line: 6 }),
@@ -466,7 +466,7 @@ test('parseBaseline records a skipped spec by file, line, and column', () => {
   assert.equal(baseline.skippedKeys.has('s.spec.ts:9:5'), false);
   assert.equal(baseline.skippedKeys.has('s.spec.ts:14:5'), false);
   assert.equal(baseline.seenKeys.has('s.spec.ts:3:7'), true);
-  assert.equal(baseline.failedKeys.has('s.spec.ts:14'), true);
+  assert.equal(baseline.failedKeys.has('s.spec.ts:14:5'), true);
 });
 
 test('an expected test.fail is passed and an unexpected pass is a failure', () => {
@@ -497,7 +497,7 @@ test('an expected test.fail is passed and an unexpected pass is a failure', () =
   assert.equal(baseline.failed, 1);
   assert.equal(baseline.skipped, 0);
   assert.equal(baseline.failedKeys.has('fail.spec.ts:2'), false);
-  assert.equal(baseline.failedKeys.has('fail.spec.ts:8'), true);
+  assert.equal(baseline.failedKeys.has('fail.spec.ts:8:5'), true);
   const tests = [
     inventory('expected failure fails', 'fail.spec.ts', { line: 2, column: 1, evidenceColumns: [1, 5] }),
     inventory('unexpected pass', 'fail.spec.ts', { line: 8, column: 1, evidenceColumns: [1, 5] }),
@@ -562,7 +562,7 @@ test('project specs that share a test are combined before skip and failure', () 
   assert.equal(baseline.skipped, 4);
   assert.equal(baseline.skippedKeys.has('p.spec.ts:2:5'), false);
   assert.equal(baseline.failedKeys.has('p.spec.ts:2'), false);
-  assert.equal(baseline.failedKeys.has('p.spec.ts:8'), true);
+  assert.equal(baseline.failedKeys.has('p.spec.ts:8:5'), true);
   assert.equal(baseline.skippedKeys.has('p.spec.ts:8:5'), false);
   assert.equal(baseline.skippedKeys.has('p.spec.ts:14:5'), true);
   const tests = [

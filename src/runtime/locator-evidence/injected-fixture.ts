@@ -7,6 +7,7 @@ import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './eviden
 import { locatorFixtureSource } from './fixture-source.js';
 
 const FIXTURE_NAME = 'qcv-locator-fixture.ts';
+const FIXTURE_ESM_NAME = 'qcv-locator-fixture.mjs';
 const PARTS_DIR = path.join('.qa-core', 'locator-parts');
 
 export interface LocatorEvidenceRun {
@@ -104,7 +105,7 @@ function rewriteProjectImports(workspaceDir: string, fixturePath: string, config
       }
       if (isPlaywrightConfig(entry.name)) continue;
       if (custom && path.resolve(full) === custom) continue;
-      if (full === fixturePath) continue;
+      if (full === fixturePath || path.basename(full) === FIXTURE_ESM_NAME) continue;
       if (!/\.(ts|tsx|js|jsx|mjs|cjs|cts|mts)$/.test(entry.name)) continue;
       const text = fs.readFileSync(full, 'utf8');
       const next = rewritePlaywrightImports(text, specifierFor(full, fixturePath));
@@ -119,16 +120,24 @@ function rewriteProjectImports(workspaceDir: string, fixturePath: string, config
 
 export function installFixture(workspaceDir: string, configFile?: string): void {
   const fixturePath = path.join(workspaceDir, FIXTURE_NAME);
+  const esmPath = path.join(workspaceDir, FIXTURE_ESM_NAME);
   assertWorkspaceFile(workspaceDir, fixturePath);
-  fs.writeFileSync(fixturePath, locatorFixtureSource());
+  assertWorkspaceFile(workspaceDir, esmPath);
+  const source = locatorFixtureSource();
+  fs.writeFileSync(fixturePath, source);
+  fs.writeFileSync(esmPath, source);
   rewriteProjectImports(workspaceDir, fixturePath, configFile);
   fs.mkdirSync(path.join(workspaceDir, PARTS_DIR), { recursive: true });
 }
 
 function specifierFor(fromFile: string, fixturePath: string): string {
-  let relative = path.relative(path.dirname(fromFile), fixturePath).split(path.sep).join('/');
+  const extension = path.extname(fromFile).toLowerCase();
+  const esm = extension === '.mjs' || extension === '.mts';
+  const target = esm ? path.join(path.dirname(fixturePath), FIXTURE_ESM_NAME) : fixturePath;
+  let relative = path.relative(path.dirname(fromFile), target).split(path.sep).join('/');
   if (!relative.startsWith('.')) relative = `./${relative}`;
-  return relative.replace(/\.ts$/, '.js');
+  if (!esm) relative = relative.replace(/\.ts$/, '.js');
+  return relative;
 }
 
 /** Errors from the part file and from `QCV_EVIDENCE_ERROR` lines on stderr. */
@@ -205,6 +214,7 @@ function asPart(value: unknown): RawEvidencePart {
     actionSucceeded: record.actionSucceeded,
     parentCount: typeof parentCount === 'number' || parentCount === null ? parentCount : null,
     countExpected: typeof countExpected === 'number' || countExpected === null ? countExpected : null,
+    nthIndex: typeof record.nthIndex === 'number' || record.nthIndex === null ? record.nthIndex : null,
     optionAbsence: record.optionAbsence === true,
     stack: record.stack,
     testFile: record.testFile,

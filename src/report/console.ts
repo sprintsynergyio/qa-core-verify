@@ -1,4 +1,4 @@
-import type { Report, ReportSummary } from './model.js';
+import type { InversionSummary, Report, ReportSummary } from './model.js';
 import { trustNote } from './model.js';
 import { collapseNewlines, displayText, escapeControls } from './paths.js';
 
@@ -12,6 +12,12 @@ export function formatConsoleReport(report: Report, reportPaths: readonly string
       lines.push(`    Evidence: ${oneLine(finding.evidence)}`);
       lines.push(`    Fix: ${oneLine(finding.fixHint)}`);
     }
+    for (const assertion of test.assertions ?? []) {
+      const reason = assertion.reason ? `  ${oneLine(assertion.reason)}` : '';
+      lines.push(
+        `  Assertion ${assertion.outcome}  ${displayText(assertion.file)}:${assertion.line}:${assertion.column}  ${assertion.matcher}${reason}`,
+      );
+    }
     for (const locator of test.locators ?? []) {
       const counts = locator.counts.length === 0 ? 'count unknown' : `count ${locator.counts.join(', ')}`;
       const parent = locator.parentCounts.length === 0 ? '' : `  parent ${locator.parentCounts.join(', ')}`;
@@ -22,6 +28,7 @@ export function formatConsoleReport(report: Report, reportPaths: readonly string
     lines.push('');
   }
   lines.push(summaryLine(report.summary));
+  if (report.inversion) lines.push(inversionLine(report.inversion));
   lines.push(checksLine(report.checksRun));
   const note = trustNote(report.checksRun);
   if (note) lines.push(note);
@@ -43,6 +50,12 @@ export function summaryLine(summary: ReportSummary): string {
     `${countLabel(severity.warn, 'warning', 'warnings')},`,
     `${countLabel(severity.info, 'info finding', 'info findings')}.`,
   ].join(' ');
+}
+
+export function inversionLine(inversion: InversionSummary): string {
+  const outcomes = inversion.outcomes;
+  const stopped = inversion.stoppedAtLimit ? ' Stopped at limit.' : '';
+  return `Inversion: ${inversion.mutants} mutants, ${inversion.runs} runs. ${outcomes.killed} killed, ${outcomes.survived} survived, ${outcomes.timeout} timeout, ${outcomes.error} error, ${outcomes['not-run']} not-run, ${outcomes.skipped} skipped.${stopped}`;
 }
 
 export function checksLine(checksRun: readonly string[]): string {
