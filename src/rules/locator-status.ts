@@ -73,11 +73,13 @@ export function statusOf(uses: readonly EvidenceRecord[]): ReportLocator['status
 
 /**
  * Absence checks that stay green when the element is not in the page.
- * `optionAbsence` is a matcher option such as `{ visible: false }` or `{ enabled: false }`.
+ * `toBeVisible({ visible: false })` and `toBeAttached({ attached: false })` are absence checks.
+ * `toBeEnabled({ enabled: false })`, `toBeChecked({ checked: false })`, and
+ * `toBeEditable({ editable: false })` are not: a missing element fails those matchers.
  */
 export function isAbsence(use: EvidenceRecord): boolean {
   if (use.phase !== 'assertion') return false;
-  if (use.optionAbsence) return true;
+  if (use.optionAbsence && (use.call === 'toBeVisible' || use.call === 'toBeAttached')) return true;
   if (use.call === 'toBeHidden' && !use.negated) return true;
   if (use.call === 'toBeVisible' && use.negated) return true;
   if (use.call === 'toBeAttached' && use.negated) return true;
@@ -107,21 +109,36 @@ export function multiMatchUnaccounted(uses: readonly EvidenceRecord[]): boolean 
 }
 
 /**
- * Match evidence to the source test by file and test line, then column when that picks one row.
- * A `for` loop that calls `test(\`param ${n}\`)` has one inventory row and several runtime titles.
+ * Columns Playwright may report for this inventory row.
+ * When the parser did not record them, accept the source column and the character four
+ * places later, which is where a TypeScript `test()` call lands.
  */
-export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest | undefined {
+export function columnsFor(test: InventoryTest): number[] {
+  const listed = test.evidenceColumns?.filter((column) => column > 0) ?? [];
+  if (listed.length > 0) return listed;
+  return [test.column, test.column + 4].filter((column) => column > 0);
+}
+
+/**
+ * Match evidence to the source test by file and test line, then by a shared column.
+ * One `test(\`param ${n}\`)` call is one row. Two calls on that line stay apart.
+ * When several rows still fit, every one of them is returned so the finding is not dropped.
+ */
+export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest[] {
   const eligible = tests.filter((test) => {
     if (test.modifiers.includes('skip') || test.modifiers.includes('fixme')) return false;
     const file = path.relative(projectDir, test.file).split(path.sep).join('/');
     return file === group.testFile && test.line === group.testLine;
   });
   if (group.testColumn > 0) {
-    const byColumn = eligible.filter((test) => test.column === group.testColumn);
-    if (byColumn.length === 1) return byColumn[0];
+    const byColumn = eligible.filter((test) => columnsFor(test).includes(group.testColumn));
+    if (byColumn.length === 1) return byColumn;
+    if (byColumn.length > 1) return byColumn;
   }
-  if (eligible.length === 1) return eligible[0];
-  return eligible.find((test) => test.titlePath.join(' > ') === group.testTitle);
+  if (eligible.length === 1) return eligible;
+  const titled = eligible.filter((test) => test.titlePath.join(' > ') === group.testTitle);
+  if (titled.length === 1) return titled;
+  return eligible;
 }
 
 /** Runtime titles that differ from the inventory title, for the finding under that row. */

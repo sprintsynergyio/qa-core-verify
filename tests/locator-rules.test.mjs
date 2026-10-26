@@ -70,6 +70,37 @@ function ids(findings) {
   return findings.map((finding) => finding.ruleId);
 }
 
+function evidenceFile(records) {
+  return {
+    schemaVersion: 1,
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    project: { dir: 'example' },
+    playwrightExitCode: 0,
+    records,
+  };
+}
+
+function ranBaseline() {
+  return { ok: true, exitCode: 0, passed: 1, failed: 0, skipped: 0, failedKeys: new Set(), stdout: '', stderr: '' };
+}
+
+function reportFor(tests, result) {
+  return buildReport({
+    projectDir,
+    specCount: tests.length,
+    tests,
+    skippedDescribes: [],
+    findings: result.findings,
+    checksRun: ['locator'],
+    startedAt: clock,
+    finishedAt: clock,
+    baselineRed: result.baselineRed,
+    notRun: result.notRun,
+    locatorSummaries: result.summaries,
+  });
+}
+
 test('QCV-L001 flags an action or positive assertion that never matched', () => {
   const tests = [inventory('banner')];
   const missed = findNeverMatched(tests, groupRecords([use({ phase: 'action', call: 'click', actionSucceeded: false })]), projectDir);
@@ -137,9 +168,6 @@ test('QCV-L002 uses the absence message and stays quiet when the element was see
   const optionForms = [
     use({ call: 'toBeVisible', optionAbsence: true }),
     use({ call: 'toBeAttached', optionAbsence: true, line: 9 }),
-    use({ call: 'toBeEnabled', optionAbsence: true, line: 10 }),
-    use({ call: 'toBeChecked', optionAbsence: true, line: 11 }),
-    use({ call: 'toBeEditable', optionAbsence: true, line: 12 }),
     use({ call: 'toHaveCount', countExpected: 0, line: 13 }),
   ];
   for (const sample of optionForms) {
@@ -147,12 +175,10 @@ test('QCV-L002 uses the absence message and stays quiet when the element was see
     const absence = findAbsenceOnUnseen(tests, groupRecords([sample]), projectDir);
     assert.deepEqual(ids(absence), [L002_RULE_ID], sample.call);
   }
-  const enabledSeen = findAbsenceOnUnseen(
-    tests,
-    groupRecords([use({ call: 'toBeEnabled', optionAbsence: true, matchCount: 1 })]),
-    projectDir,
-  );
-  assert.deepEqual(enabledSeen, []);
+  for (const call of ['toBeEnabled', 'toBeChecked', 'toBeEditable']) {
+    const sample = use({ call, optionAbsence: true, matchCount: 0, line: 10 });
+    assert.deepEqual(ids(findAbsenceOnUnseen(tests, groupRecords([sample]), projectDir)), [], call);
+  }
 });
 
 test('QCV-L003 warns on an unaccounted multi-match and on first, last, and nth', () => {
@@ -346,6 +372,87 @@ test('parameterized runtime titles stay on the inventory row', () => {
   assert.match(report.tests[0].findings[0].evidence, /param 2/);
 });
 
+test('two tests on one line keep the finding on the call Playwright records', () => {
+  const tests = [
+    inventory('left ${n}', 'tests/p.spec.ts', { line: 9, column: 3, evidenceColumns: [3, 7] }),
+    inventory('right ${n}', 'tests/p.spec.ts', { line: 9, column: 139, evidenceColumns: [139, 143] }),
+  ];
+  const records = [1, 2].map((n) =>
+    use({
+      selector: '#left-ghost',
+      api: "locator('#left-ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/p.spec.ts',
+      testLine: 9,
+      testColumn: 7,
+      testTitle: `left ${n}`,
+      file: 'tests/p.spec.ts',
+      line: 9,
+    }),
+  );
+  const result = evaluateLocatorCheck(projectDir, tests, evidenceFile(records), ranBaseline());
+  const report = reportFor(tests, result);
+  const left = report.tests.find((entry) => entry.titlePath.join(' > ') === 'left ${n}');
+  const right = report.tests.find((entry) => entry.titlePath.join(' > ') === 'right ${n}');
+  assert.equal(left.id.endsWith('tests/p.spec.ts:9:3:left ${n}') || left.id.includes(':9:3:'), true);
+  assert.match(left.id, /:9:3:/);
+  assert.match(right.id, /:9:139:/);
+  assert.equal(left.verdict, 'review');
+  assert.equal(left.findings.some((finding) => finding.ruleId === L002_RULE_ID), true);
+  assert.match(left.findings.map((finding) => finding.evidence).join('\n'), /left-ghost/);
+  assert.equal(right.verdict, 'trusted');
+  assert.equal(right.findings.length, 0);
+});
+
+test('an unmatched column does not leave either row trusted', () => {
+  const tests = [
+    inventory('left ${n}', 'tests/p.spec.ts', { line: 9, column: 3, evidenceColumns: [3, 7] }),
+    inventory('right ${n}', 'tests/p.spec.ts', { line: 9, column: 139, evidenceColumns: [139, 143] }),
+  ];
+  const records = [
+    use({
+      selector: '#left-ghost',
+      api: "locator('#left-ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/p.spec.ts',
+      testLine: 9,
+      testColumn: 50,
+      testTitle: 'left 1',
+      file: 'tests/p.spec.ts',
+      line: 9,
+    }),
+  ];
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), ranBaseline()));
+  assert.equal(report.tests.length, 2);
+  assert.equal(report.tests.every((entry) => entry.verdict !== 'trusted'), true);
+  assert.equal(report.tests.every((entry) => entry.findings.some((finding) => finding.ruleId === L002_RULE_ID)), true);
+});
+
+test('a test missing from the baseline is not-run', () => {
+  const tests = [
+    inventory('keep me', 'tests/a.spec.ts', { line: 2, column: 1, evidenceColumns: [1, 5] }),
+    inventory('dropped by grep', 'tests/a.spec.ts', { line: 9, column: 1, evidenceColumns: [1, 5] }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 0,
+    passed: 1,
+    failed: 0,
+    skipped: 0,
+    failedKeys: new Set(),
+    seenKeys: new Set(['tests/a.spec.ts:2:5']),
+    stdout: '',
+    stderr: '',
+  };
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile([]), baseline));
+  const dropped = report.tests.find((entry) => entry.titlePath.join(' > ') === 'dropped by grep');
+  const kept = report.tests.find((entry) => entry.titlePath.join(' > ') === 'keep me');
+  assert.equal(dropped.verdict, 'not-run');
+  assert.notEqual(dropped.verdict, 'trusted');
+  assert.equal(kept.verdict, 'trusted');
+  assert.equal(report.summary.verdict['not-run'], 1);
+});
+
 test('a baseline failure drops locator findings and the locator summary', () => {
   const tests = [inventory('banner'), inventory('other', 'tests/b.spec.ts')];
   const evidence = {
@@ -507,6 +614,9 @@ test('the docs name the locator limits from the PR 05 review', () => {
   assert.match(decision, /Startup does not delete `qcv-run-\*` or `qcv-workspace-\*`/);
   assert.match(rules, /toBeVisible\(\{ visible: false \}\)/);
   assert.match(rules, /toHaveCount\(0\)/);
+  assert.equal(rules.includes('toBeEnabled({ enabled: false })'), false);
+  assert.equal(rules.includes('toBeChecked({ checked: false })'), false);
+  assert.equal(rules.includes('toBeEditable({ editable: false })'), false);
   assert.match(rules, /QCV-L001/);
   assert.match(rules, /QCV-L002/);
   assert.match(rules, /This test stays green even if this element does not exist/);

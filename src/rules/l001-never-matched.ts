@@ -18,14 +18,15 @@ export function findNeverMatched(
 ): Finding[] {
   const findings: Finding[] = [];
   for (const group of groups) {
-    const test = matchInventory(tests, projectDir, group);
-    if (!test) continue;
+    const matched = matchInventory(tests, projectDir, group);
+    if (matched.length === 0) continue;
     const actionable = group.uses.some((use) => use.phase === 'action' || isPositiveAssertion(use));
     if (!actionable || !neverMatched(group.uses)) continue;
     const site = earliest(group);
     if (!site) continue;
-    const inventoryTitle = test.titlePath.join(' > ');
-    findings.push({
+    for (const test of matched) {
+      const inventoryTitle = test.titlePath.join(' > ');
+      findings.push({
         ruleId: L001_RULE_ID,
         check: 'locator',
         severity: 'error',
@@ -38,6 +39,7 @@ export function findNeverMatched(
         fixHint: 'Run qa-core-heal to suggest a replacement locator.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
+    }
   }
   return findings;
 }

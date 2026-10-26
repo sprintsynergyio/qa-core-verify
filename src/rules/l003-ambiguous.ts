@@ -13,15 +13,16 @@ export function findAmbiguous(
 ): Finding[] {
   const findings: Finding[] = [];
   for (const group of groups) {
-    const test = matchInventory(tests, projectDir, group);
-    if (!test) continue;
+    const matched = matchInventory(tests, projectDir, group);
+    if (matched.length === 0) continue;
     if (!multiMatchUnaccounted(group.uses)) continue;
-      const site = [...group.uses].sort((left, right) => left.line - right.line || left.column - right.column)[0];
-      if (!site) continue;
-      const parts: string[] = [];
-      if (group.seenCounts.length > 0) parts.push(`Match count ${group.seenCounts.join(', ')}.`);
-      if (group.parentCounts.length > 0) parts.push(`Parent match count ${group.parentCounts.join(', ')}.`);
-      if (parts.length === 0) parts.push('More than one element matched.');
+    const site = [...group.uses].sort((left, right) => left.line - right.line || left.column - right.column)[0];
+    if (!site) continue;
+    const parts: string[] = [];
+    if (group.seenCounts.length > 0) parts.push(`Match count ${group.seenCounts.join(', ')}.`);
+    if (group.parentCounts.length > 0) parts.push(`Parent match count ${group.parentCounts.join(', ')}.`);
+    if (parts.length === 0) parts.push('More than one element matched.');
+    for (const test of matched) {
       const inventoryTitle = test.titlePath.join(' > ');
       findings.push({
         ruleId: L003_RULE_ID,
@@ -36,6 +37,7 @@ export function findAmbiguous(
         fixHint: 'Narrow the locator to one element with a role, text, or test id.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
+    }
   }
   return findings;
 }

@@ -9,7 +9,7 @@ import { findAmbiguous } from '../rules/l003-ambiguous.js';
 import { findAbsenceOnUnseen } from '../rules/l002-absence-on-unseen.js';
 import { findBrittleStyle } from '../rules/l004-brittle-style.js';
 import { findNeverMatched } from '../rules/l001-never-matched.js';
-import { groupRecords, matchInventory, ownerFor, summaryFor } from '../rules/locator-status.js';
+import { columnsFor, groupRecords, matchInventory, ownerFor, summaryFor } from '../rules/locator-status.js';
 import { ToolError } from '../tool-error.js';
 import { baselineKey, parseBaseline, type BaselineSummary } from './baseline.js';
 import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './locator-evidence/evidence.js';
@@ -100,11 +100,11 @@ export async function collectLocatorCheck(options: {
     playwrightExitCode: run.playwright.exitCode,
   });
   const evidencePath = writeEvidenceFile(evidence, options.outDir);
-  const inventory = readInventory(projectDir);
-  const { findings, baselineRed, summaries } = evaluateLocatorCheck(projectDir, inventory.tests, evidence, baseline);
+  const inventory = readInventory(projectDir, configFile);
+  const { findings, baselineRed, notRun, summaries } = evaluateLocatorCheck(projectDir, inventory.tests, evidence, baseline);
   const report = buildReport({
     projectDir,
-    configFile: findPlaywrightConfig(projectDir),
+    configFile: inventory.configFile,
     specCount: inventory.specCount,
     tests: inventory.tests,
     skippedDescribes: inventory.skippedDescribes,
@@ -113,6 +113,7 @@ export async function collectLocatorCheck(options: {
     startedAt,
     finishedAt: now(),
     baselineRed,
+    notRun,
     locatorSummaries: summaries,
   });
   return {
@@ -130,13 +131,15 @@ export async function collectLocatorCheck(options: {
   };
 }
 
-function readInventory(projectDir: string): {
+function readInventory(projectDir: string, configFile?: string): {
   specCount: number;
   tests: InventoryTest[];
   skippedDescribes: SkippedDescribe[];
+  configFile: string | undefined;
 } {
   const config = loadVerifyConfig(projectDir);
-  const discovery = discoverSpecs(projectDir, []);
+  const absoluteConfig = configFile ? path.resolve(projectDir, configFile) : undefined;
+  const discovery = discoverSpecs(projectDir, [], projectDir, absoluteConfig);
   const tests: InventoryTest[] = [];
   const skippedDescribes: SkippedDescribe[] = [];
   for (const file of discovery.files) {
@@ -144,7 +147,12 @@ function readInventory(projectDir: string): {
     tests.push(...inventory.tests);
     skippedDescribes.push(...inventory.skippedDescribes);
   }
-  return { specCount: discovery.files.length, tests, skippedDescribes };
+  return {
+    specCount: discovery.files.length,
+    tests,
+    skippedDescribes,
+    configFile: absoluteConfig ?? findPlaywrightConfig(projectDir),
+  };
 }
 
 export function evaluateLocatorCheck(
@@ -152,13 +160,23 @@ export function evaluateLocatorCheck(
   tests: readonly InventoryTest[],
   evidence: EvidenceFile,
   baseline: BaselineSummary,
-): { findings: Finding[]; baselineRed: Set<string>; summaries: Map<string, ReportLocator[]> } {
+): { findings: Finding[]; baselineRed: Set<string>; notRun: Set<string>; summaries: Map<string, ReportLocator[]> } {
   const baselineRed = new Set<string>();
+  const notRun = new Set<string>();
   const live: InventoryTest[] = [];
+  const siblings = new Map<string, number>();
   for (const test of tests) {
     const relative = path.relative(projectDir, test.file).split(path.sep).join('/');
+    const key = `${relative}:${test.line}`;
+    siblings.set(key, (siblings.get(key) ?? 0) + 1);
+  }
+  for (const test of tests) {
+    const relative = path.relative(projectDir, test.file).split(path.sep).join('/');
+    const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
     if (baseline.failedKeys.has(baselineKey(relative, test.line))) {
-      baselineRed.add(ownerIdFor('test', test.file, test.line, test.column, test.titlePath));
+      baselineRed.add(id);
+    } else if (!baselineSaw(baseline, relative, test.line, columnsFor(test), siblings.get(`${relative}:${test.line}`) ?? 1)) {
+      notRun.add(id);
     } else live.push(test);
   }
   const groups = groupRecords(evidence.records);
@@ -176,12 +194,35 @@ export function evaluateLocatorCheck(
   });
   const summaries = new Map<string, ReportLocator[]>();
   for (const group of groups) {
-    const test = matchInventory(live, projectDir, group);
-    if (!test) continue;
-    const id = ownerFor(test);
-    const list = summaries.get(id) ?? [];
-    list.push(summaryFor(group));
-    summaries.set(id, list);
+    for (const test of matchInventory(live, projectDir, group)) {
+      const id = ownerFor(test);
+      const list = summaries.get(id) ?? [];
+      list.push(summaryFor(group));
+      summaries.set(id, list);
+    }
   }
-  return { findings, baselineRed, summaries };
+  return { findings, baselineRed, notRun, summaries };
+}
+
+/** A test ran when the baseline report contains it. One row on a line accepts any column from that line. */
+function baselineSaw(
+  baseline: BaselineSummary,
+  file: string,
+  line: number,
+  columns: readonly number[],
+  siblings: number,
+): boolean {
+  if (!baseline.seenKeys) return true;
+  const prefix = `${baselineKey(file, line)}:`;
+  let hits = 0;
+  let columnHit = false;
+  for (const key of baseline.seenKeys) {
+    if (!key.startsWith(prefix)) continue;
+    hits += 1;
+    const column = Number(key.slice(prefix.length));
+    if (columns.includes(column)) columnHit = true;
+  }
+  if (hits === 0) return false;
+  if (siblings <= 1) return true;
+  return columnHit;
 }

@@ -440,7 +440,7 @@ None. The fix hint says to run qa-core-heal.
 
 ### What
 
-The locator is used only in absence assertions, and it never matched. The absence assertions are `toBeHidden`, `not.toBeVisible`, `not.toBeAttached`, `toHaveCount(0)`, `toBeVisible({ visible: false })`, `toBeAttached({ attached: false })`, `toBeEnabled({ enabled: false })`, `toBeChecked({ checked: false })`, and `toBeEditable({ editable: false })`.
+The locator is used only in absence assertions, and it never matched. The absence assertions are `toBeHidden`, `not.toBeVisible`, `not.toBeAttached`, `toHaveCount(0)`, `toBeVisible({ visible: false })`, and `toBeAttached({ attached: false })`.
 
 ### Why
 

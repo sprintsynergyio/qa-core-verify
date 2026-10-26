@@ -67,7 +67,7 @@ Each record is one locator action or one locator assertion. Records are sorted b
 - `url` drops the query string. The hash stays.
 - `selector` keeps every code point. C0, DEL, C1, U+2028, U+2029, and bidi controls are written as `\u` plus four lowercase hex digits.
 - `parentCount` is the count of the locator before `.first()`, `.last()`, or `.nth()`. It is `null` when the use was not narrowed that way.
-- `optionAbsence` is true when the matcher was called with `visible: false`, `attached: false`, `enabled: false`, `checked: false`, or `editable: false`.
-- `testColumn` is the column of the `test()` call. Iterations that share that call are one inventory row. `testTitle` on each record is the runtime title.
+- `optionAbsence` is true when `toBeVisible` was called with `visible: false`, or `toBeAttached` was called with `attached: false`.
+- `testColumn` is the column Playwright records for the `test()` call. A TypeScript `test()` call records the character after `test`. The inventory row matches that column and its own source column. Iterations that share the call are one row. `testTitle` on each record is the runtime title.
 - `actionSucceeded` is true when the action returned, and false for a failed action and for every assertion.
 - `resolvedOnAction` is derived only from `actionSucceeded`. It is true when a strict action returned, which means Playwright had resolved one element at action time. It is not a count, and it does not change when the later `matchCount` is 0.

@@ -508,9 +508,12 @@ test('option forms', async ({ page }) => {
   assert.equal(byCall('toBeAttached', 'gone').optionAbsence, true);
   assert.equal(byCall('toHaveCount', 'zero').countExpected, 0);
   assert.equal(byCall('toHaveCount', 'zero').optionAbsence, false);
-  assert.equal(byCall('toBeEnabled', '#b').optionAbsence, true);
-  assert.equal(byCall('toBeChecked', '#c').optionAbsence, true);
-  assert.equal(byCall('toBeEditable', '#e').optionAbsence, true);
+  assert.equal(byCall('toBeEnabled', '#b').optionAbsence, false);
+  assert.equal(byCall('toBeChecked', '#c').optionAbsence, false);
+  assert.equal(byCall('toBeEditable', '#e').optionAbsence, false);
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('#b')), false);
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('#c')), false);
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('#e')), false);
   assert.equal(row.locators.some((locator) => locator.selector.includes('missing') && locator.status === 'never-matched'), true);
 });
 
@@ -544,6 +547,171 @@ for (const n of [1, 2]) {
   const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
   const titles = [...new Set(evidence.records.map((record) => record.testTitle))].sort();
   assert.deepEqual(titles, ['param 1', 'param 2']);
+});
+
+test('two parameterized tests on one line keep the absence finding', (t) => {
+  const project = tempDir(t, 'qcv-twocol-');
+  const scratch = tempDir(t, 'qcv-twocol-tmp-');
+  const out = tempDir(t, 'qcv-twocol-out-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.mkdirSync(path.join(project, 'tests'));
+  const spec = `import { test, expect } from '@playwright/test';\n\n\n\n\n\n\n\nfor (const n of [1, 2]) { test(\`left \${n}\`, async ({ page }) => { await page.setContent('<p>x</p>'); await expect(page.locator('#left-ghost')).toBeHidden(); }); test(\`right \${n}\`, async ({ page }) => { await page.setContent('<p id="r">x</p>'); await expect(page.locator('#r')).toBeVisible(); }); }\n`;
+  fs.writeFileSync(path.join(project, 'tests', 'p.spec.ts'), spec);
+  const line = spec.split('\n')[8];
+  const leftColumn = line.indexOf('test(`left') + 1;
+  const rightColumn = line.indexOf('test(`right') + 1;
+  assert.equal(line.includes('for (const n of [1, 2])'), true);
+  assert.equal(leftColumn > 0, true);
+  assert.equal(rightColumn > leftColumn, true);
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 4 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const left = report.tests.find((entry) => entry.titlePath.join(' > ') === 'left ${n}');
+  const right = report.tests.find((entry) => entry.titlePath.join(' > ') === 'right ${n}');
+  assert.ok(left, report.tests.map((entry) => entry.id).join('\n'));
+  assert.ok(right);
+  assert.equal(left.id, `tests/p.spec.ts:9:${leftColumn}:left \${n}`);
+  assert.equal(right.id, `tests/p.spec.ts:9:${rightColumn}:right \${n}`);
+  assert.notEqual(leftColumn, rightColumn);
+  assert.equal(left.verdict, 'review');
+  assert.notEqual(left.verdict, 'trusted');
+  assert.equal(left.findings.some((finding) => finding.ruleId === 'QCV-L002'), true);
+  assert.match(left.findings.map((finding) => finding.evidence).join('\n'), /left-ghost/);
+  assert.match(left.findings.map((finding) => finding.evidence).join('\n'), /left 1/);
+  assert.match(left.findings.map((finding) => finding.evidence).join('\n'), /left 2/);
+  assert.equal(right.verdict, 'trusted');
+  assert.equal(right.findings.length, 0);
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
+  const ghost = evidence.records.filter((record) => record.selector.includes('left-ghost'));
+  assert.equal(ghost.length, 2);
+  assert.equal(ghost.every((record) => record.testColumn === leftColumn + 4), true);
+  assert.equal(ghost.some((record) => record.testColumn === rightColumn), false);
+  assert.equal(ghost.some((record) => record.testColumn === leftColumn), false);
+});
+
+test('grep filtered tests are not-run', (t) => {
+  const project = tempDir(t, 'qcv-grep-');
+  const scratch = tempDir(t, 'qcv-grep-tmp-');
+  const out = tempDir(t, 'qcv-grep-out-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ grep: /keep/, retries: 0, timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'sample.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('keep me', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#nope')).toBeHidden();
+});
+test('dropped by grep', async ({ page }) => {
+  await page.locator('#never').click({ timeout: 300 });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const dropped = report.tests.find((entry) => entry.titlePath.join(' > ') === 'dropped by grep');
+  const kept = report.tests.find((entry) => entry.titlePath.join(' > ') === 'keep me');
+  assert.ok(dropped);
+  assert.equal(dropped.verdict, 'not-run');
+  assert.notEqual(dropped.verdict, 'trusted');
+  assert.equal(dropped.findings.length, 0);
+  assert.equal(kept.verdict, 'review');
+  assert.equal(report.summary.verdict['not-run'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
+test('a custom config supplies the inventory and a test outside it is not trusted', (t) => {
+  const project = tempDir(t, 'qcv-custom-');
+  const scratch = tempDir(t, 'qcv-custom-tmp-');
+  const out = tempDir(t, 'qcv-custom-out-');
+  fs.mkdirSync(path.join(project, 'conf'));
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.mkdirSync(path.join(project, 'e2e'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'conf', 'custom.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: '../e2e', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'r.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('root ghost', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#root-ghost')).toBeHidden();
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'e2e', 'e.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('e2e ghost', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#e2e-ghost')).toBeHidden();
+});
+`,
+  );
+  const result = runCli(
+    [project, '--only', 'locator', '--config', 'conf/custom.config.ts', '--out', out],
+    privateEnv(scratch),
+    project,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assert.equal(report.project.configFile, 'conf/custom.config.ts');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 'e2e ghost');
+  const root = report.tests.find((entry) => entry.titlePath.join(' > ') === 'root ghost');
+  assert.ok(ghost, report.tests.map((entry) => entry.id).join('\n'));
+  assert.equal(ghost.file, 'e2e/e.spec.ts');
+  assert.equal(ghost.verdict, 'review');
+  assert.equal(ghost.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('e2e-ghost')), true);
+  assert.equal(root, undefined);
+  assert.equal(report.tests.some((entry) => entry.file === 'tests/r.spec.ts' && entry.verdict === 'trusted'), false);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
+test('enabled, checked, and editable false options are not L002', (t) => {
+  const project = tempDir(t, 'qcv-state-');
+  const scratch = tempDir(t, 'qcv-state-tmp-');
+  const out = tempDir(t, 'qcv-state-out-');
+  writeTiny(
+    project,
+    `import { test, expect } from '@playwright/test';
+test('enabled false on a missing element', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#gone')).toBeEnabled({ enabled: false, timeout: 300 });
+});
+test('checked false on a missing element', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#gone')).toBeChecked({ checked: false, timeout: 300 });
+});
+test('editable false on a missing element', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#gone')).toBeEditable({ editable: false, timeout: 300 });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 0 passed, 3 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assert.equal(report.tests.length, 3);
+  assert.equal(report.tests.every((entry) => entry.verdict === 'baseline-red'), true);
+  assert.equal(report.tests.some((entry) => entry.verdict === 'trusted'), false);
+  assert.equal(report.tests.some((entry) => entry.findings.some((finding) => finding.ruleId === 'QCV-L002')), false);
+  assert.equal(report.summary.verdict['baseline-red'], 3);
+  assert.equal(report.summary.verdict.review, 0);
 });
 
 function writeMarkedProject(project) {

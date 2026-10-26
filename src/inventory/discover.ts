@@ -62,7 +62,12 @@ interface ScanTarget {
  * Playwright config (including the object passed to defineConfig).
  * Anything else falls back to the default globs, excluding node_modules.
  */
-export function discoverSpecs(projectDir: string, specArgs: readonly string[], cwd = process.cwd()): Discovery {
+export function discoverSpecs(
+  projectDir: string,
+  specArgs: readonly string[],
+  cwd = process.cwd(),
+  configFile?: string,
+): Discovery {
   if (specArgs.length > 0) {
     return {
       files: resolveSpecArgs(projectDir, specArgs, cwd),
@@ -70,7 +75,15 @@ export function discoverSpecs(projectDir: string, specArgs: readonly string[], c
     };
   }
 
-  const configFile = findPlaywrightConfig(projectDir);
+  if (configFile) {
+    const resolved = path.resolve(configFile);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+      throw new ToolError(`Playwright config does not exist: ${configFile}`);
+    }
+    configFile = resolved;
+  } else {
+    configFile = findPlaywrightConfig(projectDir);
+  }
   if (!configFile) {
     return {
       files: collectByGlobs(projectDir, DEFAULT_SPEC_GLOBS),

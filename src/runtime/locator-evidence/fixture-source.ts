@@ -108,9 +108,6 @@ function absenceOption(name, args, negated) {
   if (!options) return false;
   if (name === 'toBeVisible') return options.visible === false;
   if (name === 'toBeAttached') return options.attached === false;
-  if (name === 'toBeEnabled') return options.enabled === false;
-  if (name === 'toBeChecked') return options.checked === false;
-  if (name === 'toBeEditable') return options.editable === false;
   return false;
 }
 

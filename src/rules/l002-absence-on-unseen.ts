@@ -19,13 +19,14 @@ export function findAbsenceOnUnseen(
 ): Finding[] {
   const findings: Finding[] = [];
   for (const group of groups) {
-    const test = matchInventory(tests, projectDir, group);
-    if (!test) continue;
+    const matched = matchInventory(tests, projectDir, group);
+    if (matched.length === 0) continue;
     if (group.uses.length === 0 || !group.uses.every((use) => isAbsence(use))) continue;
     if (!neverMatched(group.uses)) continue;
     const site = [...group.uses].sort((left, right) => left.line - right.line || left.column - right.column)[0];
     if (!site) continue;
-      const calls = [...new Set(group.uses.map((use) => (use.negated ? `not.${use.call}` : use.call)))].join(', ');
+    const calls = [...new Set(group.uses.map((use) => (use.negated ? `not.${use.call}` : use.call)))].join(', ');
+    for (const test of matched) {
       const inventoryTitle = test.titlePath.join(' > ');
       findings.push({
         ruleId: L002_RULE_ID,
@@ -44,6 +45,7 @@ export function findAbsenceOnUnseen(
         fixHint: 'Assert this locator in a state where the element is shown, then keep the absence check.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
+    }
   }
   return findings;
 }

@@ -10,6 +10,11 @@ export interface BaselineSummary {
   skipped: number;
   /** `path/file.ts:line` for a test that failed, timed out, or was interrupted. */
   failedKeys: Set<string>;
+  /**
+   * `path/file.ts:line:column` for every spec in the JSON report.
+   * The column is Playwright's. Omitted by unit fixtures that predate this field, which then count every inventory row as run.
+   */
+  seenKeys?: Set<string>;
   stdout: string;
   stderr: string;
 }
@@ -22,6 +27,7 @@ interface JsonSuite {
 interface JsonSpec {
   file?: string;
   line?: number;
+  column?: number;
   tests?: JsonTest[];
 }
 
@@ -47,6 +53,7 @@ export function parseBaseline(
   workspaceDir?: string,
 ): BaselineSummary {
   const failedKeys = new Set<string>();
+  const seenKeys = new Set<string>();
   const summary: BaselineSummary = {
     ok: false,
     exitCode,
@@ -54,6 +61,7 @@ export function parseBaseline(
     failed: 0,
     skipped: 0,
     failedKeys,
+    seenKeys,
     stdout,
     stderr,
   };
@@ -129,6 +137,10 @@ function classifySpec(spec: JsonSpec, summary: BaselineSummary, roots: ReportRoo
   const raw = typeof spec.file === 'string' ? spec.file : '';
   const file = raw ? specFileInProject(raw, roots, workspaceDir) : '';
   const line = spec.line;
+  if (file && typeof line === 'number') {
+    const column = typeof spec.column === 'number' ? spec.column : 0;
+    summary.seenKeys?.add(`${baselineKey(file, line)}:${column}`);
+  }
   for (const test of spec.tests ?? []) {
     const results = (test.results ?? []).map((result) => result.status ?? '');
     const failed = test.status === 'unexpected' || results.some((status) => status === 'failed' || status === 'timedOut' || status === 'interrupted');

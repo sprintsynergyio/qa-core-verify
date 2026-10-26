@@ -103,6 +103,8 @@ export interface ReportInput {
   finishedAt: Date;
   /** Owner ids whose tests failed before locator rules ran. */
   baselineRed?: ReadonlySet<string>;
+  /** Owner ids with no baseline result. They did not run. */
+  notRun?: ReadonlySet<string>;
   /** Owner ids the locator check evaluated, mapped to the per-locator summary. */
   locatorSummaries?: ReadonlyMap<string, ReportLocator[]>;
 }
@@ -117,6 +119,7 @@ interface Row {
   modifiers: readonly TestModifier[];
   findings: Finding[];
   baselineRed: boolean;
+  absent: boolean;
   locators?: ReportLocator[];
 }
 
@@ -155,17 +158,18 @@ export function readToolIdentity(): { name: string; version: string } {
 /**
  * `trusted` means no warn or error finding. `review` means at least one warn and no error.
  * `untrusted` means at least one error. `baseline-red` means the test failed in the baseline
- * Playwright run, before locator rules. `not-run` covers skip, fixme, and describe.skip.
- * Info findings do not lower a test that ran. Skip and fixme stay not-run even when the
- * baseline also failed.
+ * Playwright run, before locator rules. `not-run` covers skip, fixme, describe.skip, and a
+ * test the baseline report did not include. Info findings do not lower a test that ran.
+ * Skip and fixme stay not-run even when the baseline also failed.
  */
 export function verdictFor(
   kind: 'test' | 'describe',
   modifiers: readonly string[],
   findings: readonly { severity: Severity }[],
   baselineRed = false,
+  absent = false,
 ): Verdict {
-  if (kind === 'describe' || modifiers.includes('skip') || modifiers.includes('fixme')) return 'not-run';
+  if (kind === 'describe' || modifiers.includes('skip') || modifiers.includes('fixme') || absent) return 'not-run';
   if (baselineRed) return 'baseline-red';
   if (findings.some((finding) => finding.severity === 'error')) return 'untrusted';
   if (findings.some((finding) => finding.severity === 'warn')) return 'review';
@@ -229,6 +233,7 @@ function rowsFor(input: ReportInput): Row[] {
       modifiers: test.modifiers,
       findings: [],
       baselineRed: input.baselineRed?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
+      absent: input.notRun?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
     });
   }
   for (const block of input.skippedDescribes) {
@@ -242,17 +247,18 @@ function rowsFor(input: ReportInput): Row[] {
       modifiers: ['skip'],
       findings: [],
       baselineRed: false,
+      absent: false,
     });
   }
   const byOwner = new Map(rows.map((row) => [row.ownerId, row]));
   for (const finding of input.findings) {
     const row = byOwner.get(finding.ownerId);
-    if (!row || row.baselineRed) continue;
+    if (!row || row.baselineRed || row.absent) continue;
     row.findings.push(finding);
   }
   if (input.locatorSummaries) {
     for (const row of rows) {
-      if (row.baselineRed || row.kind === 'describe') continue;
+      if (row.baselineRed || row.absent || row.kind === 'describe') continue;
       if (row.modifiers.includes('skip') || row.modifiers.includes('fixme')) continue;
       row.locators = input.locatorSummaries.get(row.ownerId) ?? [];
     }
@@ -268,7 +274,7 @@ function toReportTest(row: Row, projectDir: string): ReportTest {
     file,
     line: row.line,
     titlePath,
-    verdict: verdictFor(row.kind, row.modifiers, row.findings, row.baselineRed),
+    verdict: verdictFor(row.kind, row.modifiers, row.findings, row.baselineRed, row.absent),
     findings: row.findings.map((finding) => toReportFinding(finding, projectDir)),
   };
   if (row.locators) report.locators = row.locators;
