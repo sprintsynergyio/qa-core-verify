@@ -8,7 +8,7 @@ export interface BaselineSummary {
   passed: number;
   failed: number;
   skipped: number;
-  /** `path/file.ts:line` for a test that failed, timed out, or was interrupted. */
+  /** `path/file.ts:line` for a test whose Playwright status is `unexpected`. */
   failedKeys: Set<string>;
   /**
    * `path/file.ts:line:column` for every spec in the JSON report.
@@ -16,8 +16,8 @@ export interface BaselineSummary {
    */
   seenKeys?: Set<string>;
   /**
-   * `path/file.ts:line:column` for a spec whose tests were skipped or fixme.
-   * The column is Playwright's. A passed or failed result on that spec is not recorded here.
+   * `path/file.ts:line:column` when every project skipped that test.
+   * The column is Playwright's. A project that passed or failed the same test removes the key.
    */
   skippedKeys?: Set<string>;
   stdout: string;
@@ -84,9 +84,22 @@ export function parseBaseline(
   const suites = (parsed as { suites?: unknown }).suites;
   if (!Array.isArray(suites)) return summary;
   const roots = readRoots(parsed);
-  for (const suite of suites) walkSuite(suite, summary, roots, workspaceDir);
+  const states = new Map<string, LocationState>();
+  for (const suite of suites) walkSuite(suite, summary, roots, workspaceDir, states);
+  for (const [key, state] of states) {
+    if (state.failed) summary.failedKeys.add(state.lineKey);
+    else if (state.skipped && !state.ran) summary.skippedKeys?.add(key);
+  }
   summary.ok = true;
   return summary;
+}
+
+/** One file, line, and column across every project spec that shares it. */
+interface LocationState {
+  lineKey: string;
+  failed: boolean;
+  ran: boolean;
+  skipped: boolean;
 }
 
 function readRoots(parsed: object): ReportRoots {
@@ -133,14 +146,31 @@ export function baselineKey(file: string, line: number): string {
   return `${file.split('\\').join('/')}:${line}`;
 }
 
-function walkSuite(value: unknown, summary: BaselineSummary, roots: ReportRoots, workspaceDir: string | undefined): void {
+function walkSuite(
+  value: unknown,
+  summary: BaselineSummary,
+  roots: ReportRoots,
+  workspaceDir: string | undefined,
+  states: Map<string, LocationState>,
+): void {
   if (typeof value !== 'object' || value === null) return;
   const suite = value as JsonSuite;
-  for (const spec of suite.specs ?? []) classifySpec(spec, summary, roots, workspaceDir);
-  for (const child of suite.suites ?? []) walkSuite(child, summary, roots, workspaceDir);
+  for (const spec of suite.specs ?? []) classifySpec(spec, summary, roots, workspaceDir, states);
+  for (const child of suite.suites ?? []) walkSuite(child, summary, roots, workspaceDir, states);
 }
 
-function classifySpec(spec: JsonSpec, summary: BaselineSummary, roots: ReportRoots, workspaceDir: string | undefined): void {
+/**
+ * Playwright's test `status` is `expected`, `unexpected`, `flaky`, or `skipped`.
+ * An expected `test.fail()` has status `expected` even when a result is `failed`.
+ * A result status is not used, so an expected failure is not a baseline failure.
+ */
+function classifySpec(
+  spec: JsonSpec,
+  summary: BaselineSummary,
+  roots: ReportRoots,
+  workspaceDir: string | undefined,
+  states: Map<string, LocationState>,
+): void {
   const raw = typeof spec.file === 'string' ? spec.file : '';
   const file = raw ? specFileInProject(raw, roots, workspaceDir) : '';
   const line = spec.line;
@@ -148,26 +178,32 @@ function classifySpec(spec: JsonSpec, summary: BaselineSummary, roots: ReportRoo
   if (file && typeof line === 'number') {
     summary.seenKeys?.add(`${baselineKey(file, line)}:${column}`);
   }
-  let anyFailed = false;
-  let anyPassed = false;
-  let anySkipped = false;
   for (const test of spec.tests ?? []) {
-    const results = (test.results ?? []).map((result) => result.status ?? '');
-    const failed = test.status === 'unexpected' || results.some((status) => status === 'failed' || status === 'timedOut' || status === 'interrupted');
-    const skipped = !failed && (test.status === 'skipped' || (results.length > 0 && results.every((status) => status === 'skipped')));
-    if (failed) {
-      summary.failed += 1;
-      anyFailed = true;
-      if (file && typeof line === 'number') summary.failedKeys.add(baselineKey(file, line));
-    } else if (skipped) {
-      summary.skipped += 1;
-      anySkipped = true;
-    } else {
-      summary.passed += 1;
-      anyPassed = true;
-    }
+    const kind = outcomeKind(test.status);
+    if (kind === 'failed') summary.failed += 1;
+    else if (kind === 'skipped') summary.skipped += 1;
+    else summary.passed += 1;
+    if (file && typeof line === 'number') noteLocation(states, file, line, column, kind);
   }
-  if (file && typeof line === 'number' && anySkipped && !anyFailed && !anyPassed) {
-    summary.skippedKeys?.add(`${baselineKey(file, line)}:${column}`);
-  }
+}
+
+function outcomeKind(status: string | undefined): 'failed' | 'skipped' | 'ran' {
+  if (status === 'unexpected') return 'failed';
+  if (status === 'skipped') return 'skipped';
+  return 'ran';
+}
+
+function noteLocation(
+  states: Map<string, LocationState>,
+  file: string,
+  line: number,
+  column: number,
+  kind: 'failed' | 'skipped' | 'ran',
+): void {
+  const key = `${baselineKey(file, line)}:${column}`;
+  const state = states.get(key) ?? { lineKey: baselineKey(file, line), failed: false, ran: false, skipped: false };
+  if (kind === 'failed') state.failed = true;
+  else if (kind === 'skipped') state.skipped = true;
+  else state.ran = true;
+  states.set(key, state);
 }

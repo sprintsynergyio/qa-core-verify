@@ -845,6 +845,123 @@ test.describe.serial('serial block', () => {
   assert.equal(report.summary.verdict.trusted, 0);
 });
 
+test('expected test.fail stays review and an unexpected pass is baseline-red', (t) => {
+  const project = tempDir(t, 'qcv-fail-');
+  const scratch = tempDir(t, 'qcv-fail-tmp-');
+  const out = tempDir(t, 'qcv-fail-out-');
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'fail.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('expected failure fails', async ({ page }) => {
+  test.fail();
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#ghost')).toBeHidden();
+  expect(1).toBe(2);
+});
+test.fail('expected failure by title', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#title-ghost')).toBeHidden();
+  expect(1).toBe(2);
+});
+test('unexpected pass', async () => {
+  test.fail();
+  expect(1).toBe(1);
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 2 passed, 1 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = (title) => {
+    const found = report.tests.find((entry) => entry.titlePath.join(' > ') === title);
+    assert.ok(found, title);
+    return found;
+  };
+  const body = row('expected failure fails');
+  const titled = row('expected failure by title');
+  const passed = row('unexpected pass');
+  assert.equal(body.verdict, 'review');
+  assert.notEqual(body.verdict, 'baseline-red');
+  assert.equal(body.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('ghost')), true);
+  assert.equal(titled.verdict, 'review');
+  assert.notEqual(titled.verdict, 'baseline-red');
+  assert.equal(titled.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('title-ghost')), true);
+  assert.equal(passed.verdict, 'baseline-red');
+  assert.equal(passed.findings.length, 0);
+  assert.equal(report.summary.verdict.review, 2);
+  assert.equal(report.summary.verdict['baseline-red'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
+test('a skip in one project does not hide a run or a failure in another', (t) => {
+  const project = tempDir(t, 'qcv-proj-');
+  const scratch = tempDir(t, 'qcv-proj-tmp-');
+  const out = tempDir(t, 'qcv-proj-out-');
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 10000,
+  projects: [
+    { name: 'a', testDir: './tests' },
+    { name: 'b', testDir: './tests' },
+  ],
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'p.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('skipped in a, runs in b ghost', async ({ page }, info) => {
+  test.skip(info.project.name === 'a', 'only b');
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#ghost')).toBeHidden();
+});
+test('fails in a, skipped in b', async ({ page }, info) => {
+  test.skip(info.project.name === 'b', 'only a');
+  await page.setContent('<p>x</p>');
+  await expect(page.locator('#missing')).toBeVisible({ timeout: 300 });
+});
+test('skipped in both', async ({ page }, info) => {
+  test.skip(info.project.name === 'a' || info.project.name === 'b', 'neither');
+  await page.locator('#never').click();
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 1 failed, 4 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = (title) => {
+    const found = report.tests.find((entry) => entry.titlePath.join(' > ') === title);
+    assert.ok(found, report.tests.map((entry) => entry.titlePath.join(' > ')).join('\n'));
+    return found;
+  };
+  const ran = row('skipped in a, runs in b ghost');
+  const failed = row('fails in a, skipped in b');
+  const both = row('skipped in both');
+  assert.equal(ran.verdict, 'review');
+  assert.notEqual(ran.verdict, 'not-run');
+  assert.equal(ran.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('ghost')), true);
+  assert.equal(failed.verdict, 'baseline-red');
+  assert.equal(failed.findings.length, 0);
+  assert.equal(both.verdict, 'not-run');
+  assert.notEqual(both.verdict, 'trusted');
+  assert.equal(both.findings.length, 0);
+  assert.equal(report.summary.verdict.review, 1);
+  assert.equal(report.summary.verdict['baseline-red'], 1);
+  assert.equal(report.summary.verdict['not-run'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
 test('a directory --config uses the playwright config inside it', (t) => {
   const project = tempDir(t, 'qcv-cfgp-');
   const scratch = tempDir(t, 'qcv-cfgp-tmp-');

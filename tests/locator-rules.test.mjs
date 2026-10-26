@@ -469,6 +469,133 @@ test('parseBaseline records a skipped spec by file, line, and column', () => {
   assert.equal(baseline.failedKeys.has('s.spec.ts:14'), true);
 });
 
+test('an expected test.fail is passed and an unexpected pass is a failure', () => {
+  const workspace = '/tmp/qcv-run-example/project';
+  const stdout = JSON.stringify({
+    config: { rootDir: workspace },
+    suites: [
+      {
+        specs: [
+          {
+            file: 'fail.spec.ts',
+            line: 2,
+            column: 5,
+            tests: [{ status: 'expected', expectedStatus: 'failed', results: [{ status: 'failed' }] }],
+          },
+          {
+            file: 'fail.spec.ts',
+            line: 8,
+            column: 5,
+            tests: [{ status: 'unexpected', expectedStatus: 'failed', results: [{ status: 'passed' }] }],
+          },
+        ],
+      },
+    ],
+  });
+  const baseline = parseBaseline(stdout, '', 1, workspace);
+  assert.equal(baseline.passed, 1);
+  assert.equal(baseline.failed, 1);
+  assert.equal(baseline.skipped, 0);
+  assert.equal(baseline.failedKeys.has('fail.spec.ts:2'), false);
+  assert.equal(baseline.failedKeys.has('fail.spec.ts:8'), true);
+  const tests = [
+    inventory('expected failure fails', 'fail.spec.ts', { line: 2, column: 1, evidenceColumns: [1, 5] }),
+    inventory('unexpected pass', 'fail.spec.ts', { line: 8, column: 1, evidenceColumns: [1, 5] }),
+  ];
+  const records = [
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'fail.spec.ts',
+      testLine: 2,
+      testColumn: 5,
+      testTitle: 'expected failure fails',
+      file: 'fail.spec.ts',
+      line: 4,
+    }),
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'fail.spec.ts',
+      testLine: 8,
+      testColumn: 5,
+      testTitle: 'unexpected pass',
+      file: 'fail.spec.ts',
+      line: 9,
+    }),
+  ];
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline));
+  const expected = report.tests.find((entry) => entry.titlePath.join(' > ') === 'expected failure fails');
+  const unexpected = report.tests.find((entry) => entry.titlePath.join(' > ') === 'unexpected pass');
+  assert.equal(expected.verdict, 'review');
+  assert.equal(expected.findings.some((finding) => finding.ruleId === L002_RULE_ID), true);
+  assert.equal(unexpected.verdict, 'baseline-red');
+  assert.equal(unexpected.findings.length, 0);
+});
+
+test('project specs that share a test are combined before skip and failure', () => {
+  const workspace = '/tmp/qcv-run-example/project';
+  const stdout = JSON.stringify({
+    config: { rootDir: workspace },
+    suites: [
+      {
+        specs: [
+          { file: 'p.spec.ts', line: 2, column: 5, tests: [{ status: 'skipped', results: [{ status: 'skipped' }] }] },
+          { file: 'p.spec.ts', line: 8, column: 5, tests: [{ status: 'unexpected', results: [{ status: 'failed' }] }] },
+          { file: 'p.spec.ts', line: 14, column: 5, tests: [{ status: 'skipped', results: [{ status: 'skipped' }] }] },
+        ],
+      },
+      {
+        specs: [
+          { file: 'p.spec.ts', line: 2, column: 5, tests: [{ status: 'expected', results: [{ status: 'passed' }] }] },
+          { file: 'p.spec.ts', line: 8, column: 5, tests: [{ status: 'skipped', results: [{ status: 'skipped' }] }] },
+          { file: 'p.spec.ts', line: 14, column: 5, tests: [{ status: 'skipped', results: [{ status: 'skipped' }] }] },
+        ],
+      },
+    ],
+  });
+  const baseline = parseBaseline(stdout, '', 1, workspace);
+  assert.equal(baseline.passed, 1);
+  assert.equal(baseline.failed, 1);
+  assert.equal(baseline.skipped, 4);
+  assert.equal(baseline.skippedKeys.has('p.spec.ts:2:5'), false);
+  assert.equal(baseline.failedKeys.has('p.spec.ts:2'), false);
+  assert.equal(baseline.failedKeys.has('p.spec.ts:8'), true);
+  assert.equal(baseline.skippedKeys.has('p.spec.ts:8:5'), false);
+  assert.equal(baseline.skippedKeys.has('p.spec.ts:14:5'), true);
+  const tests = [
+    inventory('skipped in a, runs in b ghost', 'p.spec.ts', { line: 2, column: 1, evidenceColumns: [1, 5] }),
+    inventory('fails in a, skipped in b', 'p.spec.ts', { line: 8, column: 1, evidenceColumns: [1, 5] }),
+    inventory('skipped in both', 'p.spec.ts', { line: 14, column: 1, evidenceColumns: [1, 5] }),
+  ];
+  const records = [
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'p.spec.ts',
+      testLine: 2,
+      testColumn: 5,
+      testTitle: 'skipped in a, runs in b ghost',
+      file: 'p.spec.ts',
+      line: 4,
+    }),
+  ];
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline));
+  const ran = report.tests.find((entry) => entry.titlePath.join(' > ') === 'skipped in a, runs in b ghost');
+  const failed = report.tests.find((entry) => entry.titlePath.join(' > ') === 'fails in a, skipped in b');
+  const both = report.tests.find((entry) => entry.titlePath.join(' > ') === 'skipped in both');
+  assert.equal(ran.verdict, 'review');
+  assert.equal(ran.findings.some((finding) => finding.ruleId === L002_RULE_ID), true);
+  assert.equal(failed.verdict, 'baseline-red');
+  assert.equal(failed.findings.length, 0);
+  assert.equal(both.verdict, 'not-run');
+  assert.notEqual(both.verdict, 'trusted');
+  assert.equal(both.findings.length, 0);
+});
+
 test('a baseline skip is not-run and the ghost finding is dropped', () => {
   const tests = [
     inventory('bare skip in body', 'tests/s.spec.ts', { line: 3, column: 1, evidenceColumns: [1, 5] }),
@@ -706,5 +833,9 @@ test('the docs name the locator limits from the PR 05 review', () => {
   assert.match(rules, /https:\/\/playwright\.dev\/docs\/locators/);
   assert.match(readme, /testInfo\.skip\(\)/);
   assert.match(readme, /test\.describe\.serial/);
+  assert.match(readme, /test\.fail\(\)/);
+  assert.match(readme, /no project ran it/);
   assert.match(schemaDoc, /baseline report marks skipped/);
+  assert.match(schemaDoc, /test\.fail\(\)/);
+  assert.match(schemaDoc, /no project ran it/);
 });
