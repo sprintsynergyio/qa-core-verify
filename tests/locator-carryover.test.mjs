@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { locatorFixtureSource } from '../dist/runtime/locator-evidence/fixture-source.js';
 import { collectLocatorEvidence, installFixture } from '../dist/runtime/locator-evidence/injected-fixture.js';
-import { playwrightSupervisorSource, sweepStaleRuns } from '../dist/runtime/workspace.js';
+import { playwrightSupervisorSource } from '../dist/runtime/workspace.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(repoRoot, 'dist/cli.js');
@@ -18,12 +18,19 @@ function tempDir(t, prefix) {
   return dir;
 }
 
-function runCli(args, env) {
+function runCli(args, env, cwd = repoRoot) {
   return spawnSync(process.execPath, [cli, ...args], {
-    cwd: repoRoot,
+    cwd,
     encoding: 'utf8',
     env,
+    timeout: 120000,
   });
+}
+
+function workspaceFrom(stderr) {
+  const line = stderr.split(/\r?\n/).find((item) => item.startsWith('Workspace: '));
+  assert.ok(line, stderr);
+  return line.slice('Workspace: '.length);
 }
 
 function writeTiny(dir, spec) {
@@ -59,23 +66,24 @@ test('the fixture re-exports @playwright/test and skips playwright config files'
   assert.equal(fs.readFileSync(path.join(project, 'sample.spec.ts'), 'utf8').includes('@playwright/test'), false);
 });
 
-test('a stale qcv-run is swept and a live owner or a kept run is not', (t) => {
-  const root = tempDir(t, 'qcv-sweep-');
-  const dead = path.join(root, 'qcv-run-dead');
-  const live = path.join(root, 'qcv-run-live');
-  const kept = path.join(root, 'qcv-run-kept');
-  const legacy = path.join(root, 'qcv-workspace-old');
-  for (const dir of [dead, live, kept, legacy]) fs.mkdirSync(dir);
-  fs.writeFileSync(path.join(dead, 'owner.pid'), '2147483646\n');
-  fs.writeFileSync(path.join(live, 'owner.pid'), `${process.pid}\n`);
-  fs.writeFileSync(path.join(legacy, 'note.txt'), 'old\n');
-  const removed = sweepStaleRuns(root);
-  assert.equal(fs.existsSync(dead), false);
-  assert.equal(fs.existsSync(legacy), false);
-  assert.equal(fs.existsSync(live), true);
-  assert.equal(fs.existsSync(kept), true);
-  assert.equal(removed.includes(dead), true);
-  assert.equal(removed.includes(legacy), true);
+test('a later run leaves a kept workspace and an unrelated qcv-workspace directory', (t) => {
+  const scratch = tempDir(t, 'qcv-nosweep-');
+  const notes = path.join(scratch, 'qcv-workspace-my-notes');
+  fs.mkdirSync(notes);
+  fs.writeFileSync(path.join(notes, 'note.txt'), 'keep me\n');
+  const project = tempDir(t, 'qcv-nosweep-proj-');
+  const out = tempDir(t, 'qcv-nosweep-out-');
+  writeTiny(project, ADD_SPEC);
+  const env = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+  const first = runCli([project, '--only', 'locator-evidence', '--keep-workspace', '--out', out], env);
+  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  const kept = workspaceFrom(first.stderr);
+  t.after(() => fs.rmSync(kept, { recursive: true, force: true }));
+  assert.equal(fs.existsSync(path.join(kept, 'project', 'sample.spec.ts')), true);
+  const second = runCli([project, '--only', 'locator-evidence', '--out', out], env);
+  assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+  assert.equal(fs.readFileSync(path.join(notes, 'note.txt'), 'utf8'), 'keep me\n');
+  assert.equal(fs.existsSync(path.join(kept, 'project', 'sample.spec.ts')), true);
 });
 
 test('the parent-death watchdog stops the child and removes the run', { skip: process.platform !== 'linux' }, async (t) => {
@@ -328,4 +336,300 @@ test('clicks nothing', async ({ page }) => {
   assert.match(result.stdout, /baseline-red/);
   assert.match(result.stdout, /This test stays green even if this element does not exist/);
   assert.match(result.stderr, /Baseline:/);
+  assert.notEqual(missed.verdict, 'trusted');
+});
+
+function privateEnv(scratch) {
+  return { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+}
+
+test('a subfolder testDir maps the red spec onto baseline-red', (t) => {
+  const project = tempDir(t, 'qcv-testdir-');
+  const scratch = tempDir(t, 'qcv-testdir-tmp-');
+  const out = tempDir(t, 'qcv-testdir-out-');
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'b.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('hidden', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#nope')).toBeHidden();
+});
+test('clicks nothing', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await page.locator('#gone').click({ timeout: 300 });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 1 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const hidden = report.tests.find((entry) => entry.titlePath.join(' > ') === 'hidden');
+  const missed = report.tests.find((entry) => entry.titlePath.join(' > ') === 'clicks nothing');
+  assert.equal(hidden.file, 'tests/b.spec.ts');
+  assert.equal(hidden.verdict, 'review');
+  assert.equal(hidden.findings.some((finding) => finding.ruleId === 'QCV-L002'), true);
+  assert.equal(hidden.findings.some((finding) => finding.ruleId === 'QCV-L001'), false);
+  assert.equal(missed.file, 'tests/b.spec.ts');
+  assert.equal(missed.verdict, 'baseline-red');
+  assert.notEqual(missed.verdict, 'trusted');
+  assert.deepEqual(missed.findings, []);
+  assert.equal(report.summary.verdict['baseline-red'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
+test('two projects with different testDirs keep the red test baseline-red', (t) => {
+  const project = tempDir(t, 'qcv-projects-');
+  const scratch = tempDir(t, 'qcv-projects-tmp-');
+  const out = tempDir(t, 'qcv-projects-out-');
+  fs.mkdirSync(path.join(project, 'tests-a'));
+  fs.mkdirSync(path.join(project, 'tests-b'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 10000,
+  testDir: './tests-a',
+  projects: [
+    { name: 'a', testDir: './tests-a' },
+    { name: 'b', testDir: './tests-b' },
+  ],
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests-a', 'green.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('hidden', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#nope')).toBeHidden();
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests-b', 'red.spec.ts'),
+    `import { test } from '@playwright/test';
+test('clicks nothing', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await page.locator('#gone').click({ timeout: 300 });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 1 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const hidden = report.tests.find((entry) => entry.file === 'tests-a/green.spec.ts');
+  const missed = report.tests.find((entry) => entry.file === 'tests-b/red.spec.ts');
+  assert.ok(hidden, JSON.stringify(report.tests.map((entry) => entry.file)));
+  assert.ok(missed);
+  assert.equal(hidden.verdict, 'review');
+  assert.equal(hidden.findings.some((finding) => finding.ruleId === 'QCV-L002'), true);
+  assert.equal(missed.verdict, 'baseline-red');
+  assert.notEqual(missed.verdict, 'trusted');
+  assert.deepEqual(missed.findings, []);
+  assert.equal(report.tests.some((entry) => entry.verdict === 'trusted'), false);
+});
+
+test('a symlink to a copied directory is not a loop', (t) => {
+  const project = tempDir(t, 'qcv-fx-');
+  const scratch = tempDir(t, 'qcv-fx-tmp-');
+  const out = tempDir(t, 'qcv-fx-out-');
+  fs.mkdirSync(path.join(project, 'fixtures'));
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(path.join(project, 'fixtures', 'data.txt'), 'ok\n');
+  fs.symlinkSync(path.join('..', 'fixtures'), path.join(project, 'tests', 'fx'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'read.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+test('reads both paths', ({}, testInfo) => {
+  const dir = path.dirname(testInfo.file);
+  const direct = fs.readFileSync(path.join(dir, '..', 'fixtures', 'data.txt'), 'utf8');
+  const via = fs.readFileSync(path.join(dir, 'fx', 'data.txt'), 'utf8');
+  expect(direct).toBe('ok\\n');
+  expect(via).toBe('ok\\n');
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.stderr.includes('Skipped symlink tests/fx (loop)'), false, result.stderr);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = report.tests.find((entry) => entry.titlePath.join(' > ') === 'reads both paths');
+  assert.ok(row);
+  assert.notEqual(row.verdict, 'baseline-red');
+  assert.equal(report.tests.some((entry) => entry.verdict === 'trusted' && report.summary.verdict['baseline-red'] > 0), false);
+});
+
+test('option absence assertions are L002 and toHaveCount(0) is L002', (t) => {
+  const project = tempDir(t, 'qcv-absence-');
+  const scratch = tempDir(t, 'qcv-absence-tmp-');
+  const out = tempDir(t, 'qcv-absence-out-');
+  writeTiny(
+    project,
+    `import { test, expect } from '@playwright/test';
+test('option forms', async ({ page }) => {
+  await page.setContent('<button id="b" disabled>x</button><input id="c" type="checkbox"><input id="e" readonly>');
+  await expect(page.locator('#missing')).toBeVisible({ visible: false });
+  await expect(page.locator('#gone')).toBeAttached({ attached: false });
+  await expect(page.locator('#zero')).toHaveCount(0);
+  await expect(page.locator('#b')).toBeEnabled({ enabled: false });
+  await expect(page.locator('#c')).toBeChecked({ checked: false });
+  await expect(page.locator('#e')).toBeEditable({ editable: false });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = report.tests.find((entry) => entry.titlePath.join(' > ') === 'option forms');
+  assert.ok(row);
+  assert.equal(row.verdict, 'review');
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L001'), false);
+  const absence = row.findings.filter((finding) => finding.ruleId === 'QCV-L002');
+  assert.equal(absence.length, 3);
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
+  const byCall = (call, selector) => evidence.records.find((record) => record.call === call && record.selector.includes(selector));
+  assert.equal(byCall('toBeVisible', 'missing').optionAbsence, true);
+  assert.equal(byCall('toBeAttached', 'gone').optionAbsence, true);
+  assert.equal(byCall('toHaveCount', 'zero').countExpected, 0);
+  assert.equal(byCall('toHaveCount', 'zero').optionAbsence, false);
+  assert.equal(byCall('toBeEnabled', '#b').optionAbsence, true);
+  assert.equal(byCall('toBeChecked', '#c').optionAbsence, true);
+  assert.equal(byCall('toBeEditable', '#e').optionAbsence, true);
+  assert.equal(row.locators.some((locator) => locator.selector.includes('missing') && locator.status === 'never-matched'), true);
+});
+
+test('parameterized titles keep the finding on the source row', (t) => {
+  const project = tempDir(t, 'qcv-param-');
+  const scratch = tempDir(t, 'qcv-param-tmp-');
+  const out = tempDir(t, 'qcv-param-out-');
+  writeTiny(
+    project,
+    `import { test, expect } from '@playwright/test';
+for (const n of [1, 2]) {
+  test(\`param \${n}\`, async ({ page }) => {
+    await page.setContent('<p>hi</p>');
+    await expect(page.locator('#nope')).toBeHidden();
+  });
+}
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 2 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assert.equal(report.tests.length, 1);
+  const row = report.tests[0];
+  assert.equal(row.titlePath.join(' > '), 'param ${n}');
+  assert.equal(row.verdict, 'review');
+  assert.notEqual(row.verdict, 'trusted');
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L002'), true);
+  assert.match(row.findings.map((finding) => finding.evidence).join('\n'), /param 1/);
+  assert.match(row.findings.map((finding) => finding.evidence).join('\n'), /param 2/);
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
+  const titles = [...new Set(evidence.records.map((record) => record.testTitle))].sort();
+  assert.deepEqual(titles, ['param 1', 'param 2']);
+});
+
+function writeMarkedProject(project) {
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: '.', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'sample.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+test('hidden', async ({ page }, testInfo) => {
+  fs.writeFileSync(path.join(path.dirname(testInfo.file), 'ran.txt'), 'yes\\n');
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#nope')).toBeHidden();
+});
+`,
+  );
+}
+
+test('an absolute --config runs the copy and not the original tree', (t) => {
+  const parent = tempDir(t, 'qcv-abs-parent-');
+  const project = path.join(parent, 'app');
+  fs.mkdirSync(project);
+  const scratch = tempDir(t, 'qcv-abs-tmp-');
+  const out = tempDir(t, 'qcv-abs-out-');
+  writeMarkedProject(project);
+  const config = path.resolve(project, 'playwright.config.ts');
+  const result = runCli(
+    [project, '--only', 'locator', '--config', config, '--keep-workspace', '--out', out],
+    privateEnv(scratch),
+    parent,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(fs.existsSync(path.join(project, 'ran.txt')), false);
+  const kept = workspaceFrom(result.stderr);
+  t.after(() => fs.rmSync(kept, { recursive: true, force: true }));
+  assert.equal(fs.readFileSync(path.join(kept, 'project', 'ran.txt'), 'utf8'), 'yes\n');
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = report.tests.find((entry) => entry.titlePath.join(' > ') === 'hidden');
+  assert.equal(row.verdict, 'review');
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
+  assert.equal(evidence.records.length > 0, true);
+});
+
+test('a cwd-relative --config runs the copy', (t) => {
+  const project = tempDir(t, 'qcv-rel-');
+  const scratch = tempDir(t, 'qcv-rel-tmp-');
+  const out = tempDir(t, 'qcv-rel-out-');
+  writeMarkedProject(project);
+  const result = runCli(
+    ['.', '--only', 'locator', '--config', './playwright.config.ts', '--keep-workspace', '--out', out],
+    privateEnv(scratch),
+    project,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(fs.existsSync(path.join(project, 'ran.txt')), false);
+  const kept = workspaceFrom(result.stderr);
+  t.after(() => fs.rmSync(kept, { recursive: true, force: true }));
+  assert.equal(fs.readFileSync(path.join(kept, 'project', 'ran.txt'), 'utf8'), 'yes\n');
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'locator-evidence.json'), 'utf8'));
+  assert.equal(evidence.records.length > 0, true);
+});
+
+test('a --config outside the project is refused and does not run Playwright', (t) => {
+  const project = tempDir(t, 'qcv-outcfg-');
+  const scratch = tempDir(t, 'qcv-outcfg-tmp-');
+  const out = tempDir(t, 'qcv-outcfg-out-');
+  writeTiny(project, ADD_SPEC);
+  const marker = path.join(scratch, 'outside-ran.txt');
+  const setup = path.join(scratch, 'outside-setup.mjs');
+  const outside = path.join(scratch, 'outside.config.mjs');
+  fs.writeFileSync(
+    setup,
+    `import fs from 'node:fs';\nexport default async function globalSetup() {\n  fs.writeFileSync(${JSON.stringify(marker)}, 'ran\\n');\n}\n`,
+  );
+  fs.writeFileSync(
+    outside,
+    `export default { testDir: ${JSON.stringify(project)}, globalSetup: ${JSON.stringify(setup)}, timeout: 10000 };\n`,
+  );
+  const result = runCli([project, '--only', 'locator', '--config', outside, '--out', out], privateEnv(scratch), project);
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /outside the project/);
+  assert.match(result.stderr, /original tree/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.existsSync(path.join(out, 'report.json')), false);
+  assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('qcv-run-')), false);
 });

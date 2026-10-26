@@ -9,7 +9,10 @@ export interface LocatorGroup {
   api: string;
   testFile: string;
   testLine: number;
+  testColumn: number;
+  /** One runtime title from the evidence. Parameterized runs keep every title in `runtimeTitles`. */
   testTitle: string;
+  runtimeTitles: string[];
   uses: EvidenceRecord[];
   status: ReportLocator['status'];
   counts: number[];
@@ -21,7 +24,7 @@ export interface LocatorGroup {
 export function groupRecords(records: readonly EvidenceRecord[]): LocatorGroup[] {
   const groups = new Map<string, EvidenceRecord[]>();
   for (const record of records) {
-    const key = [record.testFile, String(record.testLine), record.testTitle, record.selector].join('\0');
+    const key = [record.testFile, String(record.testLine), String(record.testColumn ?? 0), record.selector].join('\0');
     const list = groups.get(key);
     if (list) list.push(record);
     else groups.set(key, [record]);
@@ -34,12 +37,17 @@ export function groupRecords(records: readonly EvidenceRecord[]): LocatorGroup[]
     const counts = uniqueNumbers(uses.filter((use) => use.phase === 'assertion').map((use) => use.matchCount));
     const seenCounts = uniqueNumbers(uses.map((use) => use.matchCount));
     const parentCounts = uniqueNumbers(uses.map((use) => use.parentCount));
+    const runtimeTitles = [...new Set(uses.map((use) => use.testTitle))].sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
     out.push({
       selector: first.selector,
       api,
       testFile: first.testFile,
       testLine: first.testLine,
+      testColumn: first.testColumn ?? 0,
       testTitle: first.testTitle,
+      runtimeTitles,
       uses,
       status: statusOf(uses),
       counts,
@@ -50,6 +58,7 @@ export function groupRecords(records: readonly EvidenceRecord[]): LocatorGroup[]
   out.sort((left, right) => {
     if (left.testFile !== right.testFile) return left.testFile < right.testFile ? -1 : 1;
     if (left.testLine !== right.testLine) return left.testLine - right.testLine;
+    if (left.testColumn !== right.testColumn) return left.testColumn - right.testColumn;
     if (left.selector !== right.selector) return left.selector < right.selector ? -1 : 1;
     return left.api < right.api ? -1 : left.api > right.api ? 1 : 0;
   });
@@ -62,9 +71,13 @@ export function statusOf(uses: readonly EvidenceRecord[]): ReportLocator['status
   return 'unique';
 }
 
-/** Absence checks that stay green when the element is not in the page. */
+/**
+ * Absence checks that stay green when the element is not in the page.
+ * `optionAbsence` is a matcher option such as `{ visible: false }` or `{ enabled: false }`.
+ */
 export function isAbsence(use: EvidenceRecord): boolean {
   if (use.phase !== 'assertion') return false;
+  if (use.optionAbsence) return true;
   if (use.call === 'toBeHidden' && !use.negated) return true;
   if (use.call === 'toBeVisible' && use.negated) return true;
   if (use.call === 'toBeAttached' && use.negated) return true;
@@ -93,12 +106,30 @@ export function multiMatchUnaccounted(uses: readonly EvidenceRecord[]): boolean 
   });
 }
 
+/**
+ * Match evidence to the source test by file and test line, then column when that picks one row.
+ * A `for` loop that calls `test(\`param ${n}\`)` has one inventory row and several runtime titles.
+ */
 export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest | undefined {
-  return tests.find((test) => {
+  const eligible = tests.filter((test) => {
     if (test.modifiers.includes('skip') || test.modifiers.includes('fixme')) return false;
     const file = path.relative(projectDir, test.file).split(path.sep).join('/');
-    return file === group.testFile && test.titlePath.join(' > ') === group.testTitle;
+    return file === group.testFile && test.line === group.testLine;
   });
+  if (group.testColumn > 0) {
+    const byColumn = eligible.filter((test) => test.column === group.testColumn);
+    if (byColumn.length === 1) return byColumn[0];
+  }
+  if (eligible.length === 1) return eligible[0];
+  return eligible.find((test) => test.titlePath.join(' > ') === group.testTitle);
+}
+
+/** Runtime titles that differ from the inventory title, for the finding under that row. */
+export function withRuntimeTitles(evidence: string, group: LocatorGroup, inventoryTitle: string): string {
+  const titles = group.runtimeTitles.filter((title) => title.length > 0);
+  if (titles.length === 0) return evidence;
+  if (titles.length === 1 && titles[0] === inventoryTitle) return evidence;
+  return `${evidence} Runtime titles: ${titles.join(', ')}.`;
 }
 
 export function summaryFor(group: LocatorGroup): ReportLocator {

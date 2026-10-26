@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readToolIdentity } from '../../report/model.js';
 import { ToolError } from '../../tool-error.js';
-import { assertWorkspaceFile, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
+import { assertWorkspaceFile, configInsideProject, configPathInCopy, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
 import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './evidence.js';
 import { locatorFixtureSource } from './fixture-source.js';
 
@@ -30,18 +30,23 @@ export async function collectLocatorEvidence(options: {
   projectDir: string;
   outDir: string;
   keepWorkspace: boolean;
-  /** Project-relative config forwarded to Playwright and left unrewritten. */
+  /** Config forwarded to Playwright. Resolved from `cwd`, then mapped into the temp copy. */
   configFile?: string;
+  /** Playwright resolves `--config` from this directory. Defaults to `process.cwd()`. */
+  cwd?: string;
 }): Promise<LocatorEvidenceRun> {
   const projectDir = path.resolve(options.projectDir);
+  const configFile = options.configFile
+    ? configInsideProject(options.configFile, projectDir, options.cwd ?? process.cwd())
+    : undefined;
   const version = readPlaywrightVersion(resolveNodeModules(projectDir));
   const partsHolder: { parts: RawEvidencePart[]; errors: string[] } = { parts: [], errors: [] };
   const run = await runPlaywrightInWorkspace(projectDir, {
     keep: options.keepWorkspace,
     env: { QCV_EVIDENCE_DIR: PARTS_DIR },
-    configFile: options.configFile,
+    configFile,
     prepare: (workspaceDir) => {
-      installFixture(workspaceDir, options.configFile);
+      installFixture(workspaceDir, configFile);
     },
     after: (workspaceDir) => {
       const partsDir = path.join(workspaceDir, PARTS_DIR);
@@ -88,7 +93,7 @@ export function isPlaywrightConfig(name: string): boolean {
 }
 
 function rewriteProjectImports(workspaceDir: string, fixturePath: string, configFile?: string): void {
-  const custom = configFile ? path.resolve(workspaceDir, configFile) : undefined;
+  const custom = configFile ? configPathInCopy(workspaceDir, configFile) : undefined;
   const walk = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name === '.qa-core' || entry.name === 'test-results') continue;
@@ -188,6 +193,7 @@ function asPart(value: unknown): RawEvidencePart {
   }
   const parentCount = record.parentCount;
   const countExpected = record.countExpected;
+  const testColumn = record.testColumn;
   return {
     selector: record.selector,
     api: record.api,
@@ -199,9 +205,11 @@ function asPart(value: unknown): RawEvidencePart {
     actionSucceeded: record.actionSucceeded,
     parentCount: typeof parentCount === 'number' || parentCount === null ? parentCount : null,
     countExpected: typeof countExpected === 'number' || countExpected === null ? countExpected : null,
+    optionAbsence: record.optionAbsence === true,
     stack: record.stack,
     testFile: record.testFile,
     testLine: record.testLine,
+    testColumn: typeof testColumn === 'number' ? testColumn : undefined,
     testTitle: record.testTitle,
   };
 }

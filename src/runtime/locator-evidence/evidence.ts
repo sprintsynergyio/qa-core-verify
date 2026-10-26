@@ -22,11 +22,18 @@ export interface EvidenceRecord {
   parentCount: number | null;
   /** The number passed to `toHaveCount`, when that matcher was used. */
   countExpected: number | null;
+  /**
+   * True when the matcher option asks for the negative state:
+   * `visible: false`, `attached: false`, `enabled: false`, `checked: false`, or `editable: false`.
+   */
+  optionAbsence: boolean;
   file: string;
   line: number;
   column: number;
   testFile: string;
   testLine: number;
+  /** Column of the `test()` call. Parameterized iterations share it. Zero when the fixture did not record one. */
+  testColumn: number;
   testTitle: string;
 }
 
@@ -50,9 +57,11 @@ export interface RawEvidencePart {
   actionSucceeded?: boolean;
   parentCount?: number | null;
   countExpected?: number | null;
+  optionAbsence?: boolean;
   stack: string;
   testFile: string;
   testLine: number;
+  testColumn?: number;
   testTitle: string;
 }
 
@@ -123,6 +132,11 @@ function countOrNull(value: number | null | undefined): number | null {
   return value;
 }
 
+function positiveInt(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return 0;
+  return value;
+}
+
 /** Drop a query string so two runs of the same page compare equal. The hash stays. */
 export function evidenceUrl(value: string): string {
   const cleaned = displayText(value);
@@ -160,11 +174,13 @@ function normalizePart(part: RawEvidencePart, workspaceDir: string): EvidenceRec
     resolvedOnAction: part.actionSucceeded === true,
     parentCount: countOrNull(part.parentCount),
     countExpected: countOrNull(part.countExpected),
+    optionAbsence: part.optionAbsence === true,
     file: callFile,
     line: site?.line ?? part.testLine,
     column: site?.column ?? 1,
     testFile,
     testLine: part.testLine,
+    testColumn: positiveInt(part.testColumn),
     testTitle: displayText(part.testTitle),
   };
 }
@@ -231,6 +247,8 @@ function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
     'resolvedOnAction',
     'parentCount',
     'countExpected',
+    'optionAbsence',
+    'testColumn',
   ];
   for (const field of fields) {
     const order = compareValue(left[field], right[field]);

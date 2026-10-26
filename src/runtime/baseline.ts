@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 export interface BaselineSummary {
   /** False when Playwright did not print a JSON report. */
   ok: boolean;
@@ -27,8 +30,22 @@ interface JsonTest {
   results?: Array<{ status?: string }>;
 }
 
-/** Read the JSON reporter document. A broken config leaves stdout empty or non-JSON. */
-export function parseBaseline(stdout: string, stderr: string, exitCode: number): BaselineSummary {
+interface ReportRoots {
+  rootDir?: string;
+  testDirs: string[];
+}
+
+/**
+ * Read the JSON reporter document. A broken config leaves stdout empty or non-JSON.
+ * `spec.file` is relative to Playwright's `config.rootDir` (the config directory plus `testDir`),
+ * not to the project folder. `workspaceDir` maps that path, and each project `testDir`, back to the copy.
+ */
+export function parseBaseline(
+  stdout: string,
+  stderr: string,
+  exitCode: number,
+  workspaceDir?: string,
+): BaselineSummary {
   const failedKeys = new Set<string>();
   const summary: BaselineSummary = {
     ok: false,
@@ -51,24 +68,66 @@ export function parseBaseline(stdout: string, stderr: string, exitCode: number):
   if (typeof parsed !== 'object' || parsed === null || !('suites' in parsed)) return summary;
   const suites = (parsed as { suites?: unknown }).suites;
   if (!Array.isArray(suites)) return summary;
-  for (const suite of suites) walkSuite(suite, summary);
+  const roots = readRoots(parsed);
+  for (const suite of suites) walkSuite(suite, summary, roots, workspaceDir);
   summary.ok = true;
   return summary;
+}
+
+function readRoots(parsed: object): ReportRoots {
+  const config = (parsed as { config?: { rootDir?: unknown; projects?: unknown } }).config;
+  const rootDir = config && typeof config.rootDir === 'string' && config.rootDir.length > 0 ? config.rootDir : undefined;
+  const testDirs: string[] = [];
+  if (config && Array.isArray(config.projects)) {
+    for (const project of config.projects) {
+      if (typeof project !== 'object' || project === null) continue;
+      const testDir = (project as { testDir?: unknown }).testDir;
+      if (typeof testDir === 'string' && testDir.length > 0) testDirs.push(testDir);
+    }
+  }
+  return { rootDir, testDirs };
+}
+
+/** Project-relative spec path. `rootDir` is tried first, then each project `testDir`. */
+export function specFileInProject(file: string, roots: ReportRoots, workspaceDir: string | undefined): string {
+  const normalized = file.split('\\').join('/');
+  if (!workspaceDir) return normalized;
+  const bases: string[] = [];
+  if (roots.rootDir) bases.push(roots.rootDir);
+  for (const testDir of roots.testDirs) bases.push(testDir);
+  const inside: string[] = [];
+  const seen = new Set<string>();
+  for (const base of bases) {
+    const absolute = path.resolve(base, normalized);
+    const relative = path.relative(workspaceDir, absolute);
+    if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+    const posix = relative.split(path.sep).join('/');
+    if (seen.has(posix)) continue;
+    seen.add(posix);
+    inside.push(posix);
+  }
+  if (inside.length === 0) return normalized;
+  for (const relative of inside) {
+    if (fs.existsSync(path.join(workspaceDir, relative))) return relative;
+  }
+  const first = inside[0];
+  return first ?? normalized;
 }
 
 export function baselineKey(file: string, line: number): string {
   return `${file.split('\\').join('/')}:${line}`;
 }
 
-function walkSuite(value: unknown, summary: BaselineSummary): void {
+function walkSuite(value: unknown, summary: BaselineSummary, roots: ReportRoots, workspaceDir: string | undefined): void {
   if (typeof value !== 'object' || value === null) return;
   const suite = value as JsonSuite;
-  for (const spec of suite.specs ?? []) classifySpec(spec, summary);
-  for (const child of suite.suites ?? []) walkSuite(child, summary);
+  for (const spec of suite.specs ?? []) classifySpec(spec, summary, roots, workspaceDir);
+  for (const child of suite.suites ?? []) walkSuite(child, summary, roots, workspaceDir);
 }
 
-function classifySpec(spec: JsonSpec, summary: BaselineSummary): void {
-  const file = typeof spec.file === 'string' ? spec.file.split('\\').join('/') : '';
+function classifySpec(spec: JsonSpec, summary: BaselineSummary, roots: ReportRoots, workspaceDir: string | undefined): void {
+  const raw = typeof spec.file === 'string' ? spec.file : '';
+  const file = raw ? specFileInProject(raw, roots, workspaceDir) : '';
   const line = spec.line;
   for (const test of spec.tests ?? []) {
     const results = (test.results ?? []).map((result) => result.status ?? '');

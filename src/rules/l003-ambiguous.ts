@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { InventoryTest } from '../inventory/parse.js';
 import { ownerIdFor, type Finding } from './types.js';
-import { matchInventory, multiMatchUnaccounted, type LocatorGroup } from './locator-status.js';
+import { matchInventory, multiMatchUnaccounted, withRuntimeTitles, type LocatorGroup } from './locator-status.js';
 
 export const L003_RULE_ID = 'QCV-L003';
 
@@ -22,6 +22,7 @@ export function findAmbiguous(
       if (group.seenCounts.length > 0) parts.push(`Match count ${group.seenCounts.join(', ')}.`);
       if (group.parentCounts.length > 0) parts.push(`Parent match count ${group.parentCounts.join(', ')}.`);
       if (parts.length === 0) parts.push('More than one element matched.');
+      const inventoryTitle = test.titlePath.join(' > ');
       findings.push({
         ruleId: L003_RULE_ID,
         check: 'locator',
@@ -29,9 +30,9 @@ export function findAmbiguous(
         file: path.resolve(projectDir, site.file),
         line: site.line,
         column: site.column,
-        testTitle: test.titlePath.join(' > '),
+        testTitle: inventoryTitle,
         message: 'Locator matched more than one element.',
-        evidence: `${group.api || group.selector} ${parts.join(' ')}`,
+        evidence: withRuntimeTitles(`${group.api || group.selector} ${parts.join(' ')}`, group, inventoryTitle),
         fixHint: 'Narrow the locator to one element with a role, text, or test id.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });

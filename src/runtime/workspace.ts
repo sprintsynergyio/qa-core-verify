@@ -341,7 +341,6 @@ export async function runPlaywrightInWorkspace(
     second?: WorkspacePhase;
   },
 ): Promise<WorkspaceRun> {
-  sweepStaleRuns();
   const source = path.resolve(projectDir);
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-run-'));
   const workspaceDir = path.join(runRoot, 'project');
@@ -395,12 +394,39 @@ export async function runPlaywrightInWorkspace(
   }
 }
 
+/**
+ * Playwright resolves `--config` from the process cwd, including an absolute path.
+ * The result is a project-relative path. A file outside the project is refused so the
+ * original tree is never the suite Playwright runs.
+ */
+export function configInsideProject(configFile: string, projectDir: string, cwd: string): string {
+  const resolved = path.resolve(cwd, configFile);
+  const relative = path.relative(path.resolve(projectDir), resolved);
+  if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new ToolError(
+      `Refusing --config ${resolved} because it is outside the project. The checker will not run Playwright against the original tree.`,
+    );
+  }
+  return relative.split(path.sep).join('/');
+}
+
+/** Absolute config path inside the temp copy. An absolute original path is refused. */
+export function configPathInCopy(workspaceDir: string, configFile: string): string {
+  const resolved = path.resolve(workspaceDir, configFile);
+  const relative = path.relative(workspaceDir, resolved);
+  if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new ToolError(
+      `Refusing --config ${configFile} because it is outside the temp copy. The checker will not run Playwright against the original tree.`,
+    );
+  }
+  return resolved;
+}
+
 function commandArgs(workspaceDir: string, args: string[] | undefined, configFile: string | undefined): string[] {
   const outputDir = path.join(workspaceDir, 'test-results');
   const command = args ?? ['test', '--retries=0', '--reporter=line', `--output=${outputDir}`];
   if (!configFile) return command;
-  const resolved = path.resolve(workspaceDir, configFile);
-  return [...command, `--config=${resolved}`];
+  return [...command, `--config=${configPathInCopy(workspaceDir, configFile)}`];
 }
 
 function removeRunExtras(runRoot: string): void {
@@ -413,46 +439,6 @@ function removeRunExtras(runRoot: string): void {
   }
 }
 
-/**
- * Remove temp runs whose owner process is gone.
- * A `qcv-run-*` directory without `owner.pid` is a kept workspace and is left alone.
- * `qcv-workspace-*` is the older prefix. Those directories are removed when they have no live owner.
- */
-export function sweepStaleRuns(tmpDir = os.tmpdir()): string[] {
-  const removed: string[] = [];
-  let names: string[] = [];
-  try {
-    names = fs.readdirSync(tmpDir);
-  } catch {
-    return removed;
-  }
-  for (const name of names) {
-    const legacy = name.startsWith('qcv-workspace-');
-    const current = name.startsWith('qcv-run-');
-    if (!legacy && !current) continue;
-    const dir = path.join(tmpDir, name);
-    let pidText = '';
-    try {
-      pidText = fs.readFileSync(path.join(dir, 'owner.pid'), 'utf8').trim();
-    } catch {
-      pidText = '';
-    }
-    if (pidText) {
-      const pid = Number(pidText);
-      if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) continue;
-    } else if (current) {
-      continue;
-    }
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-      removed.push(dir);
-    } catch {
-      // Another process may be deleting it.
-    }
-  }
-  return removed;
-}
-
 interface SkippedLink {
   relativePath: string;
   reason: 'dangling' | 'loop';
@@ -460,155 +446,123 @@ interface SkippedLink {
 
 function copyProject(source: string, dest: string): string[] {
   const skipped: SkippedLink[] = [];
-  const seen = new Set<string>();
-  const walk = (from: string, to: string): void => {
-    const base = path.basename(from);
-    if (from !== source && SKIP_COPY.has(base)) return;
-    let stat: fs.Stats;
-    try {
-      stat = fs.lstatSync(from);
-    } catch (error) {
-      const code = errorCode(error);
-      if (code === 'ENOENT') return;
-      const message = error instanceof Error ? error.message : String(error);
-      throw new ToolError(`Cannot copy ${from}: ${message}`);
-    }
-    if (stat.isSymbolicLink()) {
-      let real: string;
-      try {
-        real = fs.realpathSync(from);
-      } catch (error) {
-        const code = errorCode(error);
-        const relativePath = path.relative(source, from).split(path.sep).join('/');
-        if (code === 'ENOENT' || code === 'ELOOP') {
-          skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
-          return;
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        throw new ToolError(`Cannot copy symlink ${relativePath}: ${message}`);
-      }
-      if (seen.has(real)) {
-        skipped.push({
-          relativePath: path.relative(source, from).split(path.sep).join('/'),
-          reason: 'loop',
-        });
-        return;
-      }
-      let targetStat: fs.Stats;
-      try {
-        targetStat = fs.statSync(real);
-      } catch (error) {
-        const code = errorCode(error);
-        if (code === 'ENOENT' || code === 'ELOOP') {
-          skipped.push({
-            relativePath: path.relative(source, from).split(path.sep).join('/'),
-            reason: code === 'ELOOP' ? 'loop' : 'dangling',
-          });
-          return;
-        }
-        throw new ToolError(`Cannot copy symlink ${from}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (targetStat.isDirectory()) {
-        seen.add(real);
-        copyDirectory(real, to, seen, skipped, source);
-        return;
-      }
-      if (targetStat.isFile()) {
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        fs.copyFileSync(real, to);
-        return;
-      }
-      skipped.push({
-        relativePath: path.relative(source, from).split(path.sep).join('/'),
-        reason: 'dangling',
-      });
-      return;
-    }
-    if (stat.isDirectory()) {
-      try {
-        seen.add(fs.realpathSync(from));
-      } catch {
-        seen.add(from);
-      }
-      copyDirectory(from, to, seen, skipped, source);
-      return;
-    }
-    if (stat.isFile()) {
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.copyFileSync(from, to);
-    }
-  };
-  walk(source, dest);
+  const stack: string[] = [];
+  copyTree(source, dest, stack, skipped, source);
   return skipped.map((item) => `${item.relativePath} (${item.reason})`);
 }
 
-function copyDirectory(from: string, to: string, seen: Set<string>, skipped: SkippedLink[], source: string): void {
-  fs.mkdirSync(to, { recursive: true });
-  for (const entry of fs.readdirSync(from)) {
-    if (SKIP_COPY.has(entry)) continue;
-    const child = path.join(from, entry);
-    const destChild = path.join(to, entry);
-    let stat: fs.Stats;
-    try {
-      stat = fs.lstatSync(child);
-    } catch (error) {
-      const code = errorCode(error);
-      if (code === 'ENOENT') continue;
-      throw new ToolError(`Cannot copy ${child}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (stat.isSymbolicLink()) {
-      let real = '';
-      try {
-        real = fs.realpathSync(child);
-      } catch (error) {
-        const code = errorCode(error);
-        const relativePath = path.relative(source, child).split(path.sep).join('/');
-        if (code === 'ENOENT' || code === 'ELOOP') {
-          skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
-          continue;
-        }
-        throw new ToolError(`Cannot copy symlink ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (seen.has(real)) {
-        skipped.push({
-          relativePath: path.relative(source, child).split(path.sep).join('/'),
-          reason: 'loop',
-        });
-        continue;
-      }
-      let target: fs.Stats;
-      try {
-        target = fs.statSync(real);
-      } catch (error) {
-        const code = errorCode(error);
-        if (code === 'ENOENT' || code === 'ELOOP') {
-          skipped.push({
-            relativePath: path.relative(source, child).split(path.sep).join('/'),
-            reason: code === 'ELOOP' ? 'loop' : 'dangling',
-          });
-          continue;
-        }
-        throw new ToolError(`Cannot copy symlink ${child}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (target.isDirectory()) {
-        seen.add(real);
-        copyDirectory(real, destChild, seen, skipped, source);
-      } else if (target.isFile()) {
-        fs.copyFileSync(real, destChild);
-      }
-      continue;
-    }
-    if (stat.isDirectory()) {
-      try {
-        seen.add(fs.realpathSync(child));
-      } catch {
-        seen.add(child);
-      }
-      copyDirectory(child, destChild, seen, skipped, source);
-      continue;
-    }
-    if (stat.isFile()) fs.copyFileSync(child, destChild);
+/**
+ * A directory symlink is a loop only when its target is an ancestor of the link,
+ * or that target is already on the current copy stack. A link to a directory copied
+ * somewhere else is copied again.
+ */
+function copyTree(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
+  if (from !== source && SKIP_COPY.has(path.basename(from))) return;
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(from);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT') return;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ToolError(`Cannot copy ${from}: ${message}`);
   }
+  if (stat.isSymbolicLink()) {
+    copyLink(from, to, stack, skipped, source);
+    return;
+  }
+  if (stat.isDirectory()) {
+    copyDirectory(from, to, stack, skipped, source);
+    return;
+  }
+  if (stat.isFile()) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
+}
+
+function copyDirectory(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
+  const real = realOf(from);
+  if (stack.includes(real)) {
+    skipped.push({ relativePath: projectRelative(source, from), reason: 'loop' });
+    return;
+  }
+  stack.push(real);
+  try {
+    fs.mkdirSync(to, { recursive: true });
+    for (const entry of fs.readdirSync(from)) {
+      if (SKIP_COPY.has(entry)) continue;
+      copyTree(path.join(from, entry), path.join(to, entry), stack, skipped, source);
+    }
+  } finally {
+    stack.pop();
+  }
+}
+
+function copyLink(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
+  const relativePath = projectRelative(source, from);
+  let real: string;
+  try {
+    real = fs.realpathSync(from);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT' || code === 'ELOOP') {
+      skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ToolError(`Cannot copy symlink ${relativePath}: ${message}`);
+  }
+  let target: fs.Stats;
+  try {
+    target = fs.statSync(real);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT' || code === 'ELOOP') {
+      skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+      return;
+    }
+    throw new ToolError(`Cannot copy symlink ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (target.isDirectory()) {
+    if (stack.includes(real) || linkTargetIsAncestor(from, real)) {
+      skipped.push({ relativePath, reason: 'loop' });
+      return;
+    }
+    copyDirectory(real, to, stack, skipped, source);
+    return;
+  }
+  if (target.isFile()) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(real, to);
+    return;
+  }
+  skipped.push({ relativePath, reason: 'dangling' });
+}
+
+function linkTargetIsAncestor(linkPath: string, targetReal: string): boolean {
+  let dir = path.dirname(linkPath);
+  const root = path.parse(dir).root;
+  for (let depth = 0; depth < 128; depth += 1) {
+    if (realOf(dir) === targetReal) return true;
+    if (dir === root) return false;
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+  return false;
+}
+
+function realOf(file: string): string {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return path.resolve(file);
+  }
+}
+
+function projectRelative(source: string, file: string): string {
+  return path.relative(source, file).split(path.sep).join('/');
 }
 
 function errorCode(error: unknown): string {

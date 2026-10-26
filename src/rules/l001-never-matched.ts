@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { InventoryTest } from '../inventory/parse.js';
 import { ownerIdFor, type Finding } from './types.js';
-import { isPositiveAssertion, matchInventory, neverMatched, type LocatorGroup } from './locator-status.js';
+import { isPositiveAssertion, matchInventory, neverMatched, withRuntimeTitles, type LocatorGroup } from './locator-status.js';
 
 export const L001_RULE_ID = 'QCV-L001';
 
@@ -24,6 +24,7 @@ export function findNeverMatched(
     if (!actionable || !neverMatched(group.uses)) continue;
     const site = earliest(group);
     if (!site) continue;
+    const inventoryTitle = test.titlePath.join(' > ');
     findings.push({
         ruleId: L001_RULE_ID,
         check: 'locator',
@@ -31,9 +32,9 @@ export function findNeverMatched(
         file: path.resolve(projectDir, site.file),
         line: site.line,
         column: site.column,
-        testTitle: test.titlePath.join(' > '),
+        testTitle: inventoryTitle,
         message: MESSAGE,
-        evidence: `${group.api || group.selector} matched 0 elements.`,
+        evidence: withRuntimeTitles(`${group.api || group.selector} matched 0 elements.`, group, inventoryTitle),
         fixHint: 'Run qa-core-heal to suggest a replacement locator.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });

@@ -102,7 +102,19 @@ async function readCount(locator) {
   return null;
 }
 
-async function record(store, locator, phase, call, negated, succeeded, stack, countExpected) {
+function absenceOption(name, args, negated) {
+  if (negated) return false;
+  const options = args.find((arg) => arg && typeof arg === 'object');
+  if (!options) return false;
+  if (name === 'toBeVisible') return options.visible === false;
+  if (name === 'toBeAttached') return options.attached === false;
+  if (name === 'toBeEnabled') return options.enabled === false;
+  if (name === 'toBeChecked') return options.checked === false;
+  if (name === 'toBeEditable') return options.editable === false;
+  return false;
+}
+
+async function record(store, locator, phase, call, negated, succeeded, stack, countExpected, optionAbsence) {
   pendingRecords += 1;
   try {
     const counted = await readCount(locator);
@@ -142,9 +154,11 @@ async function record(store, locator, phase, call, negated, succeeded, stack, co
       resolvedOnAction: actionSucceeded,
       parentCount,
       countExpected: typeof countExpected === 'number' ? countExpected : null,
+      optionAbsence: optionAbsence === true,
       stack,
       testFile: store.testInfo.file,
       testLine: store.testInfo.line,
+      testColumn: typeof store.testInfo.column === 'number' ? store.testInfo.column : 0,
       testTitle: store.testInfo.titlePath.slice(1).join(' > ') || store.testInfo.title,
     };
     store.bucket.push(entry);
@@ -189,10 +203,10 @@ function wrapLocator(locator, store) {
       const stack = callStack();
       try {
         const result = await original.apply(locator, args);
-        await record(store, locator, 'action', name, false, true, stack, null);
+        await record(store, locator, 'action', name, false, true, stack, null, false);
         return result;
       } catch (error) {
-        await record(store, locator, 'action', name, false, false, stack, null);
+        await record(store, locator, 'action', name, false, false, stack, null, false);
         throw error;
       }
     };
@@ -271,10 +285,11 @@ function wrapMatcherResult(result, actual, store, negated) {
       return async (...args) => {
         const stack = callStack();
         const countExpected = prop === 'toHaveCount' && typeof args[0] === 'number' ? args[0] : null;
+        const optionAbsence = absenceOption(String(prop), args, negated);
         try {
           return await value.apply(target, args);
         } finally {
-          await record(store, actual, 'assertion', String(prop), negated, false, stack, countExpected);
+          await record(store, actual, 'assertion', String(prop), negated, false, stack, countExpected, optionAbsence);
         }
       };
     },

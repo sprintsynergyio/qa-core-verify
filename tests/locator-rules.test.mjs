@@ -10,6 +10,7 @@ import { formatConsoleReport } from '../dist/report/console.js';
 import { formatHtml } from '../dist/report/html.js';
 import { reportJson } from '../dist/report/json.js';
 import { formatMarkdown } from '../dist/report/markdown.js';
+import { parseBaseline } from '../dist/runtime/baseline.js';
 import { buildEvidence } from '../dist/runtime/locator-evidence/evidence.js';
 import { evaluateLocatorCheck } from '../dist/runtime/locator-check.js';
 import { L001_RULE_ID, findNeverMatched } from '../dist/rules/l001-never-matched.js';
@@ -132,6 +133,26 @@ test('QCV-L002 uses the absence message and stays quiet when the element was see
     projectDir,
   );
   assert.deepEqual(counted, []);
+
+  const optionForms = [
+    use({ call: 'toBeVisible', optionAbsence: true }),
+    use({ call: 'toBeAttached', optionAbsence: true, line: 9 }),
+    use({ call: 'toBeEnabled', optionAbsence: true, line: 10 }),
+    use({ call: 'toBeChecked', optionAbsence: true, line: 11 }),
+    use({ call: 'toBeEditable', optionAbsence: true, line: 12 }),
+    use({ call: 'toHaveCount', countExpected: 0, line: 13 }),
+  ];
+  for (const sample of optionForms) {
+    assert.deepEqual(ids(findNeverMatched(tests, groupRecords([sample]), projectDir)), [], sample.call);
+    const absence = findAbsenceOnUnseen(tests, groupRecords([sample]), projectDir);
+    assert.deepEqual(ids(absence), [L002_RULE_ID], sample.call);
+  }
+  const enabledSeen = findAbsenceOnUnseen(
+    tests,
+    groupRecords([use({ call: 'toBeEnabled', optionAbsence: true, matchCount: 1 })]),
+    projectDir,
+  );
+  assert.deepEqual(enabledSeen, []);
 });
 
 test('QCV-L003 warns on an unaccounted multi-match and on first, last, and nth', () => {
@@ -192,6 +213,137 @@ test('QCV-L004 flags long css, xpath, nth-child, and styling classes', () => {
     findings.some((finding) => finding.file.endsWith('tests/good/shopping.spec.ts')),
     false,
   );
+});
+
+test('spec.file relative to testDir maps onto the project and is not trusted', () => {
+  const workspace = '/tmp/qcv-run-example/project';
+  const stdout = JSON.stringify({
+    config: {
+      rootDir: `${workspace}/tests`,
+      projects: [
+        { name: 'a', testDir: `${workspace}/tests` },
+        { name: 'b', testDir: `${workspace}/other` },
+      ],
+    },
+    suites: [
+      {
+        specs: [
+          {
+            file: 'b.spec.ts',
+            line: 6,
+            tests: [{ status: 'unexpected', results: [{ status: 'failed' }] }],
+          },
+        ],
+      },
+      {
+        specs: [
+          {
+            file: '../other/c.spec.ts',
+            line: 4,
+            tests: [{ status: 'unexpected', results: [{ status: 'timedOut' }] }],
+          },
+        ],
+      },
+      {
+        specs: [
+          {
+            file: 'ok.spec.ts',
+            line: 2,
+            tests: [{ status: 'expected', results: [{ status: 'passed' }] }],
+          },
+        ],
+      },
+    ],
+  });
+  const baseline = parseBaseline(stdout, '', 1, workspace);
+  assert.equal(baseline.ok, true);
+  assert.equal(baseline.passed, 1);
+  assert.equal(baseline.failed, 2);
+  assert.equal(baseline.failedKeys.has('tests/b.spec.ts:6'), true);
+  assert.equal(baseline.failedKeys.has('other/c.spec.ts:4'), true);
+  assert.equal(baseline.failedKeys.has('b.spec.ts:6'), false);
+  const tests = [
+    inventory('clicks nothing', 'tests/b.spec.ts', { line: 6 }),
+    inventory('clicks nothing too', 'other/c.spec.ts', { line: 4 }),
+    inventory('hidden', 'tests/ok.spec.ts', { line: 2 }),
+  ];
+  const evidence = {
+    schemaVersion: 1,
+    tool: { name: 'qa-core-verify', version: '0.0.1' },
+    playwrightVersion: '1.60.0',
+    project: { dir: 'example' },
+    playwrightExitCode: 1,
+    records: [use({ testFile: 'tests/b.spec.ts', testLine: 6, testTitle: 'clicks nothing', file: 'tests/b.spec.ts', line: 8 })],
+  };
+  const result = evaluateLocatorCheck(projectDir, tests, evidence, baseline);
+  assert.equal(result.baselineRed.size, 2);
+  assert.equal(result.findings.some((finding) => finding.file.endsWith('tests/b.spec.ts')), false);
+  const report = buildReport({
+    projectDir,
+    specCount: 3,
+    tests,
+    skippedDescribes: [],
+    findings: result.findings,
+    checksRun: ['locator'],
+    startedAt: clock,
+    finishedAt: clock,
+    baselineRed: result.baselineRed,
+    locatorSummaries: result.summaries,
+  });
+  const red = report.tests.filter((entry) => entry.file === 'tests/b.spec.ts' || entry.file === 'other/c.spec.ts');
+  assert.equal(red.length, 2);
+  assert.equal(red.every((entry) => entry.verdict === 'baseline-red'), true);
+  assert.equal(red.some((entry) => entry.verdict === 'trusted'), false);
+});
+
+test('parameterized runtime titles stay on the inventory row', () => {
+  const tests = [inventory('param ${n}', 'tests/a.spec.ts', { line: 3, column: 1 })];
+  const records = [1, 2].map((n) =>
+    use({
+      testTitle: `param ${n}`,
+      testLine: 3,
+      testColumn: 1,
+      call: 'toBeHidden',
+      file: 'tests/a.spec.ts',
+      line: 4,
+    }),
+  );
+  const groups = groupRecords(records);
+  assert.equal(groups.length, 1);
+  const findings = findAbsenceOnUnseen(tests, groups, projectDir);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].testTitle, 'param ${n}');
+  assert.match(findings[0].evidence, /Runtime titles: param 1, param 2/);
+  const result = evaluateLocatorCheck(
+    projectDir,
+    tests,
+    {
+      schemaVersion: 1,
+      tool: { name: 'qa-core-verify', version: '0.0.1' },
+      playwrightVersion: '1.60.0',
+      project: { dir: 'example' },
+      playwrightExitCode: 0,
+      records,
+    },
+    { ok: true, exitCode: 0, passed: 2, failed: 0, skipped: 0, failedKeys: new Set(), stdout: '', stderr: '' },
+  );
+  const report = buildReport({
+    projectDir,
+    specCount: 1,
+    tests,
+    skippedDescribes: [],
+    findings: result.findings,
+    checksRun: ['locator'],
+    startedAt: clock,
+    finishedAt: clock,
+    baselineRed: result.baselineRed,
+    locatorSummaries: result.summaries,
+  });
+  assert.equal(report.tests.length, 1);
+  assert.equal(report.tests[0].titlePath.join(' > '), 'param ${n}');
+  assert.equal(report.tests[0].verdict, 'review');
+  assert.match(report.tests[0].findings[0].evidence, /param 1/);
+  assert.match(report.tests[0].findings[0].evidence, /param 2/);
 });
 
 test('a baseline failure drops locator findings and the locator summary', () => {
@@ -351,6 +503,10 @@ test('the docs name the locator limits from the PR 05 review', () => {
   assert.match(decision, /parentCount/);
   assert.match(decision, /backslash anywhere in `TMPDIR`/);
   assert.match(decision, /no Workspace line/);
+  assert.match(decision, /ancestor of the link/);
+  assert.match(decision, /Startup does not delete `qcv-run-\*` or `qcv-workspace-\*`/);
+  assert.match(rules, /toBeVisible\(\{ visible: false \}\)/);
+  assert.match(rules, /toHaveCount\(0\)/);
   assert.match(rules, /QCV-L001/);
   assert.match(rules, /QCV-L002/);
   assert.match(rules, /This test stays green even if this element does not exist/);

@@ -14,7 +14,7 @@ import { ToolError } from '../tool-error.js';
 import { baselineKey, parseBaseline, type BaselineSummary } from './baseline.js';
 import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './locator-evidence/evidence.js';
 import { evidenceWriteErrors, installFixture, readEvidenceErrors, readParts, writeEvidenceFile } from './locator-evidence/injected-fixture.js';
-import { readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace, type PlaywrightRun } from './workspace.js';
+import { configInsideProject, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace, type PlaywrightRun } from './workspace.js';
 
 const PARTS_DIR = path.join('.qa-core', 'locator-parts');
 
@@ -49,28 +49,34 @@ export async function collectLocatorCheck(options: {
   outDir: string;
   keepWorkspace: boolean;
   configFile?: string;
+  /** Playwright resolves `--config` from this directory. Defaults to `process.cwd()`. */
+  cwd?: string;
   now?: () => Date;
 }): Promise<LocatorCheckRun> {
   const projectDir = path.resolve(options.projectDir);
+  const cwd = options.cwd ?? process.cwd();
+  const configFile = options.configFile ? configInsideProject(options.configFile, projectDir, cwd) : undefined;
   const now = options.now ?? ((): Date => new Date());
   const startedAt = now();
   const version = readPlaywrightVersion(resolveNodeModules(projectDir));
   const partsHolder: { parts: RawEvidencePart[]; errors: string[] } = { parts: [], errors: [] };
   let baselineRun: PlaywrightRun | undefined;
+  let baselineSummary: BaselineSummary | undefined;
   const run = await runPlaywrightInWorkspace(projectDir, {
     keep: options.keepWorkspace,
-    configFile: options.configFile,
+    configFile,
     playwrightArgs: ['test', '--retries=0', '--reporter=json', '--output=test-results-baseline'],
-    after: (_workspaceDir, playwright) => {
+    after: (workspaceDir, playwright) => {
       baselineRun = playwright;
-      const parsed = parseBaseline(playwright.stdout, playwright.stderr, playwright.exitCode);
+      const parsed = parseBaseline(playwright.stdout, playwright.stderr, playwright.exitCode, workspaceDir);
       if (!parsed.ok) throw new BaselineStartError(playwright);
+      baselineSummary = parsed;
     },
     second: {
       env: { QCV_EVIDENCE_DIR: PARTS_DIR },
       playwrightArgs: ['test', '--retries=0', '--reporter=line', '--output=test-results'],
       prepare: (workspaceDir) => {
-        installFixture(workspaceDir, options.configFile);
+        installFixture(workspaceDir, configFile);
       },
       after: (workspaceDir) => {
         const partsDir = path.join(workspaceDir, PARTS_DIR);
@@ -79,12 +85,12 @@ export async function collectLocatorCheck(options: {
       },
     },
   });
-  if (!baselineRun) throw new ToolError('Baseline Playwright run did not start.');
+  if (!baselineRun || !baselineSummary) throw new ToolError('Baseline Playwright run did not start.');
   const logged = evidenceWriteErrors(partsHolder.errors, run.playwright.stderr);
   if (logged.length > 0) {
     throw new ToolError(`Locator evidence write failed: ${logged.join('; ')}`);
   }
-  const baseline = parseBaseline(baselineRun.stdout, baselineRun.stderr, baselineRun.exitCode);
+  const baseline = baselineSummary;
   const evidence = buildEvidence({
     parts: partsHolder.parts,
     workspaceDir: run.workspaceDir,

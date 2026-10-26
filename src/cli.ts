@@ -245,6 +245,7 @@ async function runLocatorEvidence(options: CliOptions, cwd: string): Promise<num
       outDir,
       keepWorkspace: options.keepWorkspace,
       configFile: options.configFile,
+      cwd,
     });
     for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);
     const shown = consoleReportPaths([result.evidencePath], projectDir, options.outDir, cwd);
@@ -294,6 +295,7 @@ async function runLocatorCheck(options: CliOptions, cwd: string, now: () => Date
       outDir,
       keepWorkspace: options.keepWorkspace,
       configFile: options.configFile,
+      cwd,
       now,
     });
     for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);

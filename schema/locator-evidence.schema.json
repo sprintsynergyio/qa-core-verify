@@ -49,11 +49,13 @@
         "resolvedOnAction",
         "parentCount",
         "countExpected",
+        "optionAbsence",
         "file",
         "line",
         "column",
         "testFile",
         "testLine",
+        "testColumn",
         "testTitle"
       ],
       "properties": {
@@ -68,11 +70,13 @@
         "resolvedOnAction": { "type": "boolean" },
         "parentCount": { "type": ["integer", "null"], "minimum": 0 },
         "countExpected": { "type": ["integer", "null"], "minimum": 0 },
+        "optionAbsence": { "type": "boolean" },
         "file": { "type": "string", "minLength": 1 },
         "line": { "type": "integer", "minimum": 1 },
         "column": { "type": "integer", "minimum": 1 },
         "testFile": { "type": "string", "minLength": 1 },
         "testLine": { "type": "integer", "minimum": 1 },
+        "testColumn": { "type": "integer", "minimum": 0 },
         "testTitle": { "type": "string" }
       }
     }

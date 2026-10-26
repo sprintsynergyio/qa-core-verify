@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { InventoryTest } from '../inventory/parse.js';
 import { ownerIdFor, type Finding } from './types.js';
-import { isAbsence, matchInventory, neverMatched, type LocatorGroup } from './locator-status.js';
+import { isAbsence, matchInventory, neverMatched, withRuntimeTitles, type LocatorGroup } from './locator-status.js';
 
 export const L002_RULE_ID = 'QCV-L002';
 
@@ -26,6 +26,7 @@ export function findAbsenceOnUnseen(
     const site = [...group.uses].sort((left, right) => left.line - right.line || left.column - right.column)[0];
     if (!site) continue;
       const calls = [...new Set(group.uses.map((use) => (use.negated ? `not.${use.call}` : use.call)))].join(', ');
+      const inventoryTitle = test.titlePath.join(' > ');
       findings.push({
         ruleId: L002_RULE_ID,
         check: 'locator',
@@ -33,9 +34,13 @@ export function findAbsenceOnUnseen(
         file: path.resolve(projectDir, site.file),
         line: site.line,
         column: site.column,
-        testTitle: test.titlePath.join(' > '),
+        testTitle: inventoryTitle,
         message: L002_MESSAGE,
-        evidence: `${group.api || group.selector} was only used in ${calls} and matched 0 elements.`,
+        evidence: withRuntimeTitles(
+          `${group.api || group.selector} was only used in ${calls} and matched 0 elements.`,
+          group,
+          inventoryTitle,
+        ),
         fixHint: 'Assert this locator in a state where the element is shown, then keep the absence check.',
         ownerId: ownerIdFor('test', test.file, test.line, test.column, test.titlePath),
       });
