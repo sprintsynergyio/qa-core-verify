@@ -173,9 +173,13 @@ export function evaluateLocatorCheck(
   for (const test of tests) {
     const relative = path.relative(projectDir, test.file).split(path.sep).join('/');
     const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
+    const columns = columnsFor(test);
+    const siblingsOnLine = siblings.get(`${relative}:${test.line}`) ?? 1;
     if (baseline.failedKeys.has(baselineKey(relative, test.line))) {
       baselineRed.add(id);
-    } else if (!baselineSaw(baseline, relative, test.line, columnsFor(test), siblings.get(`${relative}:${test.line}`) ?? 1)) {
+    } else if (baselineSkipped(baseline, relative, test.line, columns, siblingsOnLine)) {
+      notRun.add(id);
+    } else if (!baselineSaw(baseline, relative, test.line, columns, siblingsOnLine)) {
       notRun.add(id);
     } else live.push(test);
   }
@@ -213,10 +217,32 @@ function baselineSaw(
   siblings: number,
 ): boolean {
   if (!baseline.seenKeys) return true;
+  return keyHits(baseline.seenKeys, file, line, columns, siblings);
+}
+
+/** A runtime skip or fixme, including a serial test that did not run. Missing keys mean the fixture did not record skips. */
+function baselineSkipped(
+  baseline: BaselineSummary,
+  file: string,
+  line: number,
+  columns: readonly number[],
+  siblings: number,
+): boolean {
+  if (!baseline.skippedKeys) return false;
+  return keyHits(baseline.skippedKeys, file, line, columns, siblings);
+}
+
+function keyHits(
+  keys: Set<string>,
+  file: string,
+  line: number,
+  columns: readonly number[],
+  siblings: number,
+): boolean {
   const prefix = `${baselineKey(file, line)}:`;
   let hits = 0;
   let columnHit = false;
-  for (const key of baseline.seenKeys) {
+  for (const key of keys) {
     if (!key.startsWith(prefix)) continue;
     hits += 1;
     const column = Number(key.slice(prefix.length));

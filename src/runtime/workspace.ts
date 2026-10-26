@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePlaywrightConfigFile } from '../inventory/discover.js';
 import { ToolError } from '../tool-error.js';
 
 const SKIP_COPY = new Set(['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git']);
@@ -396,18 +397,27 @@ export async function runPlaywrightInWorkspace(
 
 /**
  * Playwright resolves `--config` from the process cwd, including an absolute path.
- * The result is a project-relative path. A file outside the project is refused so the
- * original tree is never the suite Playwright runs.
+ * A directory is the `playwright.config.*` inside it. The result is a project-relative
+ * file path. A missing config is refused here, before the temp copy. A file outside
+ * the project is refused so the original tree is never the suite Playwright runs.
  */
 export function configInsideProject(configFile: string, projectDir: string, cwd: string): string {
+  const project = path.resolve(projectDir);
   const resolved = path.resolve(cwd, configFile);
-  const relative = path.relative(path.resolve(projectDir), resolved);
+  const relative = path.relative(project, resolved);
   if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new ToolError(
       `Refusing --config ${resolved} because it is outside the project. The checker will not run Playwright against the original tree.`,
     );
   }
-  return relative.split(path.sep).join('/');
+  const config = resolvePlaywrightConfigFile(resolved);
+  const configRelative = path.relative(project, config);
+  if (configRelative.length === 0 || configRelative.startsWith('..') || path.isAbsolute(configRelative)) {
+    throw new ToolError(
+      `Refusing --config ${config} because it is outside the project. The checker will not run Playwright against the original tree.`,
+    );
+  }
+  return configRelative.split(path.sep).join('/');
 }
 
 /** Absolute config path inside the temp copy. An absolute original path is refused. */

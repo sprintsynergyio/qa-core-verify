@@ -45,7 +45,7 @@ Each row gets one verdict:
 - `untrusted` when the row has at least one error finding. QCV-L001 is an error when a locator used in an action or a positive assertion matched 0 elements in every use.
 - `baseline-red` when `--only locator` saw that test fail in the baseline Playwright run. That row has no locator findings. The static checker does not assign `baseline-red`, so that count stays 0 on a static run.
 
-`not-run` is for rows the checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings, and even when the baseline also failed. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
+`not-run` is for rows the checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings, and even when the baseline also failed. A test the baseline report marks skipped is `not-run` too. That includes `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a later test in `test.describe.serial` after a failure. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
 
 ## Locators
 

@@ -158,8 +158,9 @@ export function readToolIdentity(): { name: string; version: string } {
 /**
  * `trusted` means no warn or error finding. `review` means at least one warn and no error.
  * `untrusted` means at least one error. `baseline-red` means the test failed in the baseline
- * Playwright run, before locator rules. `not-run` covers skip, fixme, describe.skip, and a
- * test the baseline report did not include. Info findings do not lower a test that ran.
+ * Playwright run, before locator rules. `not-run` covers skip, fixme, describe.skip, a
+ * test the baseline report did not include, and a test the baseline report marked skipped.
+ * Info findings do not lower a test that ran.
  * Skip and fixme stay not-run even when the baseline also failed.
  */
 export function verdictFor(

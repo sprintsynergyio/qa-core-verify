@@ -428,6 +428,88 @@ test('an unmatched column does not leave either row trusted', () => {
   assert.equal(report.tests.every((entry) => entry.findings.some((finding) => finding.ruleId === L002_RULE_ID)), true);
 });
 
+test('parseBaseline records a skipped spec by file, line, and column', () => {
+  const workspace = '/tmp/qcv-run-example/project';
+  const stdout = JSON.stringify({
+    config: { rootDir: workspace },
+    suites: [
+      {
+        specs: [
+          {
+            file: 's.spec.ts',
+            line: 3,
+            column: 7,
+            tests: [{ status: 'skipped', results: [{ status: 'skipped' }] }],
+          },
+          {
+            file: 's.spec.ts',
+            line: 9,
+            column: 5,
+            tests: [{ status: 'expected', results: [{ status: 'passed' }] }],
+          },
+          {
+            file: 's.spec.ts',
+            line: 14,
+            column: 5,
+            tests: [{ status: 'unexpected', results: [{ status: 'failed' }] }],
+          },
+        ],
+      },
+    ],
+  });
+  const baseline = parseBaseline(stdout, '', 1, workspace);
+  assert.equal(baseline.ok, true);
+  assert.equal(baseline.passed, 1);
+  assert.equal(baseline.failed, 1);
+  assert.equal(baseline.skipped, 1);
+  assert.equal(baseline.skippedKeys.has('s.spec.ts:3:7'), true);
+  assert.equal(baseline.skippedKeys.has('s.spec.ts:9:5'), false);
+  assert.equal(baseline.skippedKeys.has('s.spec.ts:14:5'), false);
+  assert.equal(baseline.seenKeys.has('s.spec.ts:3:7'), true);
+  assert.equal(baseline.failedKeys.has('s.spec.ts:14'), true);
+});
+
+test('a baseline skip is not-run and the ghost finding is dropped', () => {
+  const tests = [
+    inventory('bare skip in body', 'tests/s.spec.ts', { line: 3, column: 1, evidenceColumns: [1, 5] }),
+    inventory('ran', 'tests/s.spec.ts', { line: 9, column: 1, evidenceColumns: [1, 5] }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 0,
+    passed: 1,
+    failed: 0,
+    skipped: 1,
+    failedKeys: new Set(),
+    seenKeys: new Set(['tests/s.spec.ts:3:7', 'tests/s.spec.ts:9:5']),
+    skippedKeys: new Set(['tests/s.spec.ts:3:7']),
+    stdout: '',
+    stderr: '',
+  };
+  const records = [
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/s.spec.ts',
+      testLine: 3,
+      testColumn: 7,
+      testTitle: 'bare skip in body',
+      file: 'tests/s.spec.ts',
+      line: 5,
+    }),
+  ];
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline));
+  const skipped = report.tests.find((entry) => entry.titlePath.join(' > ') === 'bare skip in body');
+  const ran = report.tests.find((entry) => entry.titlePath.join(' > ') === 'ran');
+  assert.equal(skipped.verdict, 'not-run');
+  assert.notEqual(skipped.verdict, 'trusted');
+  assert.equal(skipped.findings.length, 0);
+  assert.equal(ran.verdict, 'trusted');
+  assert.equal(report.summary.verdict['not-run'], 1);
+  assert.equal(report.summary.verdict.trusted, 1);
+});
+
 test('a test missing from the baseline is not-run', () => {
   const tests = [
     inventory('keep me', 'tests/a.spec.ts', { line: 2, column: 1, evidenceColumns: [1, 5] }),
@@ -600,6 +682,7 @@ test('the docs name the locator limits from the PR 05 review', () => {
   const decision = fs.readFileSync(path.join(repoRoot, 'docs/decisions/0001-locator-evidence.md'), 'utf8');
   const schemaDoc = fs.readFileSync(path.join(repoRoot, 'docs/report-schema.md'), 'utf8');
   const rules = fs.readFileSync(path.join(repoRoot, 'docs/rules.md'), 'utf8');
+  const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
   assert.equal(schemaDoc.includes('In the plan'), false);
   assert.match(decision, /frameLocator/);
   assert.match(decision, /context\.newPage/);
@@ -621,4 +704,7 @@ test('the docs name the locator limits from the PR 05 review', () => {
   assert.match(rules, /QCV-L002/);
   assert.match(rules, /This test stays green even if this element does not exist/);
   assert.match(rules, /https:\/\/playwright\.dev\/docs\/locators/);
+  assert.match(readme, /testInfo\.skip\(\)/);
+  assert.match(readme, /test\.describe\.serial/);
+  assert.match(schemaDoc, /baseline report marks skipped/);
 });

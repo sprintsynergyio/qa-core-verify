@@ -777,6 +777,147 @@ test('a cwd-relative --config runs the copy', (t) => {
   assert.equal(evidence.records.length > 0, true);
 });
 
+test('runtime skips and fixmes are not-run', (t) => {
+  const project = tempDir(t, 'qcv-skiprun-');
+  const scratch = tempDir(t, 'qcv-skiprun-tmp-');
+  const out = tempDir(t, 'qcv-skiprun-out-');
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 's.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('bare skip in body', async ({ page }) => {
+  test.skip();
+  await page.locator('#never').click();
+});
+test('fixme in body', async ({ page }) => {
+  test.fixme(true, 'later');
+  await page.locator('#never').click();
+});
+test('skip with ghost after', async ({ page }) => {
+  test.skip(true, 'r');
+  await expect(page.locator('#ghost')).toBeHidden();
+});
+test('info skip', async ({ page }, testInfo) => {
+  testInfo.skip();
+  await page.locator('#never').click();
+});
+test('chromium skip', async ({ page, browserName }) => {
+  test.skip(browserName === 'chromium');
+  await page.locator('#never').click();
+});
+test.describe.serial('serial block', () => {
+  test('serial first fails', async ({ page }) => {
+    await page.setContent('<p>hi</p>');
+    await expect(page.locator('#missing')).toBeVisible({ timeout: 300 });
+  });
+  test('serial second ghost', async ({ page }) => {
+    await expect(page.locator('#serial-ghost')).toBeHidden();
+  });
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 0 passed, 1 failed, 6 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const verdict = (title) => {
+    const row = report.tests.find((entry) => entry.titlePath.join(' > ') === title);
+    assert.ok(row, title);
+    return row;
+  };
+  for (const title of ['bare skip in body', 'fixme in body', 'skip with ghost after', 'info skip', 'chromium skip', 'serial block > serial second ghost']) {
+    const row = verdict(title);
+    assert.equal(row.verdict, 'not-run', title);
+    assert.notEqual(row.verdict, 'trusted', title);
+    assert.equal(row.findings.length, 0, title);
+  }
+  const failed = verdict('serial block > serial first fails');
+  assert.equal(failed.verdict, 'baseline-red');
+  assert.equal(failed.findings.length, 0);
+  assert.equal(report.tests.some((entry) => entry.verdict === 'trusted'), false);
+  assert.equal(report.tests.some((entry) => entry.findings.some((finding) => finding.ruleId === 'QCV-L002')), false);
+  assert.equal(report.summary.verdict['not-run'], 6);
+  assert.equal(report.summary.verdict['baseline-red'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
+test('a directory --config uses the playwright config inside it', (t) => {
+  const project = tempDir(t, 'qcv-cfgp-');
+  const scratch = tempDir(t, 'qcv-cfgp-tmp-');
+  const out = tempDir(t, 'qcv-cfgp-out-');
+  fs.mkdirSync(path.join(project, 'conf2'));
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'conf2', 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 0, testDir: '../tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'g.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('dir ghost', async ({ page }) => {
+  await page.setContent('<p>hi</p>');
+  await expect(page.locator('#dir-ghost')).toBeHidden();
+});
+`,
+  );
+  const result = runCli(['.', '--only', 'locator', '--config', 'conf2', '--out', out], privateEnv(scratch), project);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 1 passed, 0 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assert.equal(report.project.configFile, 'conf2/playwright.config.ts');
+  const row = report.tests.find((entry) => entry.titlePath.join(' > ') === 'dir ghost');
+  assert.ok(row);
+  assert.equal(row.file, 'tests/g.spec.ts');
+  assert.equal(row.verdict, 'review');
+  assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-L002' && finding.evidence.includes('dir-ghost')), true);
+});
+
+test('a bad --config is refused before the copy is made', (t) => {
+  const project = tempDir(t, 'qcv-badcfg-');
+  const scratch = tempDir(t, 'qcv-badcfg-tmp-');
+  const out = tempDir(t, 'qcv-badcfg-out-');
+  const marker = path.join(scratch, 'suite-ran.txt');
+  writeTiny(
+    project,
+    `import { test } from '@playwright/test';
+import fs from 'node:fs';
+test('would run', () => {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'ran\\n');
+});
+`,
+  );
+  fs.mkdirSync(path.join(project, 'empty-dir'));
+  const missing = runCli(
+    [project, '--only', 'locator', '--config', 'missing.config.ts', '--keep-workspace', '--out', out],
+    privateEnv(scratch),
+    project,
+  );
+  assert.equal(missing.status, 2, `${missing.stdout}\n${missing.stderr}`);
+  assert.match(missing.stderr, /Playwright config does not exist/);
+  assert.equal(missing.stderr.includes('Baseline:'), false);
+  assert.equal(missing.stderr.includes('Workspace:'), false);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('qcv-run-')), false);
+  assert.equal(fs.existsSync(path.join(out, 'report.json')), false);
+
+  const empty = runCli(
+    [project, '--only', 'locator', '--config', 'empty-dir', '--keep-workspace', '--out', out],
+    privateEnv(scratch),
+    project,
+  );
+  assert.equal(empty.status, 2, `${empty.stdout}\n${empty.stderr}`);
+  assert.match(empty.stderr, /Playwright config does not exist/);
+  assert.equal(empty.stderr.includes('Baseline:'), false);
+  assert.equal(empty.stderr.includes('Workspace:'), false);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('qcv-run-')), false);
+  assert.equal(fs.existsSync(path.join(out, 'report.json')), false);
+});
+
 test('a --config outside the project is refused and does not run Playwright', (t) => {
   const project = tempDir(t, 'qcv-outcfg-');
   const scratch = tempDir(t, 'qcv-outcfg-tmp-');

@@ -45,11 +45,11 @@ An optional `qa-core-verify.config.json` in the project directory can name asser
 
 ## How It Decides
 
-A test is trusted when the checks that ran found no warn or error. A warn is review. An error is untrusted. Skip and fixme are not-run. Info does not lower a test that ran.
+A test is trusted when the checks that ran found no warn or error. A warn is review. An error is untrusted. Skip and fixme are not-run. That includes a skip or fixme on the test, `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a test that `test.describe.serial` did not run after an earlier failure. Info does not lower a test that ran.
 
 The static pass reads the spec files. It does not open a browser. Those rules are QCV-W000 through QCV-W010.
 
-Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding.
+Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. A test the baseline report marks skipped is `not-run`.
 
 An absence assertion is not proof that the locator is real. This stays green when the element is missing:
 

@@ -40,6 +40,8 @@ Options:
                       locator runs the hallucinated locator check and writes the report.
                       locator-evidence runs Playwright in a temp copy and writes locator-evidence.json.
   --config <file>     Playwright config forwarded to the temp run and not rewritten.
+                      A directory uses the playwright.config file inside that directory.
+                      A path that is not a config file is refused before the temp copy is made.
                       Requires --only locator or --only locator-evidence.
                       playwright.config.ts, .js, .mts, .mjs, .cts, and .cjs are never rewritten.
   --keep-workspace    Keep the temp run directory. Requires --only locator-evidence or --only locator.

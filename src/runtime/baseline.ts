@@ -15,6 +15,11 @@ export interface BaselineSummary {
    * The column is Playwright's. Omitted by unit fixtures that predate this field, which then count every inventory row as run.
    */
   seenKeys?: Set<string>;
+  /**
+   * `path/file.ts:line:column` for a spec whose tests were skipped or fixme.
+   * The column is Playwright's. A passed or failed result on that spec is not recorded here.
+   */
+  skippedKeys?: Set<string>;
   stdout: string;
   stderr: string;
 }
@@ -54,6 +59,7 @@ export function parseBaseline(
 ): BaselineSummary {
   const failedKeys = new Set<string>();
   const seenKeys = new Set<string>();
+  const skippedKeys = new Set<string>();
   const summary: BaselineSummary = {
     ok: false,
     exitCode,
@@ -62,6 +68,7 @@ export function parseBaseline(
     skipped: 0,
     failedKeys,
     seenKeys,
+    skippedKeys,
     stdout,
     stderr,
   };
@@ -137,18 +144,30 @@ function classifySpec(spec: JsonSpec, summary: BaselineSummary, roots: ReportRoo
   const raw = typeof spec.file === 'string' ? spec.file : '';
   const file = raw ? specFileInProject(raw, roots, workspaceDir) : '';
   const line = spec.line;
+  const column = typeof spec.column === 'number' ? spec.column : 0;
   if (file && typeof line === 'number') {
-    const column = typeof spec.column === 'number' ? spec.column : 0;
     summary.seenKeys?.add(`${baselineKey(file, line)}:${column}`);
   }
+  let anyFailed = false;
+  let anyPassed = false;
+  let anySkipped = false;
   for (const test of spec.tests ?? []) {
     const results = (test.results ?? []).map((result) => result.status ?? '');
     const failed = test.status === 'unexpected' || results.some((status) => status === 'failed' || status === 'timedOut' || status === 'interrupted');
     const skipped = !failed && (test.status === 'skipped' || (results.length > 0 && results.every((status) => status === 'skipped')));
     if (failed) {
       summary.failed += 1;
+      anyFailed = true;
       if (file && typeof line === 'number') summary.failedKeys.add(baselineKey(file, line));
-    } else if (skipped) summary.skipped += 1;
-    else summary.passed += 1;
+    } else if (skipped) {
+      summary.skipped += 1;
+      anySkipped = true;
+    } else {
+      summary.passed += 1;
+      anyPassed = true;
+    }
+  }
+  if (file && typeof line === 'number' && anySkipped && !anyFailed && !anyPassed) {
+    summary.skippedKeys?.add(`${baselineKey(file, line)}:${column}`);
   }
 }
