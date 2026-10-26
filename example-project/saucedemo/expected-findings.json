@@ -15,19 +15,19 @@
     "file": "tests/ai-style/locators.spec.ts",
     "line": 10,
     "ruleId": "QCV-L002",
-    "status": "pending"
+    "status": "active"
   },
   {
     "file": "tests/ai-style/locators.spec.ts",
     "line": 16,
     "ruleId": "QCV-L003",
-    "status": "pending"
+    "status": "active"
   },
   {
     "file": "tests/ai-style/locators.spec.ts",
     "line": 23,
     "ruleId": "QCV-L004",
-    "status": "pending"
+    "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",

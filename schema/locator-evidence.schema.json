@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qa-core-verify/locator-evidence.schema.json",
+  "title": "qa-core-verify Locator Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tool", "playwrightVersion", "project", "playwrightExitCode", "records"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "tool": { "$ref": "#/$defs/tool" },
+    "playwrightVersion": { "type": "string", "minLength": 1 },
+    "project": { "$ref": "#/$defs/project" },
+    "playwrightExitCode": { "type": "integer" },
+    "records": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/record" }
+    }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "qa-core-verify" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dir"],
+      "properties": {
+        "dir": { "type": "string", "minLength": 1 }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "api",
+        "url",
+        "matchCount",
+        "phase",
+        "call",
+        "negated",
+        "actionSucceeded",
+        "resolvedOnAction",
+        "parentCount",
+        "countExpected",
+        "optionAbsence",
+        "file",
+        "line",
+        "column",
+        "testFile",
+        "testLine",
+        "testColumn",
+        "testTitle"
+      ],
+      "properties": {
+        "selector": { "type": "string", "minLength": 1 },
+        "api": { "type": "string" },
+        "url": { "type": "string" },
+        "matchCount": { "type": ["integer", "null"], "minimum": 0 },
+        "phase": { "enum": ["action", "assertion"] },
+        "call": { "type": "string" },
+        "negated": { "type": "boolean" },
+        "actionSucceeded": { "type": "boolean" },
+        "resolvedOnAction": { "type": "boolean" },
+        "parentCount": { "type": ["integer", "null"], "minimum": 0 },
+        "countExpected": { "type": ["integer", "null"], "minimum": 0 },
+        "optionAbsence": { "type": "boolean" },
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "testFile": { "type": "string", "minLength": 1 },
+        "testLine": { "type": "integer", "minimum": 1 },
+        "testColumn": { "type": "integer", "minimum": 0 },
+        "testTitle": { "type": "string" }
+      }
+    }
+  }
+}

@@ -93,6 +93,12 @@ export interface InventoryTest {
   file: string;
   line: number;
   column: number;
+  /**
+   * Columns Playwright may store for this call. A TypeScript `test()` call records the
+   * character after `test`. A `test.skip()` call records the property name. The source
+   * column is included too, so a JavaScript call still matches.
+   */
+  evidenceColumns: number[];
   modifiers: TestModifier[];
   modifierSites: ModifierSite[];
   expects: ExpectCall[];
@@ -330,6 +336,7 @@ function recordTest(
     file: sourceFile.fileName,
     line: pos.line,
     column: pos.column,
+    evidenceColumns: evidenceColumnsFor(call, sourceFile),
     modifiers: dedupeModifiers([...ctx.modifiers, ...ownModifiers]),
     modifierSites: [...ctx.modifierSites, ...sitesFor(call, ownModifiers, sourceFile)],
     expects: [],
@@ -904,6 +911,25 @@ function parseDiagnosticsOf(sourceFile: ts.SourceFile): readonly ts.Diagnostic[]
 
 function positionOf(node: ts.Node, sourceFile: ts.SourceFile): { line: number; column: number } {
   return positionAt(sourceFile, node.getStart(sourceFile));
+}
+
+/**
+ * Playwright records `CallSite.getColumnNumber()` after its TypeScript transform.
+ * For `test()` that column is the character after the name. For `test.skip()` it is
+ * the property. The source column stays in the list so an untransformed file still matches.
+ */
+function evidenceColumnsFor(call: ts.CallExpression, sourceFile: ts.SourceFile): number[] {
+  const start = positionOf(call, sourceFile).column;
+  const columns = new Set<number>([start]);
+  const expr = unwrapExpression(call.expression);
+  const extension = path.extname(sourceFile.fileName).toLowerCase();
+  const typescript = extension === '.ts' || extension === '.tsx' || extension === '.mts' || extension === '.cts';
+  if (ts.isPropertyAccessExpression(expr)) {
+    columns.add(positionOf(expr.name, sourceFile).column);
+  } else if (typescript && ts.isIdentifier(expr)) {
+    columns.add(start + expr.text.length);
+  }
+  return [...columns].sort((left, right) => left - right);
 }
 
 function positionAt(sourceFile: ts.SourceFile, position: number): { line: number; column: number } {

@@ -292,7 +292,7 @@ function sourceFiles(dir) {
   return files.sort();
 }
 
-test('call sites and evidence paths stay project relative and drop control characters', () => {
+test('call sites stay project relative, titles drop controls, and selectors keep them escaped', () => {
   const workspace = '/tmp/qcv-workspace-example';
   const stack = [
     'Error: sample',
@@ -342,17 +342,23 @@ test('call sites and evidence paths stay project relative and drop control chara
   });
   assert.equal(evidence.schemaVersion, 1);
   assert.equal(evidence.project.dir, 'demo');
-  assert.equal(evidence.records.length, 1);
-  const record = evidence.records[0];
-  assert.equal(record.selector, 'see  #banner');
+  assert.equal(evidence.records.length, 2);
+  const record = evidence.records.find((item) => item.call === 'toBeHidden');
+  assert.ok(record);
+  assert.equal(record.selector, 'see \\u009b #\\u202ebanner');
+  assert.equal(record.selector.includes('\u009B'), false);
+  assert.equal(record.selector.includes('\u202E'), false);
   assert.equal(record.file, 'tests/a.spec.ts');
   assert.equal(record.testFile, 'tests/a.spec.ts');
   assert.equal(record.testTitle, 'banner hidden');
   assert.equal(record.matchCount, 0);
   assert.equal(record.actionSucceeded, false);
   assert.equal(record.resolvedOnAction, false);
+  const onlyMark = evidence.records.find((item) => item.call === 'click');
+  assert.equal(onlyMark.selector, '\\u202e');
   assert.equal(JSON.stringify(evidence).includes('\u202E'), false);
   assert.equal(JSON.stringify(evidence).includes('\u009B'), false);
+  assert.equal(JSON.stringify(evidence).includes('\u2066'), false);
 });
 
 test('project.dir strips control characters and bidi marks', () => {
@@ -834,6 +840,11 @@ test('Workspace paths stay absolute and escape control characters', () => {
   assert.match(formatted, /\\u000a/);
   assert.match(formatted, /\\u007f/);
   assert.match(formatted, /\\u0085/);
+  const marked = path.join(os.tmpdir(), 'qcv-\u202Edir\\name');
+  const markedPath = formatWorkspacePath(marked);
+  assert.equal(markedPath.includes('\u202E'), false);
+  assert.match(markedPath, /\\u202e/);
+  assert.match(markedPath, /\\\\/);
 });
 
 test('planted .qcv-tmp folders are copied byte-identical and the run passes', (t) => {

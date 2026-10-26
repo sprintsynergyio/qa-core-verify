@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { InventoryTest, SkippedDescribe, TestModifier } from '../inventory/parse.js';
 import type { Finding, Severity } from '../rules/types.js';
 import { ownerIdFor } from '../rules/types.js';
-import { projectDirLabel, toProjectPath } from './paths.js';
+import { displayText, projectDirLabel, toProjectPath } from './paths.js';
 import { ToolError } from '../tool-error.js';
 
 export type Verdict = 'trusted' | 'review' | 'untrusted' | 'baseline-red' | 'not-run';
@@ -24,6 +24,22 @@ export interface ReportFinding {
   relatedLintRule?: string;
 }
 
+export type LocatorStatus = 'unique' | 'ambiguous' | 'never-matched';
+
+/** One locator seen in a test during the locator check. */
+export interface ReportLocator {
+  selector: string;
+  api: string;
+  status: LocatorStatus;
+  file: string;
+  line: number;
+  column: number;
+  /** Raw `matchCount` values that were numbers. */
+  counts: number[];
+  /** Parent counts for `.first()`, `.last()`, and `.nth()`. */
+  parentCounts: number[];
+}
+
 export interface ReportTest {
   id: string;
   file: string;
@@ -31,6 +47,8 @@ export interface ReportTest {
   titlePath: string[];
   verdict: Verdict;
   findings: ReportFinding[];
+  /** Present when the locator check evaluated this row. */
+  locators?: ReportLocator[];
 }
 
 export interface ReportSummary {
@@ -83,6 +101,12 @@ export interface ReportInput {
   checksRun: readonly string[];
   startedAt: Date;
   finishedAt: Date;
+  /** Owner ids whose tests failed before locator rules ran. */
+  baselineRed?: ReadonlySet<string>;
+  /** Owner ids with no baseline result. They did not run. */
+  notRun?: ReadonlySet<string>;
+  /** Owner ids the locator check evaluated, mapped to the per-locator summary. */
+  locatorSummaries?: ReadonlyMap<string, ReportLocator[]>;
 }
 
 interface Row {
@@ -94,6 +118,9 @@ interface Row {
   titlePath: string[];
   modifiers: readonly TestModifier[];
   findings: Finding[];
+  baselineRed: boolean;
+  absent: boolean;
+  locators?: ReportLocator[];
 }
 
 /** ISO 8601 in local time, with the offset of `date` (for example `+05:00`). */
@@ -130,16 +157,22 @@ export function readToolIdentity(): { name: string; version: string } {
 
 /**
  * `trusted` means no warn or error finding. `review` means at least one warn and no error.
- * `untrusted` means at least one error. `baseline-red` is reserved for a later runtime check,
- * so this function does not return it. `not-run` covers skip, fixme, and describe.skip.
+ * `untrusted` means at least one error. `baseline-red` means Playwright status `unexpected`
+ * in the baseline run, before locator rules. An expected `test.fail()` is not `baseline-red`.
+ * `not-run` covers skip, fixme, describe.skip, a test the baseline report did not include,
+ * and a test every project skipped.
  * Info findings do not lower a test that ran.
+ * Skip and fixme stay not-run even when the baseline also failed.
  */
 export function verdictFor(
   kind: 'test' | 'describe',
   modifiers: readonly string[],
   findings: readonly { severity: Severity }[],
+  baselineRed = false,
+  absent = false,
 ): Verdict {
-  if (kind === 'describe' || modifiers.includes('skip') || modifiers.includes('fixme')) return 'not-run';
+  if (kind === 'describe' || modifiers.includes('skip') || modifiers.includes('fixme') || absent) return 'not-run';
+  if (baselineRed) return 'baseline-red';
   if (findings.some((finding) => finding.severity === 'error')) return 'untrusted';
   if (findings.some((finding) => finding.severity === 'warn')) return 'review';
   return 'trusted';
@@ -201,6 +234,8 @@ function rowsFor(input: ReportInput): Row[] {
       titlePath: test.titlePath,
       modifiers: test.modifiers,
       findings: [],
+      baselineRed: input.baselineRed?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
+      absent: input.notRun?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
     });
   }
   for (const block of input.skippedDescribes) {
@@ -213,26 +248,39 @@ function rowsFor(input: ReportInput): Row[] {
       titlePath: block.titlePath,
       modifiers: ['skip'],
       findings: [],
+      baselineRed: false,
+      absent: false,
     });
   }
   const byOwner = new Map(rows.map((row) => [row.ownerId, row]));
   for (const finding of input.findings) {
     const row = byOwner.get(finding.ownerId);
-    if (row) row.findings.push(finding);
+    if (!row || row.baselineRed || row.absent) continue;
+    row.findings.push(finding);
+  }
+  if (input.locatorSummaries) {
+    for (const row of rows) {
+      if (row.baselineRed || row.absent || row.kind === 'describe') continue;
+      if (row.modifiers.includes('skip') || row.modifiers.includes('fixme')) continue;
+      row.locators = input.locatorSummaries.get(row.ownerId) ?? [];
+    }
   }
   return rows;
 }
 
 function toReportTest(row: Row, projectDir: string): ReportTest {
   const file = toProjectPath(row.file, projectDir);
-  return {
-    id: `${file}:${row.line}:${row.column}:${row.titlePath.join(' > ')}`,
+  const titlePath = row.titlePath.map((part) => displayText(part));
+  const report: ReportTest = {
+    id: `${file}:${row.line}:${row.column}:${titlePath.join(' > ')}`,
     file,
     line: row.line,
-    titlePath: [...row.titlePath],
-    verdict: verdictFor(row.kind, row.modifiers, row.findings),
+    titlePath,
+    verdict: verdictFor(row.kind, row.modifiers, row.findings, row.baselineRed, row.absent),
     findings: row.findings.map((finding) => toReportFinding(finding, projectDir)),
   };
+  if (row.locators) report.locators = row.locators;
+  return report;
 }
 
 function toReportFinding(finding: Finding, projectDir: string): ReportFinding {

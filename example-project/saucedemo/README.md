@@ -1,6 +1,6 @@
 # SauceDemo Demo Suite
 
-This suite targets [SauceDemo](https://www.saucedemo.com), a free practice app. It is not a client project. The tests in `tests/good` check login, the cart badge, the locked out user, and one checkout item total. The tests in `tests/ai-style` are deliberately weak. Each weak spot has a `SEEDED` comment on the line above it. `expected-findings.json` lists those spots. `active` means the checker already reports that finding. `pending` means the rule is not built yet.
+This suite targets [SauceDemo](https://www.saucedemo.com), a free practice app. It is not a client project. The tests in `tests/good` check login, the cart badge, the locked out user, and one checkout item total. The tests in `tests/ai-style` are deliberately weak. Each weak spot has a `SEEDED` comment on the line above it. `expected-findings.json` lists those spots. `active` means the checker already reports that finding. `pending` means the rule is not built yet. QCV-L002, QCV-L003, and QCV-L004 are active. They are checked by `--only locator`, which opens a browser. The static command below does not run them.
 
 One seeded test is skipped, so Playwright does not run it. The manifest records the reason.
 
@@ -18,6 +18,12 @@ npm run demo:saucedemo -- tests/good
 ## Checker
 
 This command does not open a browser. It reports the static weak assertion rules in [docs/rules.md](../../docs/rules.md). `tests/good` is written to stay clear of those rules. The checker writes `report.json`, `report.md`, and `report.html` under `.qa-core/verify` in this folder.
+
+The locator check does open a browser:
+
+```sh
+node dist/cli.js example-project/saucedemo --only locator
+```
 
 ```sh
 npm run build

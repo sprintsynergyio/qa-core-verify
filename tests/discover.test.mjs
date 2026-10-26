@@ -139,3 +139,26 @@ test('fails when a spec path does not exist', (t) => {
   const dir = makeProject(t);
   assert.throws(() => discoverSpecs(dir, ['missing.spec.ts'], dir), /Spec path does not exist/);
 });
+
+test('a config directory resolves to the playwright config inside it', (t) => {
+  const dir = makeProject(t);
+  write(
+    path.join(dir, 'conf2', 'playwright.config.ts'),
+    "export default { testDir: '../specs', testMatch: '**/*.spec.ts' };\n",
+  );
+  write(path.join(dir, 'specs', 'a.spec.ts'), '');
+  write(path.join(dir, 'tests', 'b.spec.ts'), '');
+  const found = discoverSpecs(dir, [], dir, path.join(dir, 'conf2'));
+  assert.match(found.method, /Playwright config playwright\.config\.ts/);
+  assert.deepEqual(
+    found.files.map((file) => path.relative(dir, file)),
+    ['specs/a.spec.ts'],
+  );
+});
+
+test('a missing config path is refused', (t) => {
+  const dir = makeProject(t);
+  fs.mkdirSync(path.join(dir, 'empty-dir'));
+  assert.throws(() => discoverSpecs(dir, [], dir, path.join(dir, 'missing.config.ts')), /Playwright config does not exist/);
+  assert.throws(() => discoverSpecs(dir, [], dir, path.join(dir, 'empty-dir')), /Playwright config does not exist/);
+});

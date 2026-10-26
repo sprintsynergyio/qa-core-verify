@@ -144,7 +144,7 @@ test('reports every active expected finding and no findings under tests/good', (
     findingKey(relativeToProject(finding.file), finding.line, finding.ruleId),
   );
   const active = manifest
-    .filter((entry) => entry.status === 'active')
+    .filter((entry) => entry.status === 'active' && entry.ruleId.startsWith('QCV-W'))
     .map((entry) => findingKey(entry.file, entry.line, entry.ruleId));
   assert.deepEqual(reported.sort(), active.sort());
   assert.equal(
@@ -182,7 +182,7 @@ test('seeded comments and the manifest list the same file, line, and rule', () =
 
 test('QCV-W001 through QCV-W010 are active, and the skipped test records why it does not pass', () => {
   const manifest = readManifest();
-  const activeRules = [...new Set(manifest.filter((entry) => entry.status === 'active').map((entry) => entry.ruleId))].sort();
+  const activeRules = [...new Set(manifest.filter((entry) => entry.status === 'active' && entry.ruleId.startsWith('QCV-W')).map((entry) => entry.ruleId))].sort();
   assert.deepEqual(activeRules, [
     'QCV-W001',
     'QCV-W002',
@@ -195,8 +195,10 @@ test('QCV-W001 through QCV-W010 are active, and the skipped test records why it 
     'QCV-W009',
     'QCV-W010',
   ]);
+  const activeLocator = [...new Set(manifest.filter((entry) => entry.status === 'active' && entry.ruleId.startsWith('QCV-L')).map((entry) => entry.ruleId))].sort();
+  assert.deepEqual(activeLocator, ['QCV-L002', 'QCV-L003', 'QCV-L004']);
   const pendingRules = [...new Set(manifest.filter((entry) => entry.status === 'pending').map((entry) => entry.ruleId))].sort();
-  assert.deepEqual(pendingRules, ['QCV-F001', 'QCV-F002', 'QCV-L002', 'QCV-L003', 'QCV-L004']);
+  assert.deepEqual(pendingRules, ['QCV-F001', 'QCV-F002']);
   const covered = new Set(manifest.map((entry) => entry.ruleId));
   for (const ruleId of SEEDED_RULES) assert.equal(covered.has(ruleId), true, ruleId);
   const withReason = manifest.filter((entry) => entry.reason !== undefined);

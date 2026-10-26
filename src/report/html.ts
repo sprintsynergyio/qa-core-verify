@@ -1,6 +1,6 @@
 import type { Report, ReportFinding, Verdict } from './model.js';
 import { VERDICTS, trustNote } from './model.js';
-import { collapseNewlines, displayText } from './paths.js';
+import { collapseNewlines, displayText, preserveBlock } from './paths.js';
 
 const VERDICT_LABEL: Record<Verdict, string> = {
   trusted: 'Trusted',
@@ -97,6 +97,17 @@ export function formatHtml(report: Report): string {
     parts.push(
       `<p class="meta">${escapeHtml(displayText(test.file))}:${test.line} <span class="badge verdict-${test.verdict}">${escapeHtml(test.verdict)}</span></p>`,
     );
+    if (test.locators && test.locators.length > 0) {
+      parts.push('<ul class="locators">');
+      for (const locator of test.locators) {
+        const counts = locator.counts.length === 0 ? 'count unknown' : `count ${locator.counts.join(', ')}`;
+        const parent = locator.parentCounts.length === 0 ? '' : `, parent ${locator.parentCounts.join(', ')}`;
+        parts.push(
+          `<li>${escapeHtml(locator.status)} ${escapeHtml(displayText(locator.api))} (${escapeHtml(counts + parent)})</li>`,
+        );
+      }
+      parts.push('</ul>');
+    }
     if (test.findings.length === 0) parts.push('<p>No findings.</p>');
     for (const finding of test.findings) parts.push(findingHtml(finding));
     parts.push('</article>');
@@ -114,9 +125,9 @@ function findingHtml(finding: ReportFinding): string {
     `<p>${escapeHtml(displayText(finding.file))}:${finding.line}:${finding.column}</p>`,
     `<p>${escapeHtml(collapseNewlines(finding.message))}</p>`,
     '<p class="label">Evidence</p>',
-    `<pre>${escapeHtml(displayText(finding.evidence))}</pre>`,
+    `<pre>${escapeHtml(preserveBlock(finding.evidence))}</pre>`,
     '<p class="label">Fix</p>',
-    `<pre>${escapeHtml(displayText(finding.fixHint))}</pre>`,
+    `<pre>${escapeHtml(preserveBlock(finding.fixHint))}</pre>`,
   ];
   if (finding.relatedLintRule) {
     lines.push(`<p>Related lint rule: ${escapeHtml(finding.relatedLintRule)}</p>`);

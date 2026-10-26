@@ -43,6 +43,24 @@ An optional `qa-core-verify.config.json` in the project directory can name asser
 }
 ```
 
+## How It Decides
+
+A test is trusted when the checks that ran found no warn or error. A warn is review. An error is untrusted. Skip and fixme are not-run. That includes a skip or fixme on the test, `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a test that `test.describe.serial` did not run after an earlier failure. A test skipped in one project and run in another is not `not-run`. It is `not-run` only when no project ran it. A failure in any project is `baseline-red`. Info does not lower a test that ran.
+
+The static pass reads the spec files. It does not open a browser. Those rules are QCV-W000 through QCV-W010.
+
+Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. Failure is Playwright status `unexpected`. `test.fail()` that fails as expected has status `expected`, so the Baseline line counts it as passed and locator findings still apply. `test.fail()` that passes has status `unexpected`, so the Baseline line counts it as failed and the row is `baseline-red`. A test the baseline report marks skipped is `not-run` only when every project skipped it. The baseline runs with `--retries=0`, so a test that fails its first attempt is `baseline-red` even if retries would make it pass.
+
+An absence assertion is not proof that the locator is real. This stays green when the element is missing:
+
+```ts
+await expect(page.locator('#login-error-banner')).toBeHidden();
+```
+
+QCV-L002 warns, and the message is: This test stays green even if this element does not exist. Check the locator against a state where the element is shown.
+
+QCV-L001 is an error when an action or a positive assertion never matched. QCV-L003 warns when a locator matched more than one element and the test did not account for that, including `.first()`, `.last()`, and `.nth()`. QCV-L004 is info for a long CSS chain, XPath, `nth-child`, or a styling class. The report lists each locator as `unique`, `ambiguous`, or `never-matched`.
+
 ## Rules
 
 The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](docs/rules.md) says what the rule detects, why, a bad example, a good example, the severity, and the related lint rule when there is one.
@@ -58,6 +76,14 @@ The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](
 - QCV-W008 Try Catch Swallows The Assertion (error)
 - QCV-W009 Skipped Or Focused Test (info)
 - QCV-W010 Hard Wait With No Assertion After It (info)
+
+`--only locator` adds QCV-L001 through QCV-L004. The command opens a browser. It is not part of `npm test` unless `QCV_LIVE=1`.
+
+```sh
+npx playwright install chromium
+npm run build
+node dist/cli.js example-project/saucedemo --only locator
+```
 
 ## Demo Suite
 

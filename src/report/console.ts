@@ -1,6 +1,6 @@
 import type { Report, ReportSummary } from './model.js';
 import { trustNote } from './model.js';
-import { collapseNewlines, displayText } from './paths.js';
+import { collapseNewlines, displayText, escapeControls } from './paths.js';
 
 export function formatConsoleReport(report: Report, reportPaths: readonly string[]): string {
   const lines: string[] = [];
@@ -11,6 +11,13 @@ export function formatConsoleReport(report: Report, reportPaths: readonly string
       lines.push(`  ${finding.ruleId}  ${finding.severity}  ${finding.line}:${finding.column}  ${collapseNewlines(finding.message)}`);
       lines.push(`    Evidence: ${oneLine(finding.evidence)}`);
       lines.push(`    Fix: ${oneLine(finding.fixHint)}`);
+    }
+    for (const locator of test.locators ?? []) {
+      const counts = locator.counts.length === 0 ? 'count unknown' : `count ${locator.counts.join(', ')}`;
+      const parent = locator.parentCounts.length === 0 ? '' : `  parent ${locator.parentCounts.join(', ')}`;
+      lines.push(
+        `  Locator ${locator.status}  ${displayText(locator.file)}:${locator.line}:${locator.column}  ${oneLine(locator.api)}  ${counts}${parent}`,
+      );
     }
     lines.push('');
   }
@@ -45,7 +52,7 @@ export function checksLine(checksRun: readonly string[]): string {
 
 export function reportsLine(reportPaths: readonly string[]): string {
   if (reportPaths.length === 0) return 'Reports: none.';
-  return `Reports: ${reportPaths.map((file) => displayText(file)).join(', ')}.`;
+  return `Reports: ${reportPaths.map((file) => escapeControls(file)).join(', ')}.`;
 }
 
 function oneLine(text: string): string {

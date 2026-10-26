@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readToolIdentity } from '../../report/model.js';
 import { ToolError } from '../../tool-error.js';
-import { assertWorkspaceFile, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
+import { assertWorkspaceFile, configInsideProject, configPathInCopy, readPlaywrightVersion, resolveNodeModules, runPlaywrightInWorkspace } from '../workspace.js';
 import { buildEvidence, type EvidenceFile, type RawEvidencePart } from './evidence.js';
 import { locatorFixtureSource } from './fixture-source.js';
 
@@ -19,6 +19,7 @@ export interface LocatorEvidenceRun {
   evidencePath: string;
   stdout: string;
   stderr: string;
+  skippedLinks: string[];
 }
 
 /**
@@ -29,24 +30,34 @@ export async function collectLocatorEvidence(options: {
   projectDir: string;
   outDir: string;
   keepWorkspace: boolean;
+  /** Config forwarded to Playwright. Resolved from `cwd`, then mapped into the temp copy. */
+  configFile?: string;
+  /** Playwright resolves `--config` from this directory. Defaults to `process.cwd()`. */
+  cwd?: string;
 }): Promise<LocatorEvidenceRun> {
   const projectDir = path.resolve(options.projectDir);
+  const configFile = options.configFile
+    ? configInsideProject(options.configFile, projectDir, options.cwd ?? process.cwd())
+    : undefined;
   const version = readPlaywrightVersion(resolveNodeModules(projectDir));
-  const partsHolder: { parts: RawEvidencePart[] } = { parts: [] };
+  const partsHolder: { parts: RawEvidencePart[]; errors: string[] } = { parts: [], errors: [] };
   const run = await runPlaywrightInWorkspace(projectDir, {
     keep: options.keepWorkspace,
     env: { QCV_EVIDENCE_DIR: PARTS_DIR },
+    configFile,
     prepare: (workspaceDir) => {
-      const fixturePath = path.join(workspaceDir, FIXTURE_NAME);
-      assertWorkspaceFile(workspaceDir, fixturePath);
-      fs.writeFileSync(fixturePath, locatorFixtureSource());
-      rewriteProjectImports(workspaceDir, fixturePath);
-      fs.mkdirSync(path.join(workspaceDir, PARTS_DIR), { recursive: true });
+      installFixture(workspaceDir, configFile);
     },
     after: (workspaceDir) => {
-      partsHolder.parts = readParts(path.join(workspaceDir, PARTS_DIR));
+      const partsDir = path.join(workspaceDir, PARTS_DIR);
+      partsHolder.parts = readParts(partsDir);
+      partsHolder.errors = readEvidenceErrors(partsDir);
     },
   });
+  const logged = evidenceWriteErrors(partsHolder.errors, run.playwright.stderr);
+  if (logged.length > 0) {
+    throw new ToolError(`Locator evidence write failed: ${logged.join('; ')}`);
+  }
   const evidence = buildEvidence({
     parts: partsHolder.parts,
     workspaceDir: run.workspaceDir,
@@ -64,6 +75,7 @@ export async function collectLocatorEvidence(options: {
     evidencePath,
     stdout: run.playwright.stdout,
     stderr: run.playwright.stderr,
+    skippedLinks: run.skippedLinks,
   };
 }
 
@@ -73,7 +85,15 @@ export function rewritePlaywrightImports(source: string, specifier: string): str
   return source.replace(fromClause, `$1$2${specifier}$2`).replace(required, `$1$2${specifier}$2`);
 }
 
-function rewriteProjectImports(workspaceDir: string, fixturePath: string): void {
+const CONFIG_EXTENSIONS = ['.ts', '.js', '.mts', '.mjs', '.cts', '.cjs'];
+
+/** True for the config names Playwright 1.60.0 discovers, in any directory. */
+export function isPlaywrightConfig(name: string): boolean {
+  return CONFIG_EXTENSIONS.some((extension) => name === `playwright.config${extension}`);
+}
+
+function rewriteProjectImports(workspaceDir: string, fixturePath: string, configFile?: string): void {
+  const custom = configFile ? configPathInCopy(workspaceDir, configFile) : undefined;
   const walk = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name === '.qa-core' || entry.name === 'test-results') continue;
@@ -83,6 +103,7 @@ function rewriteProjectImports(workspaceDir: string, fixturePath: string): void 
         continue;
       }
       if (isPlaywrightConfig(entry.name)) continue;
+      if (custom && path.resolve(full) === custom) continue;
       if (full === fixturePath) continue;
       if (!/\.(ts|tsx|js|jsx|mjs|cjs|cts|mts)$/.test(entry.name)) continue;
       const text = fs.readFileSync(full, 'utf8');
@@ -96,8 +117,12 @@ function rewriteProjectImports(workspaceDir: string, fixturePath: string): void 
   walk(workspaceDir);
 }
 
-function isPlaywrightConfig(name: string): boolean {
-  return name === 'playwright.config.ts' || name === 'playwright.config.js' || name === 'playwright.config.mjs';
+export function installFixture(workspaceDir: string, configFile?: string): void {
+  const fixturePath = path.join(workspaceDir, FIXTURE_NAME);
+  assertWorkspaceFile(workspaceDir, fixturePath);
+  fs.writeFileSync(fixturePath, locatorFixtureSource());
+  rewriteProjectImports(workspaceDir, fixturePath, configFile);
+  fs.mkdirSync(path.join(workspaceDir, PARTS_DIR), { recursive: true });
 }
 
 function specifierFor(fromFile: string, fixturePath: string): string {
@@ -106,14 +131,42 @@ function specifierFor(fromFile: string, fixturePath: string): string {
   return relative.replace(/\.ts$/, '.js');
 }
 
+/** Errors from the part file and from `QCV_EVIDENCE_ERROR` lines on stderr. */
+export function evidenceWriteErrors(fileErrors: readonly string[], stderr: string): string[] {
+  const fromStderr = stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('QCV_EVIDENCE_ERROR:'))
+    .map((line) => line.slice('QCV_EVIDENCE_ERROR:'.length).trim());
+  return [...fileErrors, ...fromStderr];
+}
+
+export function readEvidenceErrors(partsDir: string): string[] {
+  const file = path.join(partsDir, 'errors.txt');
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf8').split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
+/** Read JSON lines, and a JSON array from an older part file. */
 export function readParts(partsDir: string): RawEvidencePart[] {
   if (!fs.existsSync(partsDir)) return [];
   const parts: RawEvidencePart[] = [];
   for (const name of fs.readdirSync(partsDir).sort()) {
     if (!name.endsWith('.json')) continue;
-    const parsed: unknown = JSON.parse(fs.readFileSync(path.join(partsDir, name), 'utf8'));
-    if (!Array.isArray(parsed)) continue;
-    for (const item of parsed) parts.push(asPart(item));
+    const text = fs.readFileSync(path.join(partsDir, name), 'utf8');
+    const trimmed = text.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.startsWith('[')) {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (!Array.isArray(parsed)) continue;
+      for (const item of parsed) parts.push(asPart(item));
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      const row = line.trim();
+      if (row.length === 0) continue;
+      parts.push(asPart(JSON.parse(row)));
+    }
   }
   return parts;
 }
@@ -129,12 +182,18 @@ function asPart(value: unknown): RawEvidencePart {
   if (typeof record.call !== 'string' || typeof record.stack !== 'string' || typeof record.testFile !== 'string') {
     throw new ToolError('Locator evidence part is missing a string field.');
   }
-  if (typeof record.testTitle !== 'string' || typeof record.matchCount !== 'number' || typeof record.testLine !== 'number') {
+  if (typeof record.testTitle !== 'string' || typeof record.testLine !== 'number') {
+    throw new ToolError('Locator evidence part is missing a number field.');
+  }
+  if (record.matchCount !== null && typeof record.matchCount !== 'number') {
     throw new ToolError('Locator evidence part is missing a number field.');
   }
   if (typeof record.actionSucceeded !== 'boolean') {
     throw new ToolError('Locator evidence part is missing actionSucceeded.');
   }
+  const parentCount = record.parentCount;
+  const countExpected = record.countExpected;
+  const testColumn = record.testColumn;
   return {
     selector: record.selector,
     api: record.api,
@@ -144,9 +203,13 @@ function asPart(value: unknown): RawEvidencePart {
     call: record.call,
     negated: record.negated === true,
     actionSucceeded: record.actionSucceeded,
+    parentCount: typeof parentCount === 'number' || parentCount === null ? parentCount : null,
+    countExpected: typeof countExpected === 'number' || countExpected === null ? countExpected : null,
+    optionAbsence: record.optionAbsence === true,
     stack: record.stack,
     testFile: record.testFile,
     testLine: record.testLine,
+    testColumn: typeof testColumn === 'number' ? testColumn : undefined,
     testTitle: record.testTitle,
   };
 }

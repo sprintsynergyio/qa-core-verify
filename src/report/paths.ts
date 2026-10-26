@@ -13,18 +13,48 @@ export function toProjectPath(file: string, projectDir: string): string {
   return relative.split(path.sep).join('/');
 }
 
-/** Replace newline runs with one space so a title or path stays on one line. */
+/** Replace newline runs, U+2028, and U+2029 with one space so a title or path stays on one line. */
 export function collapseNewlines(value: string): string {
-  return value.replace(/(?:\r\n|[\n\r])+/g, ' ').trim();
+  return value.replace(/(?:\r\n|[\n\r\u2028\u2029])+/g, ' ').trim();
 }
 
 /**
  * Collapse newlines and remove control characters: C0 (including ESC and DEL),
- * C1 (U+0080 through U+009F), and bidi overrides (U+202A through U+202E and U+2066 through U+2069).
+ * C1 (U+0080 through U+009F), line separators U+2028 and U+2029, and bidi overrides
+ * (U+202A through U+202E, U+200E, U+200F, and U+2066 through U+2069).
  */
 export function displayText(value: string): string {
-  const collapsed = value.replace(/(?:\r\n|[\n\r])+/g, ' ');
-  return collapsed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u202A-\u202E\u2066-\u2069]/g, '').trim();
+  const collapsed = value.replace(/(?:\r\n|[\n\r\u2028\u2029])+/g, ' ');
+  return collapsed
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .trim();
+}
+
+/**
+ * Keep `\n` for fenced and pre blocks. C0, DEL, C1, and bidi overrides are removed.
+ * U+2028 and U+2029 become newlines.
+ */
+export function preserveBlock(value: string): string {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\u2028\u2029]/g, '\n');
+  return normalized.replace(
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+    '',
+  );
+}
+
+/** Write C0, DEL, C1, line separators, and bidi controls as `\u` plus four lowercase hex digits. */
+export function escapeControls(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F-\u009F\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g, (char) => {
+    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  });
+}
+
+/**
+ * Keep every code point in a selector. Controls, DEL, C1, line separators, and bidi
+ * overrides are written as `\u` plus four lowercase hex digits instead of being dropped.
+ */
+export function escapeSelector(value: string): string {
+  return escapeControls(value);
 }
 
 /** True when `target` is not the project directory and not inside it. */

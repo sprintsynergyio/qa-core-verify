@@ -62,7 +62,12 @@ interface ScanTarget {
  * Playwright config (including the object passed to defineConfig).
  * Anything else falls back to the default globs, excluding node_modules.
  */
-export function discoverSpecs(projectDir: string, specArgs: readonly string[], cwd = process.cwd()): Discovery {
+export function discoverSpecs(
+  projectDir: string,
+  specArgs: readonly string[],
+  cwd = process.cwd(),
+  configFile?: string,
+): Discovery {
   if (specArgs.length > 0) {
     return {
       files: resolveSpecArgs(projectDir, specArgs, cwd),
@@ -70,7 +75,11 @@ export function discoverSpecs(projectDir: string, specArgs: readonly string[], c
     };
   }
 
-  const configFile = findPlaywrightConfig(projectDir);
+  if (configFile) {
+    configFile = resolvePlaywrightConfigFile(configFile);
+  } else {
+    configFile = findPlaywrightConfig(projectDir);
+  }
   if (!configFile) {
     return {
       files: collectByGlobs(projectDir, DEFAULT_SPEC_GLOBS),
@@ -108,6 +117,27 @@ export function findPlaywrightConfig(projectDir: string): string | undefined {
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
   return undefined;
+}
+
+/**
+ * Playwright's `resolveConfigFile2`: a file is used as given, and a directory
+ * is the first `playwright.config.*` inside it. A missing path is refused here,
+ * before any temp copy, when callers resolve `--config` up front.
+ */
+export function resolvePlaywrightConfigFile(configPath: string): string {
+  const resolved = path.resolve(configPath);
+  if (!fs.existsSync(resolved)) {
+    throw new ToolError(`Playwright config does not exist: ${resolved}`);
+  }
+  if (fs.statSync(resolved).isDirectory()) {
+    const found = findPlaywrightConfig(resolved);
+    if (!found) throw new ToolError(`Playwright config does not exist: ${resolved}`);
+    return found;
+  }
+  if (!fs.statSync(resolved).isFile()) {
+    throw new ToolError(`Playwright config does not exist: ${resolved}`);
+  }
+  return resolved;
 }
 
 function resolveSpecArgs(projectDir: string, specArgs: readonly string[], cwd: string): string[] {
