@@ -962,6 +962,40 @@ test('skipped in both', async ({ page }, info) => {
   assert.equal(report.summary.verdict.trusted, 0);
 });
 
+test('a first failure is baseline-red when project retries would pass it', (t) => {
+  const project = tempDir(t, 'qcv-retry-');
+  const scratch = tempDir(t, 'qcv-retry-tmp-');
+  const out = tempDir(t, 'qcv-retry-out-');
+  fs.mkdirSync(path.join(project, 'tests'));
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ retries: 1, testDir: './tests', timeout: 10000 });\n",
+  );
+  fs.writeFileSync(
+    path.join(project, 'tests', 'retry.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('passes only on retry', async ({ page }) => {
+  await page.setContent('<p>x</p>');
+  if (test.info().retry === 0) {
+    await expect(page.locator('#ghost')).toBeVisible({ timeout: 300 });
+  } else {
+    await expect(page.getByText('x')).toBeVisible();
+  }
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline: 0 passed, 1 failed, 0 skipped/);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = report.tests.find((entry) => entry.titlePath.join(' > ') === 'passes only on retry');
+  assert.ok(row, report.tests.map((entry) => entry.titlePath.join(' > ')).join('\n'));
+  assert.equal(row.verdict, 'baseline-red');
+  assert.equal(row.findings.length, 0);
+  assert.equal(report.summary.verdict['baseline-red'], 1);
+  assert.equal(report.summary.verdict.trusted, 0);
+});
+
 test('a directory --config uses the playwright config inside it', (t) => {
   const project = tempDir(t, 'qcv-cfgp-');
   const scratch = tempDir(t, 'qcv-cfgp-tmp-');

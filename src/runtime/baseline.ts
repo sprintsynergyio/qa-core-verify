@@ -160,7 +160,8 @@ function walkSuite(
 }
 
 /**
- * Playwright's test `status` is `expected`, `unexpected`, `flaky`, or `skipped`.
+ * The baseline passes `--retries=0`, so Playwright status is `expected`, `unexpected`, or `skipped`.
+ * A first failure is `unexpected`. A retry never runs, so the status is not `flaky`.
  * An expected `test.fail()` has status `expected` even when a result is `failed`.
  * A result status is not used, so an expected failure is not a baseline failure.
  */

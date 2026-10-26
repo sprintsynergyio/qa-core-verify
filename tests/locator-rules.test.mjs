@@ -835,7 +835,11 @@ test('the docs name the locator limits from the PR 05 review', () => {
   assert.match(readme, /test\.describe\.serial/);
   assert.match(readme, /test\.fail\(\)/);
   assert.match(readme, /no project ran it/);
+  assert.match(readme, /--retries=0/);
+  assert.match(readme, /fails its first attempt/);
   assert.match(schemaDoc, /baseline report marks skipped/);
   assert.match(schemaDoc, /test\.fail\(\)/);
   assert.match(schemaDoc, /no project ran it/);
+  assert.match(schemaDoc, /--retries=0/);
+  assert.match(schemaDoc, /fails its first attempt/);
 });

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The baseline runs with `--retries=0`, so a test that fails its first attempt is `baseline-red` even if retries would make it pass.
 - `test.fail()` that fails as expected has Playwright status `expected`. The Baseline line counts it as passed, and locator findings still apply. `test.fail()` that passes has status `unexpected` and is `baseline-red`. A test skipped in one project and run in another keeps the findings from the project that ran. The row is `not-run` only when no project ran it, and `baseline-red` when any project failed it.
 - A test the baseline report marks skipped is `not-run`. That includes `test.skip()` and `test.fixme()` in the body, `testInfo.skip()`, and a test `test.describe.serial` did not run after an earlier failure. `--config` that names a directory uses the `playwright.config` file inside it. A missing config is refused before the temp copy is made.
 - Two `test()` calls on one line keep their locator findings. A TypeScript `test()` call is recorded on the character after `test`, and that column matches the inventory row. Evidence that still matches more than one row is reported on each of those rows, so none of them is trusted. `--only locator` reads the inventory from `--config`. A test with no baseline result is `not-run`. `toBeEnabled({ enabled: false })`, `toBeChecked({ checked: false })`, and `toBeEditable({ editable: false })` are not absence checks, because a missing element fails the test.

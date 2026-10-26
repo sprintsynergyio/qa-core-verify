@@ -49,7 +49,7 @@ A test is trusted when the checks that ran found no warn or error. A warn is rev
 
 The static pass reads the spec files. It does not open a browser. Those rules are QCV-W000 through QCV-W010.
 
-Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. Failure is Playwright status `unexpected`. `test.fail()` that fails as expected has status `expected`, so the Baseline line counts it as passed and locator findings still apply. `test.fail()` that passes has status `unexpected`, so the Baseline line counts it as failed and the row is `baseline-red`. A test the baseline report marks skipped is `not-run` only when every project skipped it.
+Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. Failure is Playwright status `unexpected`. `test.fail()` that fails as expected has status `expected`, so the Baseline line counts it as passed and locator findings still apply. `test.fail()` that passes has status `unexpected`, so the Baseline line counts it as failed and the row is `baseline-red`. A test the baseline report marks skipped is `not-run` only when every project skipped it. The baseline runs with `--retries=0`, so a test that fails its first attempt is `baseline-red` even if retries would make it pass.
 
 An absence assertion is not proof that the locator is real. This stays green when the element is missing:
 
