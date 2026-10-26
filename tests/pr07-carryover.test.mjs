@@ -290,8 +290,10 @@ test('an evidence run with no records and a non-zero exit is not-run', () => {
 
 test('the generated fixture wraps contentFrame and expect.configure, and an mjs spec points at the esm fixture', (t) => {
   const source = locatorFixtureSource();
-  assert.match(source, /locator\.contentFrame/);
-  assert.match(source, /wrapFrame\(frame, store\)/);
+  assert.match(source, /locator\.contentFrame = function/);
+  assert.equal(/locator\.contentFrame = async function/.test(source), false);
+  assert.match(source, /return remember\(frame, store\)/);
+  assert.match(source, /function wrapFrame/);
   assert.match(source, /prop === 'configure'/);
   assert.match(source, /return wrapExpect\(configured\)/);
   assert.match(source, /name === 'nth'/);

@@ -120,7 +120,7 @@ Two calls are flagged even when the assertion inside them is awaited:
 
 ### Why
 
-The assertion runs later, or not at all, so a failure does not fail the test.
+Playwright 1.60 fails a test at its end when an unawaited locator or page assertion is still pending, or when that assertion fails during the test. An unawaited `expect.poll` or `.resolves` failure can be lost, or reported in the next test.
 
 ### Bad Example
 
@@ -414,7 +414,7 @@ A locator used in an action or a positive assertion matched 0 elements in every 
 
 ### Why
 
-The test asked for an element that was not there. A click that fails does go red. A positive assertion that is not awaited, or that is swallowed, can stay green.
+The test asked for an element that was not there. A click that fails does go red. Playwright 1.60 fails a test at its end when an unawaited locator or page assertion is still pending, or when that assertion fails during the test. An unawaited `expect.poll` or `.resolves` failure can be lost, or reported in the next test. A swallowed assertion can stay green.
 
 ### Bad Example
 

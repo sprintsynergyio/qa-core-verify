@@ -204,11 +204,15 @@ function readChain(expr: ts.Expression, expects: ReadonlySet<string>): ExpectCha
   return null;
 }
 
-/** `expect` bindings: the import, `const` aliases, and `expect.configure()`. `let` and `var` are not followed. */
+/**
+ * `expect` bindings: a named import or `require` from `@playwright/test` or a relative fixture,
+ * `const` aliases, and `expect.configure()`. `let` and `var` are not followed.
+ * A relative fixture is not loaded. The same specifiers `parse.ts` accepts are accepted here.
+ */
 function expectNames(sourceFile: ts.SourceFile): Set<string> {
   const names = new Set<string>();
   const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && node.importClause && isPlaywright(node.moduleSpecifier)) {
+    if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
       const named = node.importClause.namedBindings;
       if (named && ts.isNamedImports(named)) {
         for (const element of named.elements) {
@@ -217,15 +221,29 @@ function expectNames(sourceFile: ts.SourceFile): Set<string> {
         }
       }
     }
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && isConst(node)) {
-      const init = unwrap(node.initializer);
-      if (ts.isIdentifier(init) && names.has(init.text)) names.add(node.name.text);
-      if (ts.isCallExpression(init) && isConfigure(init, names)) names.add(node.name.text);
+    if (ts.isVariableDeclaration(node)) {
+      bindExpectRequire(node, names);
+      if (ts.isIdentifier(node.name) && node.initializer && isConst(node)) {
+        const init = unwrap(node.initializer);
+        if (ts.isIdentifier(init) && names.has(init.text)) names.add(node.name.text);
+        if (ts.isCallExpression(init) && isConfigure(init, names)) names.add(node.name.text);
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
   return names;
+}
+
+function bindExpectRequire(declaration: ts.VariableDeclaration, names: Set<string>): void {
+  if (!declaration.initializer || !isTestRequire(declaration.initializer)) return;
+  if (!ts.isObjectBindingPattern(declaration.name)) return;
+  for (const element of declaration.name.elements) {
+    if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue;
+    const imported =
+      element.propertyName && ts.isIdentifier(element.propertyName) ? element.propertyName.text : element.name.text;
+    if (imported === 'expect') names.add(element.name.text);
+  }
 }
 
 function isConfigure(call: ts.CallExpression, names: ReadonlySet<string>): boolean {
@@ -240,8 +258,27 @@ function isConst(node: ts.VariableDeclaration): boolean {
   return ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
 }
 
-function isPlaywright(expr: ts.Expression): boolean {
-  return ts.isStringLiteral(expr) && (expr.text === '@playwright/test' || expr.text === 'playwright/test');
+function isTestSpecifier(expr: ts.Expression): boolean {
+  return ts.isStringLiteral(expr) && isTestModule(expr.text);
+}
+
+function isTestRequire(expr: ts.Expression): boolean {
+  if (!ts.isCallExpression(expr)) return false;
+  if (!ts.isIdentifier(expr.expression) || expr.expression.text !== 'require') return false;
+  const arg = expr.arguments[0];
+  return !!arg && ts.isStringLiteral(arg) && isTestModule(arg.text);
+}
+
+function isTestModule(specifier: string): boolean {
+  return (
+    specifier === '@playwright/test' ||
+    specifier === 'playwright' ||
+    specifier === 'playwright/test' ||
+    specifier.endsWith('/@playwright/test') ||
+    specifier.endsWith('/playwright/test') ||
+    specifier.startsWith('./') ||
+    specifier.startsWith('../')
+  );
 }
 
 function unwrap(expr: ts.Expression): ts.Expression {

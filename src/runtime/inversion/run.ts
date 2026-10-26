@@ -24,18 +24,27 @@ interface JsonSuite {
   suites?: JsonSuite[];
 }
 
+interface JsonTest {
+  status?: string;
+  expectedStatus?: string;
+  results?: Array<{ status?: string }>;
+}
+
 interface JsonSpec {
   file?: string;
   line?: number;
   column?: number;
-  tests?: Array<{ results?: Array<{ status?: string }> }>;
+  tests?: JsonTest[];
 }
 
 /**
  * Read one inverted test from Playwright's JSON reporter.
- * `killed` means a result status `failed`. `survived` means every result `passed`.
+ * The outcome comes from the test status (`tests[].status`), not from the raw result status.
+ * `unexpected` or `flaky` is `killed`. `expected` is `survived`, including an expected `test.fail()`.
+ * One `expected` project with the others `skipped` is `survived`.
+ * When `status` is absent, `expectedStatus` is compared with each result status.
  * `timeout` means a result status `timedOut` and is never treated as killed.
- * A missing report or any other result status is `error`.
+ * A missing report, an interrupted run, or a status this check cannot classify is `error`.
  */
 export function classifyMutantOutput(
   stdout: string,
@@ -62,20 +71,48 @@ export function classifyMutantOutput(
       reason: firstProblemLine(stderr, stdout) ?? `Playwright exited ${exitCode} and did not report ${file}:${line}.`,
     };
   }
-  const results: string[] = [];
+  const tests: JsonTest[] = [];
   for (const spec of chosen) {
-    for (const test of spec.tests ?? []) {
-      for (const result of test.results ?? []) {
-        if (typeof result.status === 'string') results.push(result.status);
-      }
+    for (const test of spec.tests ?? []) tests.push(test);
+  }
+  const results: string[] = [];
+  for (const test of tests) {
+    for (const result of test.results ?? []) {
+      if (typeof result.status === 'string') results.push(result.status);
     }
   }
-  if (results.length === 0) return { outcome: 'error', reason: 'Playwright reported the test without a result status.' };
   if (results.some((status) => status === 'timedOut')) return { outcome: 'timeout', reason: 'The inverted test timed out.' };
-  if (results.some((status) => status === 'failed')) return { outcome: 'killed' };
-  if (results.every((status) => status === 'passed')) return { outcome: 'survived' };
-  if (results.some((status) => status === 'interrupted')) return { outcome: 'error', reason: 'The inverted test was interrupted.' };
-  return { outcome: 'error', reason: `The inverted test ended as ${results.join(', ')}.` };
+  const levels = tests.map(levelStatus);
+  if (levels.some((status) => status === 'unexpected' || status === 'flaky')) return { outcome: 'killed' };
+  const known = levels.filter((status): status is string => typeof status === 'string');
+  if (known.some((status) => status === 'expected') && known.every((status) => status === 'expected' || status === 'skipped')) {
+    return { outcome: 'survived' };
+  }
+  if (known.some((status) => status === 'interrupted') || (known.length === 0 && results.some((status) => status === 'interrupted'))) {
+    return { outcome: 'error', reason: 'The inverted test was interrupted.' };
+  }
+  if (known.length > 0 && known.every((status) => status === 'skipped')) {
+    return { outcome: 'error', reason: 'The inverted test ended as skipped.' };
+  }
+  if (results.length === 0 && known.length === 0) {
+    return { outcome: 'error', reason: 'Playwright reported the test without a result status.' };
+  }
+  const described = known.length > 0 ? known : results;
+  return { outcome: 'error', reason: `The inverted test ended as ${described.join(', ')}.` };
+}
+
+/** Playwright's test status, or the status implied by `expectedStatus` when the reporter omitted it. */
+function levelStatus(test: JsonTest): string | undefined {
+  if (typeof test.status === 'string' && test.status.length > 0) return test.status;
+  const results = (test.results ?? [])
+    .map((result) => result.status)
+    .filter((status): status is string => typeof status === 'string');
+  if (results.some((status) => status === 'interrupted')) return 'interrupted';
+  const expected = test.expectedStatus;
+  if (typeof expected !== 'string' || expected.length === 0 || results.length === 0) return undefined;
+  const active = results.filter((status) => status !== 'skipped');
+  if (active.length === 0) return 'skipped';
+  return active.every((status) => status === expected) ? 'expected' : 'unexpected';
 }
 
 export interface InversionRun {
@@ -137,15 +174,50 @@ export async function collectInversion(options: {
       const limit = options.maxRuns === undefined ? work.length : options.maxRuns;
       console.error(`Inversion plan: ${work.length} mutants, ${Math.min(work.length, limit)} runs.`);
       let executed = 0;
+      let stopped = 0;
+      const controls = new Map<string, Promise<PlaywrightRun>>();
+      const passedControl = new Set<string>();
+      const failedControl = new Set<string>();
+      let controlIndex = 0;
       for (const item of work) {
         if (executed >= limit) {
+          stopped += 1;
           addAssertion(collected, item, 'not-run', 'Stopped at limit.');
+          continue;
+        }
+        if (item.relativeFile.startsWith('..') || path.isAbsolute(item.relativeFile)) {
+          addAssertion(collected, item, 'not-run', 'The assertion file is outside the temp copy.');
+          continue;
+        }
+        const owner = ownerFor(item.test);
+        if (!passedControl.has(owner) && !failedControl.has(owner)) {
+          const control = await controlFor(session.run, controls, item, () => {
+            controlIndex += 1;
+            return controlIndex;
+          });
+          const classified = classifyMutantOutput(
+            control.stdout,
+            control.stderr,
+            control.exitCode,
+            item.testRelative,
+            item.test.line,
+            columnsFor(item.test),
+            session.workspaceDir,
+          );
+          if (classified.outcome === 'survived') passedControl.add(owner);
+          else {
+            failedControl.add(owner);
+            console.error(`Control run did not pass for ${item.testRelative}:${item.test.line}. Its assertions were not inverted.`);
+          }
+        }
+        if (failedControl.has(owner)) {
+          addAssertion(collected, item, 'not-run', 'The test did not pass when run on its own, so its assertions were not inverted.');
           continue;
         }
         executed += 1;
         await runOneMutant(session.workspaceDir, session.run, item, executed, collected);
       }
-      if (executed < work.length) console.error(`Stopped at limit. ${work.length - executed} assertions were not run.`);
+      if (stopped > 0) console.error(`Stopped at limit. ${stopped} assertions were not run.`);
       return baseline;
     },
   );
@@ -184,6 +256,28 @@ interface WorkItem {
   relativeFile: string;
   absoluteFile: string;
   plan: MutationPlan;
+}
+
+async function controlFor(
+  run: (args?: string[]) => Promise<PlaywrightRun>,
+  cache: Map<string, Promise<PlaywrightRun>>,
+  item: WorkItem,
+  nextIndex: () => number,
+): Promise<PlaywrightRun> {
+  const key = `${item.testRelative}:${item.test.line}`;
+  const existing = cache.get(key);
+  if (existing) return existing;
+  const index = nextIndex();
+  const pending = run([
+    'test',
+    key,
+    '--retries=0',
+    '--workers=1',
+    '--reporter=json',
+    `--output=test-results-control-${index}`,
+  ]);
+  cache.set(key, pending);
+  return pending;
 }
 
 async function runOneMutant(

@@ -74,7 +74,7 @@ export async function collectLocatorCheck(options: {
     },
     second: {
       env: { QCV_EVIDENCE_DIR: PARTS_DIR },
-      playwrightArgs: ['test', '--retries=0', '--reporter=line', '--output=test-results'],
+      playwrightArgs: ['test', '--retries=0', '--reporter=json', '--output=test-results'],
       prepare: (workspaceDir) => {
         installFixture(workspaceDir, configFile);
       },
@@ -91,6 +91,7 @@ export async function collectLocatorCheck(options: {
     throw new ToolError(`Locator evidence write failed: ${logged.join('; ')}`);
   }
   const baseline = baselineSummary;
+  const evidenceRun = parseBaseline(run.playwright.stdout, run.playwright.stderr, run.playwright.exitCode, run.workspaceDir);
   const evidence = buildEvidence({
     parts: partsHolder.parts,
     workspaceDir: run.workspaceDir,
@@ -101,7 +102,13 @@ export async function collectLocatorCheck(options: {
   });
   const evidencePath = writeEvidenceFile(evidence, options.outDir);
   const inventory = readInventory(projectDir, configFile);
-  const { findings, baselineRed, notRun, summaries } = evaluateLocatorCheck(projectDir, inventory.tests, evidence, baseline);
+  const { findings, baselineRed, notRun, summaries } = evaluateLocatorCheck(
+    projectDir,
+    inventory.tests,
+    evidence,
+    baseline,
+    evidenceRun,
+  );
   const report = buildReport({
     projectDir,
     configFile: inventory.configFile,
@@ -160,6 +167,7 @@ export function evaluateLocatorCheck(
   tests: readonly InventoryTest[],
   evidence: EvidenceFile,
   baseline: BaselineSummary,
+  evidenceRun?: BaselineSummary,
 ): { findings: Finding[]; baselineRed: Set<string>; notRun: Set<string>; summaries: Map<string, ReportLocator[]> } {
   const baselineRed = new Set<string>();
   const notRun = new Set<string>();
@@ -182,6 +190,25 @@ export function evaluateLocatorCheck(
     } else if (!baselineSaw(baseline, relative, test.line, columns, siblingsOnLine)) {
       notRun.add(id);
     } else live.push(test);
+  }
+  if (evidenceRun?.ok) {
+    const keep: InventoryTest[] = [];
+    for (const test of live) {
+      const relative = path.relative(projectDir, test.file).split(path.sep).join('/');
+      const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
+      const columns = columnsFor(test);
+      const siblingsOnLine = siblings.get(`${relative}:${test.line}`) ?? 1;
+      if (keyHits(evidenceRun.failedKeys, relative, test.line, columns, siblingsOnLine)) notRun.add(id);
+      else keep.push(test);
+    }
+    live.length = 0;
+    live.push(...keep);
+  } else if (evidenceRun && !evidenceRun.ok && evidence.playwrightExitCode !== 0 && evidence.records.length > 0) {
+    live.length = 0;
+    for (const test of tests) {
+      const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
+      if (!baselineRed.has(id)) notRun.add(id);
+    }
   }
   if (evidence.records.length === 0 && evidence.playwrightExitCode !== 0) {
     live.length = 0;

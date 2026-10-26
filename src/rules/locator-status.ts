@@ -133,9 +133,12 @@ export function columnsFor(test: InventoryTest): number[] {
 }
 
 /**
- * Match evidence to the source test by file and test line, then by a shared column.
+ * Match evidence to the test that recorded it, by file, line, column, and title.
  * One `test(\`param ${n}\`)` call is one row. Two calls on that line stay apart.
- * When several rows still fit, every one of them is returned so the finding is not dropped.
+ * A record is not given to every test on the line.
+ * When the column matches several rows, the title narrows them.
+ * When the column and the title both miss the only row that was passed in, the record belongs to another test and is not attached.
+ * When several rows still fit and neither column nor title can choose, every one of them is returned so the finding is not dropped.
  */
 export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest[] {
   const eligible = tests.filter((test) => {
@@ -143,14 +146,26 @@ export function matchInventory(tests: readonly InventoryTest[], projectDir: stri
     const file = path.relative(projectDir, test.file).split(path.sep).join('/');
     return file === group.testFile && test.line === group.testLine;
   });
+  const titled =
+    group.testTitle.length > 0 ? eligible.filter((test) => test.titlePath.join(' > ') === group.testTitle) : [];
   if (group.testColumn > 0) {
     const byColumn = eligible.filter((test) => columnsFor(test).includes(group.testColumn));
     if (byColumn.length === 1) return byColumn;
-    if (byColumn.length > 1) return byColumn;
+    if (byColumn.length > 1) {
+      const narrowed = byColumn.filter((test) => titled.includes(test));
+      if (narrowed.length > 0) return narrowed;
+      return byColumn;
+    }
   }
-  if (eligible.length === 1) return eligible;
-  const titled = eligible.filter((test) => test.titlePath.join(' > ') === group.testTitle);
-  if (titled.length === 1) return titled;
+  if (titled.length > 0) return titled;
+  if (eligible.length === 1) {
+    const only = eligible[0];
+    if (!only) return [];
+    const columnOk = group.testColumn === 0 || columnsFor(only).includes(group.testColumn);
+    const titleOk = group.testTitle.length === 0 || only.titlePath.join(' > ') === group.testTitle;
+    if (columnOk || titleOk) return [only];
+    return [];
+  }
   return eligible;
 }
 

@@ -404,6 +404,113 @@ test('two tests on one line keep the finding on the call Playwright records', ()
   assert.equal(right.findings.length, 0);
 });
 
+test('a same-line locator stays on the test that recorded it', () => {
+  const tests = [
+    inventory('fails', 'tests/same.spec.ts', { line: 1, column: 50, evidenceColumns: [50, 54] }),
+    inventory('ghost', 'tests/same.spec.ts', { line: 1, column: 179, evidenceColumns: [179, 183] }),
+  ];
+  const records = [
+    use({
+      selector: '#never',
+      api: "locator('#never')",
+      phase: 'action',
+      call: 'click',
+      matchCount: 0,
+      actionSucceeded: false,
+      resolvedOnAction: false,
+      testFile: 'tests/same.spec.ts',
+      testLine: 1,
+      testColumn: 63,
+      testTitle: 'fails',
+      file: 'tests/same.spec.ts',
+      line: 1,
+      column: 159,
+    }),
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/same.spec.ts',
+      testLine: 1,
+      testColumn: 192,
+      testTitle: 'ghost',
+      file: 'tests/same.spec.ts',
+      line: 1,
+      column: 296,
+    }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 1,
+    passed: 1,
+    failed: 1,
+    skipped: 0,
+    failedKeys: new Set(['tests/same.spec.ts:1:54']),
+    seenKeys: new Set(['tests/same.spec.ts:1:54', 'tests/same.spec.ts:1:183']),
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const result = evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline);
+  const report = reportFor(tests, result);
+  const fails = report.tests.find((entry) => entry.titlePath.join(' > ') === 'fails');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 'ghost');
+  assert.equal(fails.verdict, 'baseline-red');
+  assert.equal(fails.findings.length, 0);
+  assert.equal(ghost.verdict, 'review');
+  assert.deepEqual(ghost.findings.map((finding) => finding.ruleId), [L002_RULE_ID]);
+  assert.equal(ghost.findings.some((finding) => finding.evidence.includes('#never')), false);
+  assert.equal(ghost.findings.some((finding) => finding.evidence.includes('Runtime titles: fails')), false);
+  assert.match(ghost.findings[0].evidence, /#ghost/);
+});
+
+test('a test that fails the evidence run is not-run and not trusted', () => {
+  const tests = [inventory('blows', 'tests/g.spec.ts', { line: 4, column: 1, evidenceColumns: [1, 5] })];
+  const records = [
+    use({
+      selector: '#ghost',
+      api: "locator('#ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/g.spec.ts',
+      testLine: 4,
+      testColumn: 5,
+      testTitle: 'blows',
+      file: 'tests/g.spec.ts',
+      line: 4,
+    }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 0,
+    passed: 1,
+    failed: 0,
+    skipped: 0,
+    failedKeys: new Set(),
+    seenKeys: new Set(['tests/g.spec.ts:4:5']),
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const trustedIfIgnored = evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline);
+  assert.equal(reportFor(tests, trustedIfIgnored).tests[0].verdict, 'review');
+  const evidenceRun = {
+    ok: true,
+    exitCode: 1,
+    passed: 0,
+    failed: 1,
+    skipped: 0,
+    failedKeys: new Set(['tests/g.spec.ts:4:5']),
+    seenKeys: new Set(['tests/g.spec.ts:4:5']),
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const result = evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline, evidenceRun);
+  assert.equal(result.findings.length, 0);
+  assert.equal(result.notRun.size, 1);
+  assert.equal(reportFor(tests, result).tests[0].verdict, 'not-run');
+});
+
 test('an unmatched column does not leave either row trusted', () => {
   const tests = [
     inventory('left ${n}', 'tests/p.spec.ts', { line: 9, column: 3, evidenceColumns: [3, 7] }),

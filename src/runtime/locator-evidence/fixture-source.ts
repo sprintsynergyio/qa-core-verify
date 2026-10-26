@@ -218,10 +218,9 @@ function wrapLocator(locator, store) {
   }
   const originalContentFrame = locator.contentFrame;
   if (typeof originalContentFrame === 'function') {
-    locator.contentFrame = async function (...args) {
-      const frame = await originalContentFrame.apply(locator, args);
-      if (!frame) return frame;
-      return wrapFrame(frame, store);
+    locator.contentFrame = function (...args) {
+      const frame = originalContentFrame.apply(locator, args);
+      return remember(frame, store);
     };
   }
   return locator;

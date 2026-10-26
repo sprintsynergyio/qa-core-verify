@@ -1093,3 +1093,69 @@ test('a --config outside the project is refused and does not run Playwright', (t
   assert.equal(fs.existsSync(path.join(out, 'report.json')), false);
   assert.equal(fs.readdirSync(scratch).some((name) => name.startsWith('qcv-run-')), false);
 });
+
+test('a same-line ghost test does not inherit the other test locator', (t) => {
+  const project = tempDir(t, 'qcv-same-line-');
+  const scratch = tempDir(t, 'qcv-same-line-tmp-');
+  const out = tempDir(t, 'qcv-same-line-out-');
+  writeTiny(
+    project,
+    "import { test, expect } from '@playwright/test'; test('fails', async ({ page }) => { await page.setContent('<p>a</p>'); await page.locator('#never').click({ timeout: 300 }); }); test('ghost', async ({ page }) => { await page.setContent('<p>a</p>'); await expect(page.locator('#ghost')).toBeHidden(); });\n",
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch }, project);
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 'ghost');
+  const fails = report.tests.find((entry) => entry.titlePath.join(' > ') === 'fails');
+  assert.ok(ghost, result.stdout);
+  assert.equal(fails.verdict, 'baseline-red');
+  assert.deepEqual(
+    ghost.findings.map((finding) => finding.ruleId),
+    ['QCV-L002'],
+    `${result.stdout}\n${JSON.stringify(ghost.findings)}`,
+  );
+  assert.equal(ghost.findings.some((finding) => String(finding.evidence).includes('Runtime titles: fails')), false);
+  assert.equal(ghost.findings.some((finding) => String(finding.evidence).includes('#never')), false);
+  assert.equal(ghost.verdict, 'review');
+});
+
+test('contentFrame stays synchronous and a failed evidence test is not trusted', (t) => {
+  const project = tempDir(t, 'qcv-frame-');
+  const scratch = tempDir(t, 'qcv-frame-tmp-');
+  const out = tempDir(t, 'qcv-frame-out-');
+  writeTiny(
+    project,
+    `import { test, expect } from '@playwright/test';
+
+test('frame ghost', async ({ page }) => {
+  await page.setContent('<iframe srcdoc="<p>in</p>"></iframe>');
+  const f = page.locator('iframe').contentFrame();
+  await expect(f.locator('#cf-ghost')).toBeHidden();
+});
+
+test('records', async ({ page }) => {
+  await page.setContent('<p>a</p>');
+  await expect(page.locator('#missing')).toBeHidden();
+});
+
+test('evidence blows up', async ({ page }) => {
+  await page.setContent('<p>a</p>');
+  await expect(page.locator('p')).toHaveText('a');
+  if (process.env.QCV_EVIDENCE_DIR) throw new Error('evidence boom');
+});
+`,
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch }, project);
+  assert.equal(result.stderr.includes('f.locator is not a function'), false, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.includes('f.locator is not a function'), false, result.stdout);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const frame = report.tests.find((entry) => entry.titlePath.join(' > ') === 'frame ghost');
+  const blows = report.tests.find((entry) => entry.titlePath.join(' > ') === 'evidence blows up');
+  assert.ok(frame, result.stdout);
+  assert.equal(frame.verdict, 'review', `${result.stdout}\n${result.stderr}`);
+  assert.equal(frame.verdict === 'trusted', false);
+  assert.equal(frame.findings.some((finding) => finding.ruleId === 'QCV-L002'), true, JSON.stringify(frame.findings));
+  assert.equal(blows.verdict, 'not-run', `${result.stdout}\n${result.stderr}`);
+  assert.equal(blows.verdict === 'trusted', false);
+  assert.equal(blows.findings.length, 0);
+});
