@@ -138,7 +138,8 @@ export function columnsFor(test: InventoryTest): number[] {
  * A record is not given to every test on the line.
  * When the column matches several rows, the title narrows them.
  * When the column and the title both miss the only row that was passed in, the record belongs to another test and is not attached.
- * When several rows still fit and neither column nor title can choose, every one of them is returned so the finding is not dropped.
+ * When the record has a column or a title and neither matches a remaining row, no row is returned.
+ * When both the column and the title are absent, every remaining row is returned.
  */
 export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest[] {
   const eligible = tests.filter((test) => {
@@ -166,6 +167,7 @@ export function matchInventory(tests: readonly InventoryTest[], projectDir: stri
     if (columnOk || titleOk) return [only];
     return [];
   }
+  if (group.testColumn > 0 || group.testTitle.length > 0) return [];
   return eligible;
 }
 

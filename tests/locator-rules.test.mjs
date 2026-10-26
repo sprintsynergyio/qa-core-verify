@@ -511,7 +511,7 @@ test('a test that fails the evidence run is not-run and not trusted', () => {
   assert.equal(reportFor(tests, result).tests[0].verdict, 'not-run');
 });
 
-test('an unmatched column does not leave either row trusted', () => {
+test('a column and a title that match no row are not given to every test on the line', () => {
   const tests = [
     inventory('left ${n}', 'tests/p.spec.ts', { line: 9, column: 3, evidenceColumns: [3, 7] }),
     inventory('right ${n}', 'tests/p.spec.ts', { line: 9, column: 139, evidenceColumns: [139, 143] }),
@@ -531,8 +531,179 @@ test('an unmatched column does not leave either row trusted', () => {
   ];
   const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), ranBaseline()));
   assert.equal(report.tests.length, 2);
+  assert.equal(report.tests.every((entry) => entry.findings.length === 0), true);
+  assert.equal(report.tests.every((entry) => entry.verdict === 'trusted'), true);
+});
+
+test('a record with no column and no title stays on every test on the line', () => {
+  const tests = [
+    inventory('left ${n}', 'tests/p.spec.ts', { line: 9, column: 3, evidenceColumns: [3, 7] }),
+    inventory('right ${n}', 'tests/p.spec.ts', { line: 9, column: 139, evidenceColumns: [139, 143] }),
+  ];
+  const records = [
+    use({
+      selector: '#left-ghost',
+      api: "locator('#left-ghost')",
+      call: 'toBeHidden',
+      testFile: 'tests/p.spec.ts',
+      testLine: 9,
+      testColumn: 0,
+      testTitle: '',
+      file: 'tests/p.spec.ts',
+      line: 9,
+    }),
+  ];
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), ranBaseline()));
+  assert.equal(report.tests.length, 2);
   assert.equal(report.tests.every((entry) => entry.verdict !== 'trusted'), true);
   assert.equal(report.tests.every((entry) => entry.findings.some((finding) => finding.ruleId === L002_RULE_ID)), true);
+});
+
+test('three tests on one line do not inherit a baseline-red locator', () => {
+  const tests = [
+    inventory('t1 fails', 'tests/three.spec.ts', { line: 3, column: 1, evidenceColumns: [1, 5] }),
+    inventory('t2 ghost', 'tests/three.spec.ts', { line: 3, column: 200, evidenceColumns: [200, 204] }),
+    inventory('t3 clean', 'tests/three.spec.ts', { line: 3, column: 400, evidenceColumns: [400, 404] }),
+  ];
+  const records = [
+    use({
+      selector: '#never1',
+      api: "locator('#never1')",
+      phase: 'action',
+      call: 'click',
+      matchCount: 0,
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 80,
+      testTitle: 't1 fails',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 105,
+    }),
+    use({
+      selector: '#ghost2',
+      api: "locator('#ghost2')",
+      call: 'toBeHidden',
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 250,
+      testTitle: 't2 ghost',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 280,
+    }),
+    use({
+      selector: '#user-name',
+      api: "locator('#user-name')",
+      call: 'toBeVisible',
+      matchCount: 1,
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 450,
+      testTitle: 't3 clean',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 470,
+    }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 1,
+    passed: 2,
+    failed: 1,
+    skipped: 0,
+    failedKeys: new Set(['tests/three.spec.ts:3:5']),
+    seenKeys: new Set(['tests/three.spec.ts:3:5', 'tests/three.spec.ts:3:204', 'tests/three.spec.ts:3:404']),
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline));
+  const fails = report.tests.find((entry) => entry.titlePath.join(' > ') === 't1 fails');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 't2 ghost');
+  const clean = report.tests.find((entry) => entry.titlePath.join(' > ') === 't3 clean');
+  assert.equal(fails.verdict, 'baseline-red');
+  assert.equal(fails.findings.length, 0);
+  assert.equal(ghost.verdict, 'review');
+  assert.deepEqual(ghost.findings.map((finding) => finding.ruleId), [L002_RULE_ID]);
+  assert.equal(ghost.findings.some((finding) => finding.evidence.includes('#never1')), false);
+  assert.equal(ghost.findings.some((finding) => finding.column === 105), false);
+  assert.equal(clean.verdict, 'trusted');
+  assert.equal(clean.findings.length, 0);
+});
+
+test('three passing tests on one line keep a locator on the test that recorded it', () => {
+  const tests = [
+    inventory('t1 passes', 'tests/three.spec.ts', { line: 3, column: 1, evidenceColumns: [1, 5] }),
+    inventory('t2 ghost', 'tests/three.spec.ts', { line: 3, column: 200, evidenceColumns: [200, 204] }),
+    inventory('t3 clean', 'tests/three.spec.ts', { line: 3, column: 400, evidenceColumns: [400, 404] }),
+  ];
+  const records = [
+    use({
+      selector: '#never1',
+      api: "locator('#never1')",
+      phase: 'action',
+      call: 'click',
+      matchCount: 0,
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 80,
+      testTitle: 't1 passes',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 105,
+    }),
+    use({
+      selector: '#ghost2',
+      api: "locator('#ghost2')",
+      call: 'toBeHidden',
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 250,
+      testTitle: 't2 ghost',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 280,
+    }),
+    use({
+      selector: '#user-name',
+      api: "locator('#user-name')",
+      call: 'toBeVisible',
+      matchCount: 1,
+      testFile: 'tests/three.spec.ts',
+      testLine: 3,
+      testColumn: 450,
+      testTitle: 't3 clean',
+      file: 'tests/three.spec.ts',
+      line: 3,
+      column: 470,
+    }),
+  ];
+  const baseline = {
+    ok: true,
+    exitCode: 0,
+    passed: 3,
+    failed: 0,
+    skipped: 0,
+    failedKeys: new Set(),
+    seenKeys: new Set(['tests/three.spec.ts:3:5', 'tests/three.spec.ts:3:204', 'tests/three.spec.ts:3:404']),
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const report = reportFor(tests, evaluateLocatorCheck(projectDir, tests, evidenceFile(records), baseline));
+  const passes = report.tests.find((entry) => entry.titlePath.join(' > ') === 't1 passes');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 't2 ghost');
+  const clean = report.tests.find((entry) => entry.titlePath.join(' > ') === 't3 clean');
+  assert.equal(passes.verdict, 'untrusted');
+  assert.deepEqual(passes.findings.map((finding) => finding.ruleId), [L001_RULE_ID]);
+  assert.equal(passes.findings[0].column, 105);
+  assert.match(passes.findings[0].evidence, /#never1/);
+  assert.equal(ghost.verdict, 'review');
+  assert.deepEqual(ghost.findings.map((finding) => finding.ruleId), [L002_RULE_ID]);
+  assert.equal(ghost.findings.some((finding) => finding.evidence.includes('#never1')), false);
+  assert.equal(clean.verdict, 'trusted');
+  assert.equal(clean.findings.length, 0);
 });
 
 test('parseBaseline records a skipped spec by file, line, and column', () => {

@@ -1119,6 +1119,60 @@ test('a same-line ghost test does not inherit the other test locator', (t) => {
   assert.equal(ghost.verdict, 'review');
 });
 
+test('three tests on one line do not inherit a baseline-red locator', (t) => {
+  const project = tempDir(t, 'qcv-three-line-');
+  const scratch = tempDir(t, 'qcv-three-line-tmp-');
+  const out = tempDir(t, 'qcv-three-line-out-');
+  writeTiny(
+    project,
+    "import { test, expect } from '@playwright/test';\ntest('a', async () => {});\ntest('t1 fails', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); await page.locator('#never1').click({ timeout: 300 }); }); test('t2 ghost', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); await expect(page.locator('#ghost2')).toBeHidden(); }); test('t3 clean', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); await expect(page.locator('#user-name')).toBeVisible(); });\n",
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch }, project);
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const fails = report.tests.find((entry) => entry.titlePath.join(' > ') === 't1 fails');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 't2 ghost');
+  const clean = report.tests.find((entry) => entry.titlePath.join(' > ') === 't3 clean');
+  assert.ok(fails, result.stdout);
+  assert.equal(fails.verdict, 'baseline-red');
+  assert.equal(fails.findings.length, 0);
+  assert.equal(ghost.verdict, 'review', `${result.stdout}\n${JSON.stringify(ghost.findings)}`);
+  assert.deepEqual(
+    ghost.findings.map((finding) => finding.ruleId),
+    ['QCV-L002'],
+    JSON.stringify(ghost.findings),
+  );
+  assert.equal(ghost.findings.some((finding) => String(finding.evidence).includes('#never1')), false);
+  assert.equal(clean.verdict, 'trusted', `${result.stdout}\n${JSON.stringify(clean.findings)}`);
+  assert.equal(clean.findings.length, 0);
+  assert.equal(clean.findings.some((finding) => String(finding.evidence).includes('#never1')), false);
+});
+
+test('three passing tests on one line keep a locator on the test that recorded it', (t) => {
+  const project = tempDir(t, 'qcv-three-pass-');
+  const scratch = tempDir(t, 'qcv-three-pass-tmp-');
+  const out = tempDir(t, 'qcv-three-pass-out-');
+  writeTiny(
+    project,
+    "import { test, expect } from '@playwright/test';\ntest('a', async () => {});\ntest('t1 passes', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); try { await page.locator('#never1').click({ timeout: 300 }); } catch {} }); test('t2 ghost', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); await expect(page.locator('#ghost2')).toBeHidden(); }); test('t3 clean', async ({ page }) => { await page.setContent('<input id=\"user-name\">'); await expect(page.locator('#user-name')).toBeVisible(); });\n",
+  );
+  const result = runCli([project, '--only', 'locator', '--out', out], { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch }, project);
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const passes = report.tests.find((entry) => entry.titlePath.join(' > ') === 't1 passes');
+  const ghost = report.tests.find((entry) => entry.titlePath.join(' > ') === 't2 ghost');
+  const clean = report.tests.find((entry) => entry.titlePath.join(' > ') === 't3 clean');
+  assert.ok(passes, result.stdout);
+  assert.equal(passes.verdict, 'untrusted', `${result.stdout}\n${JSON.stringify(passes.findings)}`);
+  assert.deepEqual(passes.findings.map((finding) => finding.ruleId), ['QCV-L001']);
+  assert.match(passes.findings[0].evidence, /#never1/);
+  assert.equal(ghost.verdict, 'review', JSON.stringify(ghost.findings));
+  assert.deepEqual(ghost.findings.map((finding) => finding.ruleId), ['QCV-L002']);
+  assert.equal(ghost.findings.some((finding) => String(finding.evidence).includes('#never1')), false);
+  assert.equal(clean.verdict, 'trusted', JSON.stringify(clean.findings));
+  assert.equal(clean.findings.length, 0);
+});
+
 test('contentFrame stays synchronous and a failed evidence test is not trusted', (t) => {
   const project = tempDir(t, 'qcv-frame-');
   const scratch = tempDir(t, 'qcv-frame-tmp-');
