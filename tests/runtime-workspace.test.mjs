@@ -550,7 +550,10 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
 
 test('an existing .qa-core directory on a SauceDemo copy is left in place', (t) => {
   const before = hashTree(sauceDemo);
-  const hadRuntimeDir = fs.existsSync(path.join(sauceDemo, '.qa-core'));
+  const realRuntime = path.join(sauceDemo, '.qa-core');
+  const realStamp = path.join(realRuntime, 'verify', 'preexisting.txt');
+  const hadRuntimeDir = fs.existsSync(realRuntime);
+  const realStampBefore = fs.existsSync(realStamp) ? fs.readFileSync(realStamp) : null;
   const copy = tempDir(t, 'qcv-sauce-runtime-');
   fs.cpSync(sauceDemo, copy, {
     recursive: true,
@@ -578,8 +581,10 @@ test('an existing .qa-core directory on a SauceDemo copy is left in place', (t) 
   }
   assert.match(result.stdout, /Reports: \.qa-core\/verify\/report\.json/);
   assert.equal(hashTree(sauceDemo), before);
-  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), hadRuntimeDir);
-  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core', 'verify', 'preexisting.txt')), false);
+  assert.equal(fs.existsSync(realRuntime), hadRuntimeDir);
+  const realStampAfter = fs.existsSync(realStamp) ? fs.readFileSync(realStamp) : null;
+  if (realStampBefore === null) assert.equal(realStampAfter, null);
+  else assert.ok(realStampAfter && realStampAfter.equals(realStampBefore));
 });
 
 const HELPER_SOURCE = `import { expect } from '@playwright/test';
