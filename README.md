@@ -63,11 +63,11 @@ QCV-L001 is an error when an action or a positive assertion never matched. QCV-L
 
 ## Assertion Inversion
 
-`--only inversion` is the cannot-fail check, rule QCV-F001. It runs the suite once as a baseline in a temp copy. For each assertion in a green test it writes one mutant, runs only that test (`<file>:<line>`) with `--retries=0` and `--workers=1`, then restores the file before the next mutant. The mutant adds `.not` when it is absent and removes `.not` when it is present. `.soft` and `.poll` stay. `toPass` and a custom matcher are not inverted. Those rows are `skipped` and the finding is info.
+`--only inversion` is the cannot-fail check, rule QCV-F001. It runs the suite once as a baseline in a temp copy. For each assertion in a green test it writes one mutant, runs only that test (`<file>:<line>`) with `--retries=0` and `--workers=1`, then restores the file before the next mutant. The mutant adds `.not` when it is absent and removes `.not` when it is present. `.soft` and `.poll` stay. `toPass` and a custom matcher are not inverted. Those rows are `skipped` and the finding is info. A `skipped` outcome does not lower the row. A test whose assertions are all `skipped` stays `trusted` when it has no warn or error.
 
 Before those mutants, each green test is run on its own with the same `<file>:<line>` command and no mutation. A test that does not pass that control run is not inverted. Its assertions are `not-run`.
 
-Outcomes are read from the test status in the Playwright JSON reporter (`tests[].status`), not from the raw result status. `killed` means status `unexpected`: the inverted test broke its contract. `survived` means status `expected`, including an expected `test.fail()`, and a run where one project passed and the others skipped. That is QCV-F001 at error when the mutant survived. `timeout` is a result status `timedOut`. `error` is a missing report, an interrupted run, or a status this check cannot classify. A timeout or an error is not counted as good. The test row is `not-run` when an assertion was not checked and none survived. `--max-runs <n>` stops after n mutant runs. stderr prints the plan before those runs (`Inversion plan: N mutants, M runs.`) and `Stopped at limit.` when the cap is hit. Assertions that were not started are `not-run` with that reason.
+Outcomes are read from the test status in the Playwright JSON reporter (`tests[].status`), not from the raw result status. `killed` means status `unexpected`: the inverted test broke its contract. `survived` means status `expected`, including an expected `test.fail()`, and a run where one project passed and the others skipped. That is QCV-F001 at error when the mutant survived. `timeout` is a result status `timedOut`. `error` is a missing report, an interrupted run, or a status this check cannot classify. A timeout or an error is not counted as good. The test row is `not-run` when an assertion was not checked and none survived. That covers `not-run`, `timeout`, and `error`. It does not cover `skipped`. `--max-runs <n>` stops after n mutant runs. Control runs are not part of that count. stderr prints the plan after the control runs (`Inversion plan: N mutants, M runs. Control runs are already finished and are not part of this count.`) and `Stopped at limit.` when the cap is hit. Assertions that were not started are `not-run` with that reason. `inversion.mutants` counts the mutant runs plus the assertions stopped at the limit. A baseline `not-run` assertion is not a mutant. See [docs/report-schema.md](docs/report-schema.md).
 
 The unawaited `toBeVisible` at `example-project/saucedemo/tests/ai-style/weak-assertions.spec.ts:18` is killed. Playwright 1.60 fails that test when the unawaited locator assertion fails or is still pending at the end of the test. The static finding on that line stays QCV-W003.
 
@@ -96,6 +96,40 @@ The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](
 `--only locator` adds QCV-L001 through QCV-L004. The command opens a browser. It is not part of `npm test` unless `QCV_LIVE=1`.
 
 `--only inversion` adds QCV-F001. The command opens a browser once for the baseline and once per inverted assertion. It is not part of `npm test` unless `QCV_LIVE=1`.
+
+## Fault Injection
+
+`--only faults` is the other cannot-fail check. It runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture, the same approach as locator evidence. The fixture applies one fault per run with `context.addInitScript` and `page.route`. While a fault is active the page action timeout is 8 seconds and the navigation timeout is 15 seconds, so a missing element does not wait out the project's test timeout. The baseline run does not change those timeouts. The original project is not written.
+
+The idea of mutating the DOM in the browser, instead of application source, comes from Yandrapally and Mesbah, "Mutation Analysis for Assessing End-to-End Web Tests", ICSME 2021. See [RESEARCH.md](RESEARCH.md). This checker does not claim to be that framework. It uses a smaller set of faults.
+
+`blank-app` is built in. After the document loads it replaces the body with one empty element and keeps the body empty when the app renders again. A green test that stays green under `blank-app` is QCV-F002.
+
+The project may add `qa-core-verify.faults.json`. Each entry is `{ id, type, params, expectedToBreak }`. `expectedToBreak` holds JavaScript regular expressions matched against the title path and the test title. A listed test that stays green is QCV-F003. A test that stays green under every fault, including `blank-app`, is QCV-F004, a warn that lists the fault ids.
+
+Fault types:
+
+- `blank-app`, params `{}`.
+- `remove-element`, params `{ "selector": "css" }`. The selector is removed, including after a re-render.
+- `hide-element`, params `{ "selector": "css" }`. The selector is hidden with `display: none`.
+- `change-text`, params `{ "selector": "css", "text": "replacement" }`. The text is replaced, including after a re-render. When an absence assertion uses that same `locator()` selector and the selector still matches nothing, QCV-L002 is raised from warn to error.
+- `block-request`, params `{ "urlPattern": "**/path" }`. `page.route` aborts the request. The pattern is a Playwright URL pattern.
+- `user-swap`, params `{ "env": { "NAME": "value" } }`. The named variables are set on the Playwright process for that run. Names match `[A-Za-z_][A-Za-z0-9_]*`. The SauceDemo suite reads `SAUCE_USER` and `SAUCE_PASSWORD`. The demo file lists only users that were observed to break a test in `tests/good`. See `example-project/saucedemo/FAULTS.md`.
+
+A missing fault file still runs `blank-app`. A file that omits `blank-app` still runs it first. Every other fault keeps the file order.
+
+The report lists a fault matrix on each test: the fault id and `pass`, `fail`, `skipped`, or `not-run`. The console summary line starts with `Faults:`.
+
+```sh
+npm run build
+node dist/cli.js example-project/saucedemo --only faults
+```
+
+The command opens a browser. The local fixture tests do not use the network. The SauceDemo demo does. It is not part of `npm test` unless `QCV_LIVE=1` for the live golden test. The local HTML fixture test is part of `npm test`.
+
+`--only faults` adds QCV-F002, QCV-F003, and QCV-F004.
+
+Install Chromium, then run the locator demo:
 
 ```sh
 npx playwright install chromium

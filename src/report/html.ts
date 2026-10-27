@@ -97,6 +97,12 @@ export function formatHtml(report: Report): string {
     parts.push(
       `<p class="meta">${escapeHtml(displayText(test.file))}:${test.line} <span class="badge verdict-${test.verdict}">${escapeHtml(test.verdict)}</span></p>`,
     );
+    if (test.reason) parts.push(`<p>Reason: ${escapeHtml(test.reason)}</p>`);
+    if (test.faults && test.faults.length > 0) {
+      parts.push('<ul class="faults">');
+      for (const cell of test.faults) parts.push(`<li>${escapeHtml(cell.id)} ${escapeHtml(cell.result)}</li>`);
+      parts.push('</ul>');
+    }
     if (test.assertions && test.assertions.length > 0) {
       parts.push('<ul class="assertions">');
       for (const assertion of test.assertions) {

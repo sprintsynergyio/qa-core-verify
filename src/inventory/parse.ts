@@ -232,12 +232,14 @@ function walkSuite(
     const kind = classifyCall(node, bindings);
     if (kind?.type === 'describe') {
       const callback = callbackOf(node);
-      const titlePath = [...ctx.titles, readTitle(node, sourceFile)];
+      const firstArg = node.arguments[0];
+      const anonymous = !!firstArg && (ts.isArrowFunction(firstArg) || ts.isFunctionExpression(firstArg));
+      const titlePath = anonymous ? [...ctx.titles] : [...ctx.titles, readTitle(node, sourceFile)];
       const sites = sitesFor(node, kind.modifiers, sourceFile);
       if (kind.modifiers.includes('skip')) {
         const pos = positionOf(node, sourceFile);
         skippedDescribes.push({
-          titlePath,
+          titlePath: titlePath.length > 0 ? titlePath : [''],
           file: sourceFile.fileName,
           line: pos.line,
           column: pos.column,
@@ -289,7 +291,9 @@ function noteSuiteAliases(statement: ts.VariableStatement, ctx: SuiteContext, bi
     if (ts.isIdentifier(init) && (bindings.expectLocals.has(init.text) || ctx.expectAliases.has(init.text))) {
       ctx.expectAliases.add(name);
       ctx.softAliases.delete(name);
+      continue;
     }
+    if (ts.isIdentifier(init) && bindings.testLocals.has(init.text)) bindings.testLocals.add(name);
   }
 }
 
@@ -677,13 +681,21 @@ function evidenceText(call: ts.CallExpression, sourceFile: ts.SourceFile): strin
 
 function unwrapExpression(expr: ts.Expression): ts.Expression {
   let current = expr;
-  while (
-    ts.isParenthesizedExpression(current) ||
-    ts.isAsExpression(current) ||
-    ts.isSatisfiesExpression(current) ||
-    ts.isNonNullExpression(current)
-  ) {
-    current = current.expression;
+  while (true) {
+    if (
+      ts.isParenthesizedExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isSatisfiesExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+      continue;
+    }
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      current = current.right;
+      continue;
+    }
+    break;
   }
   return current;
 }
@@ -742,6 +754,8 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
         } else if (isConst && isFileScope(node) && ts.isIdentifier(init) && expectLocals.has(init.text)) {
           expectLocals.add(node.name.text);
           softLocals.delete(node.name.text);
+        } else if (isConst && isFileScope(node) && ts.isIdentifier(init) && testLocals.has(init.text)) {
+          testLocals.add(node.name.text);
         }
       }
     }
@@ -848,7 +862,7 @@ function bindImport(
   const named = clause.namedBindings;
   if (!named) return;
   if (ts.isNamespaceImport(named)) {
-    if (playwright) namespaces.add(named.name.text);
+    namespaces.add(named.name.text);
     return;
   }
   for (const element of named.elements) {
@@ -954,7 +968,35 @@ function evidenceColumnsFor(call: ts.CallExpression, sourceFile: ts.SourceFile):
   } else if (typescript && ts.isIdentifier(expr)) {
     columns.add(start + expr.text.length);
   }
+  for (const column of callPunctuationColumns(call, sourceFile)) columns.add(column);
   return [...columns].sort((left, right) => left - right);
+}
+
+/**
+ * Columns from the end of the callee through the opening parenthesis.
+ * A block comment in that gap is included. Playwright 1.60 can report the
+ * column on the slash that starts the comment.
+ */
+function callPunctuationColumns(call: ts.CallExpression, sourceFile: ts.SourceFile): number[] {
+  const text = sourceFile.getFullText();
+  const columns: number[] = [];
+  let index = call.expression.end;
+  while (index < text.length && text[index] !== '\n') {
+    if (text.startsWith('//', index)) break;
+    if (text.startsWith('/*', index)) {
+      const end = text.indexOf('*/', index + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      while (index < stop && text[index] !== '\n') {
+        columns.push(positionAt(sourceFile, index).column);
+        index += 1;
+      }
+      continue;
+    }
+    columns.push(positionAt(sourceFile, index).column);
+    if (text[index] === '(') break;
+    index += 1;
+  }
+  return columns;
 }
 
 function positionAt(sourceFile: ts.SourceFile, position: number): { line: number; column: number } {

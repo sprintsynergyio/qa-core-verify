@@ -1061,7 +1061,7 @@ test('would run', () => {
     project,
   );
   assert.equal(empty.status, 2, `${empty.stdout}\n${empty.stderr}`);
-  assert.match(empty.stderr, /Playwright config does not exist/);
+  assert.match(empty.stderr, /The directory holds no playwright\.config\.\* file/);
   assert.equal(empty.stderr.includes('Baseline:'), false);
   assert.equal(empty.stderr.includes('Workspace:'), false);
   assert.equal(fs.existsSync(marker), false);

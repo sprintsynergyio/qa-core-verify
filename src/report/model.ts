@@ -51,6 +51,10 @@ export interface ReportTest {
   locators?: ReportLocator[];
   /** Present when the assertion-inversion check listed this row's assertions. */
   assertions?: ReportAssertion[];
+  /** Why a not-run row was not evaluated, when the checker knows. */
+  reason?: string;
+  /** Fault id and result. Present when the fault-injection check ran. */
+  faults?: ReportFaultCell[];
 }
 
 export type AssertionOutcomeName = 'killed' | 'survived' | 'timeout' | 'error' | 'not-run' | 'skipped';
@@ -64,6 +68,17 @@ export interface ReportAssertion {
   outcome: AssertionOutcomeName;
   source: string;
   reason?: string;
+}
+
+export type FaultResultName = 'pass' | 'fail' | 'skipped' | 'not-run';
+
+export interface ReportFaultCell {
+  id: string;
+  result: FaultResultName;
+}
+
+export interface FaultRunSummary {
+  faults: { id: string; type: string }[];
 }
 
 export interface InversionSummary {
@@ -93,6 +108,8 @@ export interface Report {
   summary: ReportSummary;
   /** Present when `--only inversion` ran. Counts are computed from `tests[].assertions`. */
   inversion?: InversionSummary;
+  /** Present when `--only faults` ran. */
+  faultRun?: FaultRunSummary;
   tests: ReportTest[];
 }
 
@@ -133,6 +150,12 @@ export interface ReportInput {
   locatorSummaries?: ReadonlyMap<string, ReportLocator[]>;
   /** Owner ids mapped to assertion outcomes from the inversion check. */
   assertionSummaries?: ReadonlyMap<string, ReportAssertion[]>;
+  /** Owner ids mapped to a short reason, printed on not-run rows. */
+  statusReasons?: ReadonlyMap<string, string>;
+  /** Owner ids mapped to the fault matrix. */
+  faultCells?: ReadonlyMap<string, ReportFaultCell[]>;
+  /** Present when the fault-injection check ran. */
+  faultRun?: FaultRunSummary;
 }
 
 interface Row {
@@ -148,6 +171,8 @@ interface Row {
   absent: boolean;
   locators?: ReportLocator[];
   assertions?: ReportAssertion[];
+  reason?: string;
+  faults?: ReportFaultCell[];
 }
 
 /** ISO 8601 in local time, with the offset of `date` (for example `+05:00`). */
@@ -249,6 +274,7 @@ export function buildReport(input: ReportInput): Report {
     checksRun: [...input.checksRun],
     summary: summarize(tests),
     ...(inversion ? { inversion } : {}),
+    ...(input.faultRun ? { faultRun: input.faultRun } : {}),
     tests,
   };
 }
@@ -290,6 +316,7 @@ function rowsFor(input: ReportInput): Row[] {
       findings: [],
       baselineRed: input.baselineRed?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
       absent: input.notRun?.has(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)) === true,
+      reason: input.statusReasons?.get(ownerIdFor('test', test.file, test.line, test.column, test.titlePath)),
     });
   }
   for (const block of input.skippedDescribes) {
@@ -326,6 +353,13 @@ function rowsFor(input: ReportInput): Row[] {
       if (listed) row.assertions = listed.map((assertion) => ({ ...assertion }));
     }
   }
+  if (input.faultCells) {
+    for (const row of rows) {
+      if (row.kind === 'describe') continue;
+      const listed = input.faultCells.get(row.ownerId);
+      if (listed) row.faults = listed.map((cell) => ({ ...cell }));
+    }
+  }
   return rows;
 }
 
@@ -340,8 +374,10 @@ function toReportTest(row: Row, projectDir: string): ReportTest {
     verdict: verdictFor(row.kind, row.modifiers, row.findings, row.baselineRed, row.absent),
     findings: row.findings.map((finding) => toReportFinding(finding, projectDir)),
   };
+  if (row.reason) report.reason = row.reason;
   if (row.locators) report.locators = row.locators;
   if (row.assertions) report.assertions = row.assertions;
+  if (row.faults) report.faults = row.faults;
   return report;
 }
 

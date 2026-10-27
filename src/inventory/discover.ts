@@ -139,7 +139,7 @@ export function resolvePlaywrightConfigFile(configPath: string): string {
   }
   if (fs.statSync(resolved).isDirectory()) {
     const found = findPlaywrightConfig(resolved);
-    if (!found) throw new ToolError(`Playwright config does not exist: ${resolved}`);
+    if (!found) throw new ToolError(`The directory holds no playwright.config.* file: ${resolved}`);
     return found;
   }
   if (!fs.statSync(resolved).isFile()) {

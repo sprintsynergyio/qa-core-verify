@@ -13,7 +13,7 @@ const nthKey = Symbol('qcvNth');
 const evidenceDir = process.env.QCV_EVIDENCE_DIR || '';
 let pendingRecords = 0;
 
-const CHAIN = ['locator', 'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByAltText', 'getByTitle', 'getByTestId', 'filter', 'and', 'or', 'first', 'last', 'nth', 'frameLocator'];
+const CHAIN = ['locator', 'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByAltText', 'getByTitle', 'getByTestId', 'filter', 'and', 'or', 'first', 'last', 'nth', 'frameLocator', 'owner'];
 const NARROW = new Set(['first', 'last', 'nth']);
 const ACTIONS = ['click', 'dblclick', 'tap', 'fill', 'press', 'pressSequentially', 'type', 'check', 'uncheck', 'selectOption', 'setInputFiles', 'hover', 'focus', 'clear', 'dragTo'];
 

@@ -20,6 +20,11 @@ export interface BaselineSummary {
    * The column is Playwright's. A project that passed or failed the same test removes the key.
    */
   skippedKeys?: Set<string>;
+  /**
+   * Set when Playwright exited without running a test, or reported a load error and ran nothing.
+   * The baseline is not green in that case.
+   */
+  loadError?: string;
   stdout: string;
   stderr: string;
 }
@@ -91,7 +96,37 @@ export function parseBaseline(
     else if (state.skipped && !state.ran) summary.skippedKeys?.add(key);
   }
   summary.ok = true;
+  const errors = readReportErrors(parsed);
+  const ran = summary.passed + summary.failed + summary.skipped;
+  if (ran === 0 && (errors.length > 0 || exitCode !== 0)) {
+    summary.ok = false;
+    summary.loadError =
+      errors.join('\n') || firstProblemLine(stderr, stdout) || `Playwright exited ${exitCode} without running a test.`;
+  }
   return summary;
+}
+
+function readReportErrors(parsed: object): string[] {
+  const raw = (parsed as { errors?: unknown }).errors;
+  if (!Array.isArray(raw)) return [];
+  const lines: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry === 'string' && entry.trim().length > 0) lines.push(entry.trim());
+    else if (typeof entry === 'object' && entry !== null && 'message' in entry) {
+      const message = (entry as { message?: unknown }).message;
+      if (typeof message === 'string' && message.trim().length > 0) lines.push(message.trim());
+    }
+  }
+  return lines;
+}
+
+function firstProblemLine(stderr: string, stdout: string): string | undefined {
+  for (const line of `${stderr}\n${stdout}`.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('at ') || trimmed.startsWith('at\t')) continue;
+    if (/Error|error TS|SyntaxError|failed|Failed|Cannot|Unexpected/.test(trimmed)) return trimmed;
+  }
+  return undefined;
 }
 
 /** One file, line, and column across every project spec that shares it. */

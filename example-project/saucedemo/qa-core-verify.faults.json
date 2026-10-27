@@ -1,0 +1,45 @@
+[
+  {
+    "id": "blank-app",
+    "type": "blank-app",
+    "params": {},
+    "expectedToBreak": []
+  },
+  {
+    "id": "cart-badge",
+    "type": "change-text",
+    "params": {
+      "selector": "[data-test='shopping-cart-badge']",
+      "text": "9"
+    },
+    "expectedToBreak": ["add to cart updates the cart badge", "does not read the page"]
+  },
+  {
+    "id": "products-title",
+    "type": "change-text",
+    "params": {
+      "selector": "[data-test='title']",
+      "text": "Not products"
+    },
+    "expectedToBreak": ["login lands on the inventory page"]
+  },
+  {
+    "id": "item-total",
+    "type": "change-text",
+    "params": {
+      "selector": "[data-test='subtotal-label']",
+      "text": "Item total: $0.00"
+    },
+    "expectedToBreak": ["checkout overview shows the backpack item total"]
+  },
+  {
+    "id": "problem-user",
+    "type": "user-swap",
+    "params": {
+      "env": {
+        "SAUCE_USER": "problem_user"
+      }
+    },
+    "expectedToBreak": ["checkout overview shows the backpack item total"]
+  }
+]

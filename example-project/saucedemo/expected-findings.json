@@ -7,8 +7,20 @@
   },
   {
     "file": "tests/ai-style/cannot-fail.spec.ts",
-    "line": 14,
+    "line": 16,
     "ruleId": "QCV-F002",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/cannot-fail.spec.ts",
+    "line": 16,
+    "ruleId": "QCV-F003",
+    "status": "pending"
+  },
+  {
+    "file": "tests/ai-style/cannot-fail.spec.ts",
+    "line": 16,
+    "ruleId": "QCV-F004",
     "status": "pending"
   },
   {

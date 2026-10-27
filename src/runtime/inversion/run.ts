@@ -158,6 +158,7 @@ export async function collectInversion(options: {
     projectDir,
     { keep: options.keepWorkspace, configFile: inventory.forwardedConfig },
     async (session) => {
+      for (const link of session.skippedLinks) console.error(`Skipped symlink ${link}.`);
       const baseline = await session.run([
         'test',
         '--retries=0',
@@ -167,24 +168,17 @@ export async function collectInversion(options: {
       ]);
       baselineRun = baseline;
       const parsed = parseBaseline(baseline.stdout, baseline.stderr, baseline.exitCode, session.workspaceDir);
-      if (!parsed.ok) throw new BaselineStartError(baseline);
+      if (!parsed.ok) throw new BaselineStartError(baseline, session.workspaceDir, projectDir, parsed.loadError ?? '');
       baselineSummary = parsed;
+      console.error(`Baseline: ${parsed.passed} passed, ${parsed.failed} failed, ${parsed.skipped} skipped.`);
       noteStaticAssertions(projectDir, inventory.tests, plans, parsed, collected);
       const work = mutantWork(projectDir, inventory.tests, plans, parsed);
-      const limit = options.maxRuns === undefined ? work.length : options.maxRuns;
-      console.error(`Inversion plan: ${work.length} mutants, ${Math.min(work.length, limit)} runs.`);
-      let executed = 0;
-      let stopped = 0;
       const controls = new Map<string, Promise<PlaywrightRun>>();
       const passedControl = new Set<string>();
       const failedControl = new Set<string>();
       let controlIndex = 0;
+      const ready: WorkItem[] = [];
       for (const item of work) {
-        if (executed >= limit) {
-          stopped += 1;
-          addAssertion(collected, item, 'not-run', 'Stopped at limit.');
-          continue;
-        }
         if (item.relativeFile.startsWith('..') || path.isAbsolute(item.relativeFile)) {
           addAssertion(collected, item, 'not-run', 'The assertion file is outside the temp copy.');
           continue;
@@ -212,6 +206,20 @@ export async function collectInversion(options: {
         }
         if (failedControl.has(owner)) {
           addAssertion(collected, item, 'not-run', 'The test did not pass when run on its own, so its assertions were not inverted.');
+          continue;
+        }
+        ready.push(item);
+      }
+      const limit = options.maxRuns === undefined ? ready.length : options.maxRuns;
+      console.error(
+        `Inversion plan: ${ready.length} mutants, ${Math.min(ready.length, limit)} runs. Control runs are already finished and are not part of this count.`,
+      );
+      let executed = 0;
+      let stopped = 0;
+      for (const item of ready) {
+        if (executed >= limit) {
+          stopped += 1;
+          addAssertion(collected, item, 'not-run', 'Stopped at limit.');
           continue;
         }
         executed += 1;
@@ -293,9 +301,12 @@ async function runOneMutant(
     return;
   }
   const original = fs.readFileSync(target);
+  let changed = false;
   try {
     assertWorkspaceFile(workspaceDir, target);
+    makeWritable(target);
     fs.writeFileSync(target, item.plan.mutated ?? original);
+    changed = true;
     const mutant = await run([
       'test',
       `${item.testRelative}:${item.test.line}`,
@@ -319,11 +330,32 @@ async function runOneMutant(
       return;
     }
     addAssertion(collected, item, classified.outcome, classified.reason);
-  } finally {
-    if (fs.existsSync(target)) {
-      assertWorkspaceFile(workspaceDir, target);
-      fs.writeFileSync(target, original);
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+      const message = error instanceof Error ? error.message : String(error);
+      addAssertion(collected, item, 'error', `The temp copy could not be written: ${message}`);
+      return;
     }
+    throw error;
+  } finally {
+    if (changed && fs.existsSync(target)) {
+      try {
+        makeWritable(target);
+        fs.writeFileSync(target, original);
+      } catch {
+        // The next assertion in another file still runs. This file stays as the copy left it.
+      }
+    }
+  }
+}
+
+function makeWritable(file: string): void {
+  try {
+    const mode = fs.statSync(file).mode;
+    if ((mode & 0o200) === 0) fs.chmodSync(file, mode | 0o200);
+  } catch {
+    // The write below reports the permission error.
   }
 }
 

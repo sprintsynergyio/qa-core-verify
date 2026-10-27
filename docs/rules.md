@@ -463,7 +463,7 @@ The second check is the absence. The first check has already shown that the loca
 
 ### Severity
 
-warn
+warn. `--only faults` raises this to error when a `change-text` fault should show the selector and the selector still matches nothing.
 
 ### Related Lint Rule
 
@@ -568,6 +568,102 @@ error
 ### Related Lint Rule
 
 None. The check runs Playwright. It is not part of the static audit.
+
+## QCV-F002 Passes On A Blank App
+
+### What
+
+A test that passed the baseline also passed when the page body was replaced with an empty element after load. A MutationObserver keeps the body empty when the app renders again. The fault id is `blank-app`. It is built in and runs for every suite.
+
+### Why
+
+A test that stays green on an empty page does not check the feature.
+
+### Bad Example
+
+```ts
+await page.goto('/');
+const marker = 'seeded-constant';
+expect(marker).toContain('seeded');
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('inventory-list')).toBeVisible();
+```
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None. The check runs Playwright.
+
+## QCV-F003 Survives An Expected Fault
+
+### What
+
+`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003.
+
+### Why
+
+The fault file says this test should go red. It did not.
+
+### Bad Example
+
+```json
+{ "id": "cart-badge", "type": "change-text", "params": { "selector": "[data-test='shopping-cart-badge']", "text": "9" }, "expectedToBreak": ["does not read the page"] }
+```
+
+The listed test checks a local constant, so the badge fault does not fail it.
+
+### Good Example
+
+```json
+{ "id": "cart-badge", "type": "change-text", "params": { "selector": "[data-test='shopping-cart-badge']", "text": "9" }, "expectedToBreak": ["add to cart updates the cart badge"] }
+```
+
+The cart test reads the badge text, so this fault fails it and QCV-F003 does not fire.
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None.
+
+## QCV-F004 Stays Green Under Every Fault
+
+### What
+
+A test that passed the baseline also passed under every fault in the run, including `blank-app`. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004.
+
+### Why
+
+Nothing in the fault file made the test go red.
+
+### Bad Example
+
+The constant assertion in QCV-F002 stays green under every DOM fault and every user-swap that does not read that constant.
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('shopping-cart-badge')).toHaveText('1');
+```
+
+A `change-text` fault on that badge fails the test, so the test did not stay green under every fault.
+
+### Severity
+
+warn
+
+### Related Lint Rule
+
+None.
 
 ## Known Limits
 

@@ -11,5 +11,7 @@ test('does not read the page', async ({ page }) => {
   await page.goto('/');
   const marker = 'seeded-constant';
   // SEEDED: QCV-F002 this assertion checks a local constant, not the page
+  // SEEDED: QCV-F003 this test is listed in expectedToBreak for the cart badge fault and stays green
+  // SEEDED: QCV-F004 this test stays green under every fault
   expect(marker).toContain('seeded');
 });
