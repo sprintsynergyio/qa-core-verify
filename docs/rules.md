@@ -575,6 +575,8 @@ None. The check runs Playwright. It is not part of the static audit.
 
 A test that passed the baseline also passed when the page body was replaced with an empty element after load. A MutationObserver keeps the body empty when the app renders again. The fault id is `blank-app`. It is built in and runs for every suite.
 
+The blank is applied to every browser context the test opens, including `browser.newContext()` and `browser.newPage()`. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables for the Playwright process, so it still applies when no page is opened.
+
 ### Why
 
 A test that stays green on an empty page does not check the feature.
@@ -605,7 +607,7 @@ None. The check runs Playwright.
 
 ### What
 
-`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003.
+`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003. The fault must have been applied. `block-request` uses `context.route`, so a popup in that context is blocked, and a context from `browser.newContext()` gets the same route. A cell that is `not-run` because the fault never reached a page does not raise QCV-F003.
 
 ### Why
 
@@ -639,7 +641,7 @@ None.
 
 ### What
 
-A test that passed the baseline also passed under every fault in the run, including `blank-app`. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004.
+A test that passed the baseline also passed under every fault in the run, including `blank-app`. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. A `not-run` cell means that fault was not applied, so the test does not get this warn.
 
 ### Why
 

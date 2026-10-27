@@ -100,7 +100,10 @@ export function formatHtml(report: Report): string {
     if (test.reason) parts.push(`<p>Reason: ${escapeHtml(test.reason)}</p>`);
     if (test.faults && test.faults.length > 0) {
       parts.push('<ul class="faults">');
-      for (const cell of test.faults) parts.push(`<li>${escapeHtml(cell.id)} ${escapeHtml(cell.result)}</li>`);
+      for (const cell of test.faults) {
+        const reason = cell.reason ? ` (${escapeHtml(cell.reason)})` : '';
+        parts.push(`<li>${escapeHtml(cell.id)} ${escapeHtml(cell.result)}${reason}</li>`);
+      }
       parts.push('</ul>');
     }
     if (test.assertions && test.assertions.length > 0) {

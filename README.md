@@ -99,11 +99,11 @@ The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](
 
 ## Fault Injection
 
-`--only faults` is the other cannot-fail check. It runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture, the same approach as locator evidence. The fixture applies one fault per run with `context.addInitScript` and `page.route`. While a fault is active the page action timeout is 8 seconds and the navigation timeout is 15 seconds, so a missing element does not wait out the project's test timeout. The baseline run does not change those timeouts. The original project is not written.
+`--only faults` is the other cannot-fail check. It runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture, the same approach as locator evidence. The fixture applies one fault per run with `context.addInitScript` and `context.route`. The route covers every page in that context, including a popup. `browser.newContext()` and `browser.newPage()` get the same script and the same route. `page.setContent` replaces the document, so the DOM script runs again after it. While a fault is active the `page` fixture sets the action timeout to 8 seconds and the navigation timeout to 15 seconds, so a missing element does not wait out the project's test timeout. Other pages keep the project timeouts. The baseline run does not change those timeouts. The original project is not written.
 
 The idea of mutating the DOM in the browser, instead of application source, comes from Yandrapally and Mesbah, "Mutation Analysis for Assessing End-to-End Web Tests", ICSME 2021. See [RESEARCH.md](RESEARCH.md). This checker does not claim to be that framework. It uses a smaller set of faults.
 
-`blank-app` is built in. After the document loads it replaces the body with one empty element and keeps the body empty when the app renders again. A green test that stays green under `blank-app` is QCV-F002.
+`blank-app` is built in. After the document loads it replaces the body with one empty element and keeps the body empty when the app renders again. A green test that stays green under `blank-app` is QCV-F002. That finding is raised only when the blank body was on a page the test used. A test that never opens a page, and a passing test whose page was replaced and is no longer blank, gets `not-run` for that fault and does not get QCV-F002, QCV-F003, or QCV-F004 for it. `user-swap` is an environment variable on the Playwright process, so it still applies when the test opens no page.
 
 The project may add `qa-core-verify.faults.json`. Each entry is `{ id, type, params, expectedToBreak }`. `expectedToBreak` holds JavaScript regular expressions matched against the title path and the test title. A listed test that stays green is QCV-F003. A test that stays green under every fault, including `blank-app`, is QCV-F004, a warn that lists the fault ids.
 
@@ -113,10 +113,10 @@ Fault types:
 - `remove-element`, params `{ "selector": "css" }`. The selector is removed, including after a re-render.
 - `hide-element`, params `{ "selector": "css" }`. The selector is hidden with `display: none`.
 - `change-text`, params `{ "selector": "css", "text": "replacement" }`. The text is replaced, including after a re-render. When an absence assertion uses that same `locator()` selector and the selector still matches nothing, QCV-L002 is raised from warn to error.
-- `block-request`, params `{ "urlPattern": "**/path" }`. `page.route` aborts the request. The pattern is a Playwright URL pattern.
+- `block-request`, params `{ "urlPattern": "**/path" }`. `context.route` aborts the request for every page in the context, including a popup. The pattern is a Playwright URL pattern.
 - `user-swap`, params `{ "env": { "NAME": "value" } }`. The named variables are set on the Playwright process for that run. Names match `[A-Za-z_][A-Za-z0-9_]*`. The SauceDemo suite reads `SAUCE_USER` and `SAUCE_PASSWORD`. The demo file lists only users that were observed to break a test in `tests/good`. See `example-project/saucedemo/FAULTS.md`.
 
-A missing fault file still runs `blank-app`. A file that omits `blank-app` still runs it first. Every other fault keeps the file order.
+A missing fault file still runs `blank-app`. A file that omits `blank-app` still runs it first. Every other fault keeps the file order. An entry whose id is `blank-app` and whose type is not `blank-app` is rejected before the temp copy, with exit 2. Two entries with the same id are still rejected.
 
 The report lists a fault matrix on each test: the fault id and `pass`, `fail`, `skipped`, or `not-run`. The console summary line starts with `Faults:`.
 

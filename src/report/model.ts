@@ -75,6 +75,7 @@ export type FaultResultName = 'pass' | 'fail' | 'skipped' | 'not-run';
 export interface ReportFaultCell {
   id: string;
   result: FaultResultName;
+  reason?: string;
 }
 
 export interface FaultRunSummary {

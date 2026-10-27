@@ -516,6 +516,7 @@ test('the cli prints an outside --out path as typed and still writes the evidenc
 test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: process.env.QCV_LIVE !== '1' }, async (t) => {
   const copy = tempDir(t, 'qcv-sauce-');
   const before = hashTree(sauceDemo);
+  const hadRuntimeDir = fs.existsSync(path.join(sauceDemo, '.qa-core'));
   fs.cpSync(sauceDemo, copy, {
     recursive: true,
     filter: (source) => {
@@ -526,7 +527,7 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   const out = tempDir(t, 'qcv-sauce-out-');
   const run = await withPrivateTemp(t, () => collectLocatorEvidence({ projectDir: copy, outDir: out, keepWorkspace: false }));
   assert.equal(hashTree(sauceDemo), before);
-  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), false);
+  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), hadRuntimeDir);
   assert.equal(run.evidence.playwrightExitCode, 0, `${run.stderr}\n${run.stdout}`);
   assert.equal(fs.existsSync(run.workspaceDir), false);
   const banner = run.evidence.records.find((record) => record.selector.includes('#login-error-banner'));
@@ -545,6 +546,39 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   );
   assert.equal(locked.resolvedOnAction, false);
   assert.equal(run.evidence.records.every((record) => !record.file.startsWith('/') && !record.testFile.startsWith('/')), true);
+});
+
+test('a SauceDemo .qa-core directory that already exists is left in place', (t) => {
+  const runtime = path.join(sauceDemo, '.qa-core');
+  const verify = path.join(runtime, 'verify');
+  const stamp = path.join(verify, 'preexisting.txt');
+  const hadRuntimeDir = fs.existsSync(runtime);
+  const hadStamp = fs.existsSync(stamp);
+  fs.mkdirSync(verify, { recursive: true });
+  if (!hadStamp) fs.writeFileSync(stamp, 'preexisting\n');
+  t.after(() => {
+    if (!hadStamp && fs.existsSync(stamp)) fs.rmSync(stamp, { force: true });
+    if (!hadRuntimeDir) {
+      try {
+        fs.rmdirSync(verify);
+      } catch {
+        // The directory holds other runtime files, so it stays.
+      }
+      try {
+        fs.rmdirSync(runtime);
+      } catch {
+        // The directory holds other runtime files, so it stays.
+      }
+    }
+  });
+  const out = tempDir(t, 'qcv-sauce-static-');
+  const result = spawnSync(process.execPath, [path.join(repoRoot, 'dist/cli.js'), sauceDemo, '--out', out], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(fs.existsSync(stamp), true);
+  assert.equal(fs.existsSync(runtime), true);
 });
 
 const HELPER_SOURCE = `import { expect } from '@playwright/test';

@@ -20,7 +20,8 @@ export function formatConsoleReport(report: Report, reportPaths: readonly string
       );
     }
     for (const cell of test.faults ?? []) {
-      lines.push(`  Fault ${cell.id} ${cell.result}`);
+      const reason = cell.reason ? `  ${oneLine(cell.reason)}` : '';
+      lines.push(`  Fault ${cell.id} ${cell.result}${reason}`);
     }
     for (const locator of test.locators ?? []) {
       const counts = locator.counts.length === 0 ? 'count unknown' : `count ${locator.counts.join(', ')}`;

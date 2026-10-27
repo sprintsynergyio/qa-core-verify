@@ -49,7 +49,10 @@ function entry(overrides) {
 test('fault fixture source applies DOM faults and blocked requests', () => {
   const source = faultFixtureSource();
   assert.equal(source.includes('context.addInitScript'), true);
-  assert.equal(source.includes('page.route'), true);
+  assert.equal(source.includes('context.route'), true);
+  assert.equal(source.includes('page.route'), false);
+  assert.equal(source.includes('browser.newContext'), true);
+  assert.equal(source.includes('page.setContent'), true);
   assert.equal(source.includes('MutationObserver'), true);
   assert.equal(source.includes('blank-app'), true);
   assert.equal(source.includes('data-qcv-blank'), true);
@@ -81,6 +84,10 @@ test('fault file schema accepts the six types and rejects a bad file', (t) => {
   assert.throws(() => validateFaultFile({ id: 'nope' }), /must be a JSON array/);
   assert.throws(() => validateFaultFile([entry({ id: 'Bad id' })]), /fault id/);
   assert.throws(() => validateFaultFile([entry(), entry()]), /repeats fault id/);
+  assert.throws(
+    () => loadFaultFile(writeFaults(dir, [entry({ id: 'blank-app', type: 'remove-element', params: { selector: 'h1' }, expectedToBreak: [] })])),
+    /uses the id "blank-app" for a fault that is not type blank-app/,
+  );
   assert.throws(() => validateFaultFile([entry({ extra: true })]), /unknown field/);
   assert.throws(() => validateFaultFile([entry({ type: 'nope' })]), /unknown type/);
   assert.throws(() => validateFaultFile([entry({ id: 'blank-app', type: 'blank-app', params: { selector: '#a' } })]), /params must be empty/);
@@ -210,6 +217,165 @@ test('a local page proves each fault type', { timeout: 300000 }, async (t) => {
   assert.equal(bareConstant.faults[0].result, 'pass');
   const bareTitle = bareReport.tests.find((entry) => entry.titlePath.at(-1) === 'shows the page title');
   assert.equal(bareTitle.faults[0].result, 'fail');
+});
+
+test('a blank-app id with another type exits 2 before a copy', (t) => {
+  const project = tempDir(t, 'qcv-fault-id-');
+  const scratch = tempDir(t, 'qcv-fault-id-tmp-');
+  const file = path.join(project, 'qa-core-verify.faults.json');
+  fs.writeFileSync(
+    file,
+    `${JSON.stringify([{ id: 'blank-app', type: 'remove-element', params: { selector: 'h1' }, expectedToBreak: [] }])}\n`,
+  );
+  const before = fs.readFileSync(file);
+  const result = runCli([project, '--only', 'faults'], privateEnv(scratch));
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /qa-core-verify\.faults\.json uses the id "blank-app" for a fault that is not type blank-app\./);
+  assert.equal(result.stderr.includes('Baseline:'), false);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+  assert.deepEqual(fs.readFileSync(file), before);
+});
+
+test('a fault that was not applied does not raise F002, F003, or F004', (t) => {
+  const dir = tempDir(t, 'qcv-fault-gap-');
+  const file = path.join(dir, 'gap.spec.ts');
+  fs.writeFileSync(
+    file,
+    `import { test, expect } from '@playwright/test';
+test('api only returns widget', async ({ request }) => {
+  expect(1).toBe(1);
+});
+`,
+  );
+  const inventory = parseSpecFile(file, emptyConfig());
+  const faults = validateFaultFile([
+    { id: 'blank-app', type: 'blank-app', params: {}, expectedToBreak: [] },
+    { id: 'block-data', type: 'block-request', params: { urlPattern: '**/data.json' }, expectedToBreak: ['api only returns widget'] },
+  ]);
+  const reason = 'The fault was not applied to a page this test used.';
+  const rows = inventory.tests.map((item) => ({
+    test: item,
+    ownerId: ownerForTest(item),
+    baseline: 'pass',
+    cells: [
+      { id: 'blank-app', result: 'not-run', reason },
+      { id: 'block-data', result: 'not-run', reason },
+    ],
+    counts: new Map(),
+  }));
+  const findings = classifyFindings(dir, faults, rows);
+  assert.deepEqual(findings, []);
+});
+
+test('a new context, setContent, a request, and a popup are judged from the page that ran', { timeout: 180000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-cover-');
+  const scratch = tempDir(t, 'qcv-fault-cover-tmp-');
+  const out = tempDir(t, 'qcv-fault-cover-out-');
+  const port = await reservePort();
+  fs.writeFileSync(
+    path.join(project, 'server.mjs'),
+    `import http from 'node:http';
+const home = '<!doctype html><html><body><h1>Products</h1></body></html>';
+const opener = '<!doctype html><html><body><a id="open" href="/popup.html" target="_blank">open</a></body></html>';
+const popup = '<!doctype html><html><body><p id="name">loading</p><script>fetch("/data.json").then(function (response) { return response.json(); }).then(function (body) { document.getElementById("name").textContent = body.name; });</script></body></html>';
+http.createServer((req, res) => {
+  const url = (req.url || '/').split('?')[0];
+  if (url === '/data.json') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ name: 'widget' }));
+    return;
+  }
+  if (url === '/api/widget') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ name: 'widget' }));
+    return;
+  }
+  if (url === '/popup.html') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(popup);
+    return;
+  }
+  if (url === '/opener.html') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(opener);
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(home);
+}).listen(${port}, '127.0.0.1');
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 15000,
+  testDir: '.',
+  webServer: { command: 'node server.mjs', url: 'http://127.0.0.1:${port}', timeout: 10000, reuseExistingServer: false },
+  use: { baseURL: 'http://127.0.0.1:${port}', headless: true },
+  expect: { timeout: 3000 },
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+
+test('setContent page is visible', async ({ page }) => {
+  await page.setContent('<h1>Products</h1>');
+  await expect(page.locator('h1')).toHaveText('Products');
+});
+
+test('new context page shows title', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto('/');
+  await expect(p.locator('h1')).toHaveText('Products');
+  await ctx.close();
+});
+
+test('api only returns widget', async ({ request }) => {
+  const response = await request.get('/api/widget');
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.name).toBe('widget');
+});
+
+test('popup loads data', async ({ page }) => {
+  await page.goto('/opener.html');
+  const popupPromise = page.waitForEvent('popup');
+  await page.locator('#open').click();
+  const popup = await popupPromise;
+  await expect(popup.locator('#name')).toHaveText('widget');
+});
+`,
+  );
+  writeFaults(project, [
+    {
+      id: 'block-data',
+      type: 'block-request',
+      params: { urlPattern: '**/data.json' },
+      expectedToBreak: ['popup loads data'],
+    },
+  ]);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = (title) => report.tests.find((entry) => entry.titlePath.at(-1) === title);
+  const cell = (title, id) => row(title).faults.find((entry) => entry.id === id);
+  const rules = (title) => row(title).findings.map((finding) => finding.ruleId);
+  assert.equal(cell('new context page shows title', 'blank-app').result, 'fail');
+  assert.equal(rules('new context page shows title').includes('QCV-F002'), false);
+  assert.equal(cell('setContent page is visible', 'blank-app').result, 'fail');
+  assert.equal(rules('setContent page is visible').includes('QCV-F002'), false);
+  assert.equal(cell('api only returns widget', 'blank-app').result, 'not-run');
+  assert.match(cell('api only returns widget', 'blank-app').reason, /not applied to a page/);
+  assert.equal(rules('api only returns widget').includes('QCV-F002'), false);
+  assert.equal(rules('api only returns widget').includes('QCV-F004'), false);
+  assert.equal(cell('popup loads data', 'block-data').result, 'fail');
+  assert.equal(rules('popup loads data').includes('QCV-F003'), false);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
 });
 
 function writeFaults(dir, faults) {

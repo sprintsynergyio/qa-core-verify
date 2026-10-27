@@ -56,6 +56,10 @@ export function loadFaultFile(projectDir: string): Fault[] {
     throw new ToolError(`Cannot read ${FAULT_FILE_NAME}: ${message}`);
   }
   const faults = validateFaultFile(parsed);
+  const claimed = faults.find((fault) => fault.id === 'blank-app' && fault.type !== 'blank-app');
+  if (claimed) {
+    throw new ToolError(`${FAULT_FILE_NAME} uses the id "blank-app" for a fault that is not type blank-app.`);
+  }
   if (!faults.some((fault) => fault.type === 'blank-app')) return [blankAppFault(), ...faults];
   const blank = faults.filter((fault) => fault.type === 'blank-app');
   const rest = faults.filter((fault) => fault.type !== 'blank-app');

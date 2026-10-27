@@ -7,6 +7,8 @@ import { titleMatches, type Fault, type FaultResultName } from './types.js';
 export interface FaultCell {
   id: string;
   result: FaultResultName;
+  /** Set when result is not-run because the fault did not reach the page. */
+  reason?: string;
 }
 
 export interface ClassifiedTest {

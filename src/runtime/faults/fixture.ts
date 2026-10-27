@@ -6,6 +6,11 @@ import { test as base, expect as baseExpect } from '@playwright/test';
 
 export * from '@playwright/test';
 
+const armedContexts = new WeakSet();
+const trackedPages = new WeakSet();
+const wrappedBrowsers = new WeakSet();
+let state = null;
+
 function readFault() {
   const raw = process.env.QCV_FAULT;
   if (!raw) return null;
@@ -16,6 +21,21 @@ function readFault() {
   } catch {
     return null;
   }
+}
+
+function isDom(fault) {
+  return fault.type === 'blank-app' || fault.type === 'remove-element' || fault.type === 'hide-element' || fault.type === 'change-text';
+}
+
+function isBlock(fault) {
+  return fault.type === 'block-request' && fault.params && typeof fault.params.urlPattern === 'string';
+}
+
+function ensureState() {
+  if (!state) {
+    state = { pages: 0, contexts: 0, blankChecks: 0, blankMisses: 0, counts: {} };
+  }
+  return state;
 }
 
 function domScript(fault) {
@@ -73,45 +93,135 @@ function domScript(fault) {
     '})();\\n';
 }
 
+function trackPage(page, fault) {
+  if (trackedPages.has(page)) return;
+  trackedPages.add(page);
+  ensureState().pages += 1;
+  if (!isDom(fault)) return;
+  const script = domScript(fault);
+  const original = page.setContent.bind(page);
+  page.setContent = async (html, options) => {
+    const result = await original(html, options);
+    try {
+      await page.evaluate((source) => {
+        (0, eval)(source);
+      }, script);
+    } catch {
+      // setContent replaced the document. Teardown records whether the blank body is still there.
+    }
+    return result;
+  };
+}
+
+async function armContext(context, fault) {
+  if (!fault || armedContexts.has(context)) return;
+  armedContexts.add(context);
+  ensureState().contexts += 1;
+  if (isDom(fault)) await context.addInitScript({ content: domScript(fault) });
+  if (isBlock(fault)) {
+    const pattern = fault.params.urlPattern;
+    await context.route(pattern, (route) => route.abort());
+  }
+  context.on('page', (page) => {
+    trackPage(page, fault);
+  });
+  for (const page of context.pages()) trackPage(page, fault);
+}
+
+async function rememberPage(page, fault) {
+  if (!state || !isDom(fault)) return;
+  let snap;
+  try {
+    snap = await page.evaluate(() => {
+      const body = document.body;
+      const node = body && body.firstElementChild;
+      const blank = !!(
+        body &&
+        node &&
+        body.childNodes.length === 1 &&
+        node.getAttribute('data-qcv-blank') === '1' &&
+        node.childNodes.length === 0
+      );
+      return { counts: window.__qcvFaultCounts || {}, blank };
+    });
+  } catch {
+    return;
+  }
+  if (snap.counts && typeof snap.counts === 'object') {
+    for (const key of Object.keys(snap.counts)) {
+      if (typeof snap.counts[key] === 'number') state.counts[key] = snap.counts[key];
+    }
+  }
+  if (fault.type === 'blank-app') {
+    state.blankChecks += 1;
+    if (!snap.blank) state.blankMisses += 1;
+  }
+}
+
+function writeLog(testInfo, fault) {
+  const logFile = process.env.QCV_FAULT_LOG;
+  if (!logFile || !fault || !state) return;
+  const titlePath = Array.isArray(testInfo.titlePath) ? testInfo.titlePath : [testInfo.title || ''];
+  const line = JSON.stringify({
+    id: fault.id,
+    file: testInfo.file,
+    line: testInfo.line,
+    column: testInfo.column,
+    title: titlePath.join(' > '),
+    armedPages: state.pages,
+    armedContexts: state.contexts,
+    blankChecks: state.blankChecks,
+    blankMisses: state.blankMisses,
+    counts: state.counts,
+  });
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.appendFileSync(logFile, line + '\\n');
+}
+
+function installBrowser(browser) {
+  if (wrappedBrowsers.has(browser)) return;
+  wrappedBrowsers.add(browser);
+  const originalNewContext = browser.newContext.bind(browser);
+  browser.newContext = async (options) => {
+    const context = await originalNewContext(options);
+    const fault = readFault();
+    if (fault) await armContext(context, fault);
+    return context;
+  };
+  const originalNewPage = browser.newPage.bind(browser);
+  browser.newPage = async (options) => {
+    const page = await originalNewPage(options);
+    const fault = readFault();
+    if (fault) await armContext(page.context(), fault);
+    return page;
+  };
+}
+
 export const test = base.extend({
-  page: async ({ page, context }, use, testInfo) => {
+  _qcvFaultLog: [async ({}, use, testInfo) => {
+    const fault = readFault();
+    state = fault ? { pages: 0, contexts: 0, blankChecks: 0, blankMisses: 0, counts: {} } : null;
+    await use();
+    if (fault) writeLog(testInfo, fault);
+  }, { auto: true }],
+  browser: async ({ browser }, use) => {
+    if (readFault()) installBrowser(browser);
+    await use(browser);
+  },
+  context: async ({ context }, use) => {
+    const fault = readFault();
+    if (fault) await armContext(context, fault);
+    await use(context);
+  },
+  page: async ({ page }, use) => {
     const fault = readFault();
     if (fault) {
       page.setDefaultTimeout(8000);
       page.setDefaultNavigationTimeout(15000);
-    }
-    if (fault && fault.type === 'block-request' && fault.params && typeof fault.params.urlPattern === 'string') {
-      const pattern = fault.params.urlPattern;
-      await page.route(pattern, (route) => route.abort());
-    }
-    if (
-      fault &&
-      (fault.type === 'blank-app' ||
-        fault.type === 'remove-element' ||
-        fault.type === 'hide-element' ||
-        fault.type === 'change-text')
-    ) {
-      await context.addInitScript({ content: domScript(fault) });
+      trackPage(page, fault);
     }
     await use(page);
-    const logFile = process.env.QCV_FAULT_LOG;
-    if (!logFile || !fault) return;
-    let counts = {};
-    try {
-      counts = await page.evaluate(() => window.__qcvFaultCounts || {});
-    } catch {
-      counts = {};
-    }
-    const line = JSON.stringify({
-      id: fault.id,
-      file: testInfo.file,
-      line: testInfo.line,
-      column: testInfo.column,
-      title: testInfo.titlePath.join(' > '),
-      counts,
-    });
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, line + '\\n');
+    if (fault) await rememberPage(page, fault);
   },
 });
 

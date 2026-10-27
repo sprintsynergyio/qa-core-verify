@@ -12,7 +12,10 @@ import { BaselineStartError } from '../locator-check.js';
 import { configInsideProject, withCopiedProject, type PlaywrightRun } from '../workspace.js';
 import { classifyFindings, ownerForTest, type ClassifiedTest, type FaultCell } from './findings.js';
 import { installFaultFixture } from './install.js';
-import { loadFaultFile, type Fault, type FaultResultName } from './types.js';
+import { loadFaultFile, type Fault, type FaultResultName, type FaultType } from './types.js';
+
+export const FAULT_NOT_APPLIED_REASON = 'The fault was not applied to a page this test used.';
+export const BLANK_NOT_PRESENT_REASON = 'The blank page was not present when the test finished.';
 
 export interface FaultCheckRun {
   report: Report;
@@ -155,15 +158,35 @@ function noteFault(
   for (const test of tests) {
     const ownerId = ownerForTest(test);
     const list = cells.get(ownerId) ?? [];
-    list.push({ id: fault.id, result: outcomeFor(summary, projectDir, test, siblings) });
-    cells.set(ownerId, list);
     const recorded = matchLog(workspaceDir, projectDir, test, siblings, logged);
-    if (recorded) {
+    const outcome = outcomeFor(summary, projectDir, test, siblings);
+    list.push(cellFor(fault, outcome, recorded));
+    cells.set(ownerId, list);
+    if (recorded && Object.keys(recorded.counts).length > 0) {
       const byFault = counts.get(ownerId) ?? new Map();
-      byFault.set(fault.id, recorded);
+      byFault.set(fault.id, recorded.counts);
       counts.set(ownerId, byFault);
     }
   }
+}
+
+function cellFor(fault: Fault, outcome: FaultResultName, log: CountLog | undefined): FaultCell {
+  if (outcome === 'skipped' || outcome === 'not-run' || fault.type === 'user-swap') {
+    return { id: fault.id, result: outcome };
+  }
+  if (!faultReached(fault.type, log)) {
+    return { id: fault.id, result: 'not-run', reason: FAULT_NOT_APPLIED_REASON };
+  }
+  if (fault.type === 'blank-app' && log && log.blankMisses > 0 && outcome === 'pass') {
+    return { id: fault.id, result: 'not-run', reason: BLANK_NOT_PRESENT_REASON };
+  }
+  return { id: fault.id, result: outcome };
+}
+
+function faultReached(type: FaultType, log: CountLog | undefined): boolean {
+  if (!log) return false;
+  if (type === 'block-request') return log.armedContexts > 0 || log.armedPages > 0;
+  return log.armedPages > 0;
 }
 
 interface CountLog {
@@ -171,6 +194,9 @@ interface CountLog {
   line: number;
   column: number;
   counts: Record<string, number>;
+  armedPages: number;
+  armedContexts: number;
+  blankMisses: number;
 }
 
 function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
@@ -186,7 +212,15 @@ function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
       continue;
     }
     if (typeof parsed !== 'object' || parsed === null) continue;
-    const record = parsed as { file?: unknown; line?: unknown; column?: unknown; counts?: unknown };
+    const record = parsed as {
+      file?: unknown;
+      line?: unknown;
+      column?: unknown;
+      counts?: unknown;
+      armedPages?: unknown;
+      armedContexts?: unknown;
+      blankMisses?: unknown;
+    };
     if (typeof record.file !== 'string' || typeof record.line !== 'number') continue;
     const counts: Record<string, number> = {};
     if (typeof record.counts === 'object' && record.counts !== null) {
@@ -200,6 +234,9 @@ function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
       line: record.line,
       column: typeof record.column === 'number' ? record.column : 0,
       counts,
+      armedPages: typeof record.armedPages === 'number' ? record.armedPages : 0,
+      armedContexts: typeof record.armedContexts === 'number' ? record.armedContexts : 0,
+      blankMisses: typeof record.blankMisses === 'number' ? record.blankMisses : 0,
     });
   }
   return rows;
@@ -211,16 +248,15 @@ function matchLog(
   test: InventoryTest,
   siblings: Map<string, number>,
   rows: readonly CountLog[],
-): Record<string, number> | undefined {
+): CountLog | undefined {
   void workspaceDir;
   const file = path.relative(projectDir, test.file).split(path.sep).join('/');
   const onLine = rows.filter((row) => row.file === file && row.line === test.line);
   if (onLine.length === 0) return undefined;
   const count = siblings.get(`${file}:${test.line}`) ?? 1;
-  if (count <= 1) return onLine[0]?.counts;
+  if (count <= 1) return onLine[0];
   const columns = columnsFor(test);
-  const matched = onLine.find((row) => columns.includes(row.column));
-  return matched?.counts ?? onLine[0]?.counts;
+  return onLine.find((row) => columns.includes(row.column)) ?? onLine[0];
 }
 
 function summaryLines(faults: readonly Fault[], rows: readonly ClassifiedTest[]): string[] {
