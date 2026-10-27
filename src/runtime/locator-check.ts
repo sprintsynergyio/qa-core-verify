@@ -18,10 +18,16 @@ import { configInsideProject, readPlaywrightVersion, resolveNodeModules, runPlay
 
 const PARTS_DIR = path.join('.qa-core', 'locator-parts');
 
-/** Playwright started, but stdout was not a JSON report. The evidence run is skipped. */
+/** Playwright started, but stdout was not a usable baseline. The evidence run is skipped. */
 export class BaselineStartError extends Error {
-  constructor(readonly run: PlaywrightRun) {
-    super('Playwright produced no baseline report.');
+  constructor(
+    readonly run: PlaywrightRun,
+    readonly workspaceDir = '',
+    readonly projectDir = '',
+    /** Set when the suite failed to load. Empty when there was no JSON report. */
+    readonly loadError = '',
+  ) {
+    super(loadError ? 'Playwright failed to load the suite.' : 'Playwright produced no baseline report.');
   }
 }
 
@@ -69,7 +75,7 @@ export async function collectLocatorCheck(options: {
     after: (workspaceDir, playwright) => {
       baselineRun = playwright;
       const parsed = parseBaseline(playwright.stdout, playwright.stderr, playwright.exitCode, workspaceDir);
-      if (!parsed.ok) throw new BaselineStartError(playwright);
+      if (!parsed.ok) throw new BaselineStartError(playwright, workspaceDir, projectDir, parsed.loadError ?? '');
       baselineSummary = parsed;
     },
     second: {
@@ -102,7 +108,7 @@ export async function collectLocatorCheck(options: {
   });
   const evidencePath = writeEvidenceFile(evidence, options.outDir);
   const inventory = readInventory(projectDir, configFile);
-  const { findings, baselineRed, notRun, summaries } = evaluateLocatorCheck(
+  const { findings, baselineRed, notRun, summaries, statusReasons } = evaluateLocatorCheck(
     projectDir,
     inventory.tests,
     evidence,
@@ -122,6 +128,7 @@ export async function collectLocatorCheck(options: {
     baselineRed,
     notRun,
     locatorSummaries: summaries,
+    statusReasons,
   });
   return {
     report,
@@ -168,9 +175,16 @@ export function evaluateLocatorCheck(
   evidence: EvidenceFile,
   baseline: BaselineSummary,
   evidenceRun?: BaselineSummary,
-): { findings: Finding[]; baselineRed: Set<string>; notRun: Set<string>; summaries: Map<string, ReportLocator[]> } {
+): {
+  findings: Finding[];
+  baselineRed: Set<string>;
+  notRun: Set<string>;
+  summaries: Map<string, ReportLocator[]>;
+  statusReasons: Map<string, string>;
+} {
   const baselineRed = new Set<string>();
   const notRun = new Set<string>();
+  const statusReasons = new Map<string, string>();
   const live: InventoryTest[] = [];
   const siblings = new Map<string, number>();
   for (const test of tests) {
@@ -198,8 +212,10 @@ export function evaluateLocatorCheck(
       const id = ownerIdFor('test', test.file, test.line, test.column, test.titlePath);
       const columns = columnsFor(test);
       const siblingsOnLine = siblings.get(`${relative}:${test.line}`) ?? 1;
-      if (keyHits(evidenceRun.failedKeys, relative, test.line, columns, siblingsOnLine)) notRun.add(id);
-      else keep.push(test);
+      if (keyHits(evidenceRun.failedKeys, relative, test.line, columns, siblingsOnLine)) {
+        notRun.add(id);
+        statusReasons.set(id, 'The test did not pass in the evidence run.');
+      } else keep.push(test);
     }
     live.length = 0;
     live.push(...keep);
@@ -240,7 +256,7 @@ export function evaluateLocatorCheck(
     }
   }
   alignBrittleCallSites(projectDir, findings, summaries);
-  return { findings, baselineRed, notRun, summaries };
+  return { findings, baselineRed, notRun, summaries, statusReasons };
 }
 
 /**

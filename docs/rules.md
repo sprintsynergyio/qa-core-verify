@@ -463,7 +463,7 @@ The second check is the absence. The first check has already shown that the loca
 
 ### Severity
 
-warn
+warn. `--only faults` raises this to error when a `change-text` fault should show the selector and the selector still matches nothing.
 
 ### Related Lint Rule
 
@@ -568,6 +568,104 @@ error
 ### Related Lint Rule
 
 None. The check runs Playwright. It is not part of the static audit.
+
+## QCV-F002 Passes On A Blank App
+
+### What
+
+A test that passed the baseline also passed when the page body was replaced with an empty element after load. A MutationObserver keeps the body empty when the app renders again. The fault id is `blank-app`. It is built in and runs for every suite.
+
+The blank is applied to every browser context the test opens, including `browser.newContext()` and `browser.newPage()`. A page opened in `beforeAll` or `afterAll`, or held by a worker scoped fixture, stays armed for each later test while that page is still open. A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body stops counting when that test ends, even if it is still open. The checker counts the carried pages that are still open when the test starts, plus any page armed during that test. A page that is already closed when the test starts does not count. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body of each open page the test used, not only the `page` fixture. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables for the Playwright process, so it still applies when no page is opened.
+
+### Why
+
+A test that stays green on an empty page does not check the feature.
+
+### Bad Example
+
+```ts
+await page.goto('/');
+const marker = 'seeded-constant';
+expect(marker).toContain('seeded');
+```
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('inventory-list')).toBeVisible();
+```
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None. The check runs Playwright.
+
+## QCV-F003 Survives An Expected Fault
+
+### What
+
+`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003. The fault must have been applied. A page that is still open from `beforeAll` or a worker scoped fixture counts as the fault reaching that test. A page left open by an earlier test, hook, or test scoped fixture does not. `block-request` uses `context.route`, so a popup in that context is blocked, and a context from `browser.newContext()` gets the same route. A cell that is `not-run` because the fault never reached a page does not raise QCV-F003.
+
+### Why
+
+The fault file says this test should go red. It did not.
+
+### Bad Example
+
+```json
+{ "id": "cart-badge", "type": "change-text", "params": { "selector": "[data-test='shopping-cart-badge']", "text": "9" }, "expectedToBreak": ["does not read the page"] }
+```
+
+The listed test checks a local constant, so the badge fault does not fail it.
+
+### Good Example
+
+```json
+{ "id": "cart-badge", "type": "change-text", "params": { "selector": "[data-test='shopping-cart-badge']", "text": "9" }, "expectedToBreak": ["add to cart updates the cart badge"] }
+```
+
+The cart test reads the badge text, so this fault fails it and QCV-F003 does not fire.
+
+### Severity
+
+error
+
+### Related Lint Rule
+
+None.
+
+## QCV-F004 Stays Green Under Every Fault
+
+### What
+
+A test that passed the baseline also passed under every fault in the run, including `blank-app`. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. A `not-run` cell means that fault was not applied, so the test does not get this warn.
+
+### Why
+
+Nothing in the fault file made the test go red.
+
+### Bad Example
+
+The constant assertion in QCV-F002 stays green under every DOM fault and every user-swap that does not read that constant.
+
+### Good Example
+
+```ts
+await expect(page.getByTestId('shopping-cart-badge')).toHaveText('1');
+```
+
+A `change-text` fault on that badge fails the test, so the test did not stay green under every fault.
+
+### Severity
+
+warn
+
+### Related Lint Rule
+
+None.
 
 ## Known Limits
 

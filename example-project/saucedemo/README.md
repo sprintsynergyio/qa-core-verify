@@ -1,6 +1,8 @@
 # SauceDemo Demo Suite
 
-This suite targets [SauceDemo](https://www.saucedemo.com), a free practice app. It is not a client project. The tests in `tests/good` check login, the cart badge, the locked out user, and one checkout item total. The tests in `tests/ai-style` are deliberately weak. Each weak spot has a `SEEDED` comment on the line above it. `expected-findings.json` lists those spots. `active` means the checker already reports that finding. `pending` means the rule is not built yet. QCV-L002, QCV-L003, and QCV-L004 are active. They are checked by `--only locator`, which opens a browser. The static command below does not run them.
+This suite targets [SauceDemo](https://www.saucedemo.com), a free practice app. It is not a client project. The tests in `tests/good` check login, the cart badge, the locked out user, and one checkout item total. The tests in `tests/ai-style` are deliberately weak. Each weak spot has a `SEEDED` comment on the line above it. `expected-findings.json` lists those spots. `active` means the static checker reports that finding. `pending` means the static command does not report it. QCV-F002, QCV-F003, and QCV-F004 run under `--only faults`, not under the static command. QCV-L002, QCV-L003, and QCV-L004 are checked by `--only locator`, which opens a browser. The static command below does not run them.
+
+`qa-core-verify.faults.json` is the fault file for `--only faults`. `FAULTS.md` records the SauceDemo users that were run and what the good tests did. The fault file lists a user only when that run broke a test in `tests/good`.
 
 One seeded test is skipped, so Playwright does not run it. The manifest records the reason.
 
@@ -23,6 +25,12 @@ The locator check does open a browser:
 
 ```sh
 node dist/cli.js example-project/saucedemo --only locator
+```
+
+The fault check opens a browser too. It reads `qa-core-verify.faults.json` in this folder:
+
+```sh
+node dist/cli.js example-project/saucedemo --only faults
 ```
 
 ```sh

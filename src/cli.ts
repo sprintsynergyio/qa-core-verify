@@ -11,18 +11,20 @@ import { buildReport } from './report/model.js';
 import { consoleReportPaths, escapeControls } from './report/paths.js';
 import { consoleText, parseFormats, reportJson, writeReportFiles, type ReportFormat } from './report/write.js';
 import { collectInversion } from './runtime/inversion/run.js';
+import { collectFaults } from './runtime/faults/run.js';
 import { BaselineStartError, collectLocatorCheck } from './runtime/locator-check.js';
 import { collectLocatorEvidence } from './runtime/locator-evidence/injected-fixture.js';
-import { workspaceLine } from './runtime/workspace.js';
+import { keptRunRoot, remapCopyPath, workspaceLine } from './runtime/workspace.js';
 import { CHECKS_RUN, collectFindings } from './rules/index.js';
 import type { Severity } from './rules/types.js';
 import { ToolError } from './tool-error.js';
 
-export const HELP = `qa-core-verify <project-dir> [spec globs...] [--json] [--format console,json,md,html] [--out <dir>] [--fail-on error|warn|info] [--only locator|locator-evidence|inversion] [--config <file>] [--max-runs <n>] [--keep-workspace]
+export const HELP = `qa-core-verify <project-dir> [spec globs...] [--json] [--format console,json,md,html] [--out <dir>] [--fail-on error|warn|info] [--only locator|locator-evidence|inversion|faults] [--config <file>] [--max-runs <n>] [--keep-workspace]
 
 Audit a Playwright suite for weak assertions (QCV-W000 through QCV-W010).
 --only locator runs QCV-L001 through QCV-L004 against a temp copy of the suite.
 --only inversion runs QCV-F001 by inverting one assertion at a time in a temp copy.
+--only faults runs QCV-F002, QCV-F003, and QCV-F004 against a temp copy. blank-app always runs.
 
 Options:
   --json              Print the JSON report to stdout and nothing else to stdout.
@@ -41,20 +43,23 @@ Options:
   --only <name>       Run one check instead of the static audit.
                       locator runs the hallucinated locator check and writes the report.
                       locator-evidence runs Playwright in a temp copy and writes locator-evidence.json.
-                      inversion runs the cannot-fail check and writes the report.
-                      Each inversion run is one assertion. The plan line prints the mutant count and the run count before those runs start.
+                      inversion runs QCV-F001 and writes the report.
+                      Each inversion run is one assertion. The plan line is printed after the control runs.
+                      Control runs are not part of the plan count and are not part of --max-runs.
+                      faults runs QCV-F002, QCV-F003, and QCV-F004 and writes the report.
+                      One fault runs at a time. The fault file is qa-core-verify.faults.json.
   --config <file>     Playwright config forwarded to the temp run and not rewritten.
                       A directory uses the playwright.config file inside that directory.
                       The project directory itself is accepted, including --config .
-                      A directory that holds no playwright.config file is refused before the temp copy.
+                      A directory that holds no playwright.config.* file is refused before the temp copy.
                       Playwright would run that directory with its defaults. This checker refuses it and exits 2.
                       A path that is not a config file is refused before the temp copy is made.
                       playwright.config.ts, .js, .mts, .mjs, .cts, and .cjs are never rewritten.
-                      Requires --only locator, --only locator-evidence, or --only inversion.
+                      Requires --only locator, --only locator-evidence, --only inversion, or --only faults.
   --max-runs <n>      Stop inversion after n mutant runs. Requires --only inversion.
                       n is a whole number, zero or greater. Unchecked assertions are not-run.
                       stderr prints Stopped at limit when the cap is hit.
-  --keep-workspace    Keep the temp run directory. Requires --only locator-evidence, --only locator, or --only inversion.
+  --keep-workspace    Keep the temp run directory. Requires --only locator-evidence, --only locator, --only inversion, or --only faults.
                       stderr prints Workspace: and the absolute qcv-run directory.
                       That directory contains project, the copied tree.
                       The same line is printed after SIGINT, SIGTERM, and SIGHUP.
@@ -103,13 +108,17 @@ export function run(
     console.log(HELP);
     return 0;
   }
-  const runtimeMode = options.only === 'locator' || options.only === 'locator-evidence' || options.only === 'inversion';
+  const runtimeMode =
+    options.only === 'locator' ||
+    options.only === 'locator-evidence' ||
+    options.only === 'inversion' ||
+    options.only === 'faults';
   if (options.keepWorkspace && !runtimeMode) {
-    console.error('--keep-workspace requires --only locator-evidence, --only locator, or --only inversion.');
+    console.error('--keep-workspace requires --only locator-evidence, --only locator, --only inversion, or --only faults.');
     return 2;
   }
   if (options.configFile && !runtimeMode) {
-    console.error('--config requires --only locator-evidence, --only locator, or --only inversion.');
+    console.error('--config requires --only locator-evidence, --only locator, --only inversion, or --only faults.');
     return 2;
   }
   if (options.maxRuns !== undefined && options.only !== 'inversion') {
@@ -117,9 +126,10 @@ export function run(
     return 2;
   }
   if (options.only !== undefined && !runtimeMode) {
-    console.error(`Unknown --only check "${options.only}". Use locator, locator-evidence, or inversion.`);
+    console.error(`Unknown --only check "${options.only}". Use locator, locator-evidence, inversion, or faults.`);
     return 2;
   }
+  if (options.only === 'faults') return runFaults(options, cwd, now);
   if (options.only === 'inversion') return runInversion(options, cwd, now);
   if (options.only === 'locator') return runLocatorCheck(options, cwd, now);
   if (options.only === 'locator-evidence') return runLocatorEvidence(options, cwd);
@@ -332,26 +342,23 @@ async function runLocatorCheck(options: CliOptions, cwd: string, now: () => Date
     }
     if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
     const code = exitCodeFor(result.findings, options.failOn);
+    const copyPath = path.join(result.runRoot, 'project');
     if (result.evidenceExitCode !== 0 && result.evidenceExitCode !== 1) {
       console.error(`Playwright exited ${result.evidenceExitCode} during the evidence run.`);
-      const tail = outputTail(result.stderr || result.stdout);
+      const tail = outputTail(remapCopyPath(result.stderr || result.stdout, copyPath, projectDir));
       if (tail) console.error(tail);
       return 2;
     }
     if (result.evidenceExitCode === 1 && result.baseline.failed === 0 && code === 0) {
       console.error('Playwright exited 1 during the evidence run after a green baseline.');
-      const tail = outputTail(result.stderr || result.stdout);
+      const tail = outputTail(remapCopyPath(result.stderr || result.stdout, copyPath, projectDir));
       if (tail) console.error(tail);
       return 1;
     }
     return code;
   } catch (error) {
-    if (error instanceof BaselineStartError) {
-      console.error('Playwright produced no baseline report.');
-      const tail = outputTail(error.run.stderr || error.run.stdout);
-      if (tail) console.error(tail);
-      return error.run.exitCode === 1 ? 1 : 2;
-    }
+    noteKeptWorkspace(options.keepWorkspace, error);
+    if (error instanceof BaselineStartError) return explainBaseline(error);
     if (error instanceof ToolError) {
       console.error(error.message);
       return 2;
@@ -408,10 +415,6 @@ async function runInversion(options: CliOptions, cwd: string, now: () => Date): 
       now,
       maxRuns: options.maxRuns,
     });
-    for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);
-    console.error(
-      `Baseline: ${result.baseline.passed} passed, ${result.baseline.failed} failed, ${result.baseline.skipped} skipped.`,
-    );
     const written = writeReportFiles(result.report, outDir, options.formats);
     const shown = consoleReportPaths(written, projectDir, options.outDir, cwd);
     if (options.json) {
@@ -422,18 +425,79 @@ async function runInversion(options: CliOptions, cwd: string, now: () => Date): 
     if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
     return exitCodeFor(result.findings, options.failOn);
   } catch (error) {
-    if (error instanceof BaselineStartError) {
-      console.error('Playwright produced no baseline report.');
-      const detail = outputTail(`${error.run.stderr}\n${error.run.stdout}`);
-      if (detail) console.error(detail);
-      return error.run.exitCode === 1 ? 1 : 2;
-    }
+    noteKeptWorkspace(options.keepWorkspace, error);
+    if (error instanceof BaselineStartError) return explainBaseline(error);
     if (error instanceof ToolError) {
       console.error(error.message);
       return 2;
     }
     throw error;
   }
+}
+
+async function runFaults(options: CliOptions, cwd: string, now: () => Date): Promise<number> {
+  if (!options.projectDir) {
+    console.error('Missing project directory.');
+    console.error(HELP);
+    return 2;
+  }
+  if (options.specArgs.length > 0) {
+    console.error('--only faults runs the whole Playwright project. Do not pass spec paths.');
+    return 2;
+  }
+  const projectDir = path.resolve(cwd, options.projectDir);
+  try {
+    if (!fs.existsSync(projectDir)) throw new ToolError(`Path does not exist: ${options.projectDir}`);
+    if (!fs.statSync(projectDir).isDirectory()) throw new ToolError(`Not a directory: ${options.projectDir}`);
+    const outDir = options.outDir ? path.resolve(cwd, options.outDir) : path.join(projectDir, '.qa-core', 'verify');
+    const result = await collectFaults({
+      projectDir,
+      keepWorkspace: options.keepWorkspace,
+      configFile: options.configFile,
+      cwd,
+      now,
+    });
+    const written = writeReportFiles(result.report, outDir, options.formats);
+    const shown = consoleReportPaths(written, projectDir, options.outDir, cwd);
+    if (options.json) {
+      process.stdout.write(reportJson(result.report));
+    } else if (options.formats.includes('console')) {
+      process.stdout.write(`${consoleText(result.report, shown)}\n`);
+    }
+    if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
+    const code = exitCodeFor(result.findings, options.failOn);
+    if (code === 0 && result.unmatchedBaseline) return 1;
+    return code;
+  } catch (error) {
+    noteKeptWorkspace(options.keepWorkspace, error);
+    if (error instanceof BaselineStartError) return explainBaseline(error);
+    if (error instanceof ToolError) {
+      const root = keptRunRoot(error);
+      const message = root ? remapCopyPath(error.message, path.join(root, 'project'), projectDir) : error.message;
+      console.error(message);
+      return 2;
+    }
+    throw error;
+  }
+}
+
+function noteKeptWorkspace(keep: boolean, error: unknown): void {
+  if (!keep) return;
+  const root = keptRunRoot(error);
+  if (root) fs.writeSync(2, workspaceLine(root));
+}
+
+function explainBaseline(error: BaselineStartError): number {
+  const text = remapCopyPath(`${error.run.stderr}\n${error.run.stdout}`, error.workspaceDir, error.projectDir);
+  if (error.loadError) {
+    console.error('Playwright failed to load the suite.');
+    console.error(remapCopyPath(error.loadError, error.workspaceDir, error.projectDir));
+    return 2;
+  }
+  console.error('Playwright produced no baseline report.');
+  const detail = outputTail(text);
+  if (detail) console.error(detail);
+  return error.run.exitCode === 1 ? 1 : 2;
 }
 
 function emptySuiteNotice(specFileCount: number, testCount: number): string | undefined {

@@ -60,6 +60,14 @@ function formatTest(test: ReportTest): string[] {
   lines.push('');
   lines.push(`- File: ${inline(displayText(test.file))}:${test.line}`);
   lines.push(`- Verdict: ${test.verdict}`);
+  if (test.reason) lines.push(`- Reason: ${inline(test.reason)}`);
+  if (test.faults && test.faults.length > 0) {
+    lines.push('- Faults:');
+    for (const cell of test.faults) {
+      const reason = cell.reason ? ` (${inline(cell.reason)})` : '';
+      lines.push(`  - ${cell.id}: ${cell.result}${reason}`);
+    }
+  }
   if (test.assertions && test.assertions.length > 0) {
     lines.push('- Assertions:');
     for (const assertion of test.assertions) {

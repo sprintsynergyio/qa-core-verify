@@ -18,7 +18,7 @@ The checker writes one report in four forms. The JSON file and `--json` use this
 
 ## Checks Run
 
-`checksRun` lists the checks that ran. A default run lists `weak-assertion`. `--only locator` lists `locator`. `cannot-fail` is in the schema for a later check and is not run yet.
+`checksRun` lists the checks that ran. A default run lists `weak-assertion`. `--only locator` lists `locator`. `--only inversion` and `--only faults` list `cannot-fail`. A fault run that raises QCV-L002 also lists `locator`.
 
 The console prints `Checks run:` with that list. The Markdown report lists it under Checks Run. The HTML report prints it in the header. The console summary, the Markdown summary, and the HTML header also name the `locator` and `cannot-fail` checks that did not run. When neither ran, that sentence is: Trusted means no warn or error findings from the checks that ran. Locator and cannot-fail checks did not run. When only one of them ran, the sentence names the other check.
 
@@ -46,6 +46,26 @@ Each row gets one verdict:
 - `baseline-red` when `--only locator` saw that test fail in the baseline Playwright run. Failure is Playwright status `unexpected`. A `test.fail()` test that fails as expected has status `expected`, so it is not `baseline-red` and locator findings still apply. A `test.fail()` test that passes has status `unexpected` and is `baseline-red`. A failure in any project marks the row `baseline-red`. The baseline runs with `--retries=0`, so a test that fails its first attempt is `baseline-red` even if retries would make it pass. That row has no locator findings. The static checker does not assign `baseline-red`, so that count stays 0 on a static run.
 
 `not-run` is for rows the checker did not treat as evaluated tests. A `test.describe.skip` block, and a test with `skip` or `fixme`, is `not-run` even when that row also has findings, and even when the baseline also failed. A test the baseline report marks skipped is `not-run` only when no project ran it. That includes `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a later test in `test.describe.serial` after a failure. A test skipped in one project and run in another is not `not-run`. A test with no baseline result is `not-run`. `describe.only` is not in that extension. The test still ran, and an info finding on it stays `trusted`.
+
+`reason` is set on a row when the checker knows why that row is `not-run`. A test that failed only in the locator evidence run has the reason `The test did not pass in the evidence run.` Other rows omit `reason`.
+
+## Inversion
+
+`inversion` is present when `--only inversion` ran. The counts are computed from `tests[].assertions`.
+
+`runs` is `killed` plus `survived` plus `timeout` plus `error`.
+
+`mutants` is `runs` plus the assertions whose outcome is `not-run` and whose reason is `Stopped at limit.` An assertion that is `not-run` because the test did not run in the baseline, because the test failed the baseline, or because the control run did not pass, is not a mutant. An assertion that is `skipped` is not a mutant. A demo can show more `not-run` assertions than `mutants` counts, because those extra rows were not inverted.
+
+`stoppedAtLimit` is true when at least one assertion was stopped at `--max-runs`.
+
+The plan line is printed after the control runs. Control runs are not part of `mutants`, `runs`, or `--max-runs`.
+
+## Faults
+
+`faultRun` is present when `--only faults` ran. `faultRun.faults` lists each fault id and type. `blank-app` is always included.
+
+Each test may have `faults`, one cell per fault. `result` is `pass`, `fail`, `skipped`, or `not-run`. `pass` means the Playwright test status was `expected` and the fault was applied. `fail` means `unexpected`. `not-run` is also used when a page fault never reached a page the test used, or when a passing test's page was not blank at the end. A page opened in `beforeAll`, `afterAll`, or a worker scoped fixture counts as reached while it is open. A page opened in a test body, `beforeEach`, `afterEach`, or a test scoped fixture stops counting when that test ends. A page closed before the test started does not. A baseline test missing from a fault run is `not-run` with reason `The test was not found in the fault run.` That cell has a `reason`. The console prints one `Fault <id> <result>` line per cell, and the reason on the same line when it is set. A `Faults:` summary is computed from those cells.
 
 ## Locators
 

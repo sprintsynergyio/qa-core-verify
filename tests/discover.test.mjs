@@ -160,5 +160,5 @@ test('a missing config path is refused', (t) => {
   const dir = makeProject(t);
   fs.mkdirSync(path.join(dir, 'empty-dir'));
   assert.throws(() => discoverSpecs(dir, [], dir, path.join(dir, 'missing.config.ts')), /Playwright config does not exist/);
-  assert.throws(() => discoverSpecs(dir, [], dir, path.join(dir, 'empty-dir')), /Playwright config does not exist/);
+  assert.throws(() => discoverSpecs(dir, [], dir, path.join(dir, 'empty-dir')), /The directory holds no playwright\.config\.\* file/);
 });

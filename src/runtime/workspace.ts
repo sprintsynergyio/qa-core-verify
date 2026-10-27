@@ -193,6 +193,19 @@ export function workspaceLine(dir: string): string {
   return `Workspace: ${formatWorkspacePath(dir)}\n`;
 }
 
+/** Replace the temp copy prefix with the user's project path. */
+export function remapCopyPath(text: string, workspaceDir: string, projectDir: string): string {
+  if (!workspaceDir || !projectDir || workspaceDir === projectDir) return text;
+  return text.split(workspaceDir).join(projectDir);
+}
+
+/** Set on a thrown error when `--keep-workspace` kept the copy. */
+export function keptRunRoot(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('qcvRunRoot' in error)) return undefined;
+  const value = (error as { qcvRunRoot?: unknown }).qcvRunRoot;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function isOutsideRoot(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
@@ -379,6 +392,9 @@ export async function withCopiedProject<T>(
     if (!signalStop) removeBrowserTemp(state);
     if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
     else if (options.keep && !signalStop) removeRunExtras(runRoot);
+    if (options.keep && !signalStop && error && typeof error === 'object') {
+      Object.defineProperty(error, 'qcvRunRoot', { value: runRoot, enumerable: false });
+    }
     if (signalStop) await new Promise(() => {});
     throw error;
   } finally {
@@ -586,6 +602,16 @@ function copyTree(
     noteCopiedBytes(budget, stat.size);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.copyFileSync(from, to);
+    makeWritable(to);
+  }
+}
+
+function makeWritable(file: string): void {
+  try {
+    const mode = fs.statSync(file).mode;
+    if ((mode & 0o200) === 0) fs.chmodSync(file, mode | 0o200);
+  } catch {
+    // A later write reports the permission error and the run continues.
   }
 }
 
@@ -670,6 +696,12 @@ function copyLink(
     noteCopiedBytes(budget, target.size);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.copyFileSync(real, to);
+    try {
+      const mode = fs.statSync(to).mode;
+      if ((mode & 0o200) === 0) fs.chmodSync(to, mode | 0o200);
+    } catch {
+      // A later write reports the permission error and the run continues.
+    }
     return;
   }
   skipped.push({ relativePath: shown, reason: 'dangling' });

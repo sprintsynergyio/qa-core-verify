@@ -516,6 +516,7 @@ test('the cli prints an outside --out path as typed and still writes the evidenc
 test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: process.env.QCV_LIVE !== '1' }, async (t) => {
   const copy = tempDir(t, 'qcv-sauce-');
   const before = hashTree(sauceDemo);
+  const hadRuntimeDir = fs.existsSync(path.join(sauceDemo, '.qa-core'));
   fs.cpSync(sauceDemo, copy, {
     recursive: true,
     filter: (source) => {
@@ -526,7 +527,7 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   const out = tempDir(t, 'qcv-sauce-out-');
   const run = await withPrivateTemp(t, () => collectLocatorEvidence({ projectDir: copy, outDir: out, keepWorkspace: false }));
   assert.equal(hashTree(sauceDemo), before);
-  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), false);
+  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), hadRuntimeDir);
   assert.equal(run.evidence.playwrightExitCode, 0, `${run.stderr}\n${run.stdout}`);
   assert.equal(fs.existsSync(run.workspaceDir), false);
   const banner = run.evidence.records.find((record) => record.selector.includes('#login-error-banner'));
@@ -545,6 +546,45 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   );
   assert.equal(locked.resolvedOnAction, false);
   assert.equal(run.evidence.records.every((record) => !record.file.startsWith('/') && !record.testFile.startsWith('/')), true);
+});
+
+test('an existing .qa-core directory on a SauceDemo copy is left in place', (t) => {
+  const before = hashTree(sauceDemo);
+  const realRuntime = path.join(sauceDemo, '.qa-core');
+  const realStamp = path.join(realRuntime, 'verify', 'preexisting.txt');
+  const hadRuntimeDir = fs.existsSync(realRuntime);
+  const realStampBefore = fs.existsSync(realStamp) ? fs.readFileSync(realStamp) : null;
+  const copy = tempDir(t, 'qcv-sauce-runtime-');
+  fs.cpSync(sauceDemo, copy, {
+    recursive: true,
+    filter: (source) => {
+      const base = path.basename(source);
+      return source === sauceDemo || !['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git'].includes(base);
+    },
+  });
+  const runtime = path.join(copy, '.qa-core');
+  const verify = path.join(runtime, 'verify');
+  const stamp = path.join(verify, 'preexisting.txt');
+  const note = path.join(runtime, 'note.txt');
+  fs.mkdirSync(verify, { recursive: true });
+  fs.writeFileSync(stamp, 'preexisting\n');
+  fs.writeFileSync(note, 'keep\n');
+  const result = spawnSync(process.execPath, [path.join(repoRoot, 'dist/cli.js'), copy], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(fs.readFileSync(stamp, 'utf8'), 'preexisting\n');
+  assert.equal(fs.readFileSync(note, 'utf8'), 'keep\n');
+  for (const name of ['report.json', 'report.md', 'report.html']) {
+    assert.equal(fs.existsSync(path.join(verify, name)), true, name);
+  }
+  assert.match(result.stdout, /Reports: \.qa-core\/verify\/report\.json/);
+  assert.equal(hashTree(sauceDemo), before);
+  assert.equal(fs.existsSync(realRuntime), hadRuntimeDir);
+  const realStampAfter = fs.existsSync(realStamp) ? fs.readFileSync(realStamp) : null;
+  if (realStampBefore === null) assert.equal(realStampAfter, null);
+  else assert.ok(realStampAfter && realStampAfter.equals(realStampBefore));
 });
 
 const HELPER_SOURCE = `import { expect } from '@playwright/test';
