@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A page or context opened in a test body stops counting when that test ends, even if it stays open. A later page-less or `request` test stays `not-run` and does not get QCV-F002, QCV-F003, or QCV-F004 from that page. Pages from `beforeAll` and worker scoped fixtures still count while they are open.
 - A page armed in `beforeAll` or a worker scoped fixture stays applied on later tests while that page is open. A page closed before the test starts does not count, so a request only test stays `not-run`. The blank check includes those open pages. The check that an existing `.qa-core` directory is kept runs on a temp copy of SauceDemo, with no `--out`, and expects `report.json`, `report.md`, and `report.html` in `.qa-core/verify`.
 - A fault that never reaches a page is `not-run` and does not raise QCV-F002, QCV-F003, or QCV-F004. `browser.newContext()` and `browser.newPage()` get the init script and `context.route`. `page.setContent` runs the DOM script again. A fault id `blank-app` whose type is not `blank-app` exits 2 before the temp copy. The SauceDemo locator-evidence live test compares `.qa-core` with the directory that was already there.
 - `--only faults` runs QCV-F002, QCV-F003, and QCV-F004. `blank-app` is built in. Other faults come from `qa-core-verify.faults.json`. The report has a fault matrix per test. A `change-text` fault that should show a selector, and still matches nothing, raises QCV-L002 to error. The DOM-mutation idea is credited in RESEARCH.md. This checker does not claim to be that paper's framework.

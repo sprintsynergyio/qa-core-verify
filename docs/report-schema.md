@@ -65,7 +65,7 @@ The plan line is printed after the control runs. Control runs are not part of `m
 
 `faultRun` is present when `--only faults` ran. `faultRun.faults` lists each fault id and type. `blank-app` is always included.
 
-Each test may have `faults`, one cell per fault. `result` is `pass`, `fail`, `skipped`, or `not-run`. `pass` means the Playwright test status was `expected` and the fault was applied. `fail` means `unexpected`. `not-run` is also used when a page fault never reached a page the test used, or when a passing test's page was not blank at the end. A page opened in `beforeAll` or a worker scoped fixture counts as reached while it is open. A page closed before the test started does not. That cell has a `reason`. The console prints one `Fault <id> <result>` line per cell, and the reason on the same line when it is set. A `Faults:` summary is computed from those cells.
+Each test may have `faults`, one cell per fault. `result` is `pass`, `fail`, `skipped`, or `not-run`. `pass` means the Playwright test status was `expected` and the fault was applied. `fail` means `unexpected`. `not-run` is also used when a page fault never reached a page the test used, or when a passing test's page was not blank at the end. A page opened in `beforeAll` or a worker scoped fixture counts as reached while it is open. A page opened in a test body stops counting when that test ends. A page closed before the test started does not. That cell has a `reason`. The console prints one `Fault <id> <result>` line per cell, and the reason on the same line when it is set. A `Faults:` summary is computed from those cells.
 
 ## Locators
 

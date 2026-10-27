@@ -14,7 +14,28 @@ const trackedPages = new WeakSet();
 const wrappedBrowsers = new WeakSet();
 let seenPages = new Set();
 let seenContexts = new Set();
+let testLocalPages = new Set();
+let testLocalContexts = new Set();
+let inTestBody = false;
+let skipProxyFrame = false;
 let state = null;
+
+const originalCaptureStackTrace = Error.captureStackTrace;
+Error.captureStackTrace = function(targetObject, constructorOpt) {
+  if (skipProxyFrame && typeof Error.prepareStackTrace === 'function') {
+    const prepare = Error.prepareStackTrace;
+    const limit = Error.stackTraceLimit;
+    // Playwright keeps two frames and reads frame 1 as the caller. This wrapper
+    // is frame 0 and the proxy apply is frame 2, so the spec call is frame 3.
+    Error.stackTraceLimit = Math.max(limit, 0) + 2;
+    Error.prepareStackTrace = function(error, frames) {
+      const user = frames.length > 3 ? frames[3] : frames[frames.length - 1];
+      return prepare(error, [frames[0], user]);
+    };
+    skipProxyFrame = false;
+  }
+  return originalCaptureStackTrace.call(this, targetObject, constructorOpt);
+};
 
 function readFault() {
   const raw = process.env.QCV_FAULT;
@@ -48,6 +69,9 @@ function contextIsClosed(context) {
 }
 
 function beginTestScope() {
+  inTestBody = false;
+  testLocalPages = new Set();
+  testLocalContexts = new Set();
   for (const page of [...armedPages]) {
     if (page.isClosed()) armedPages.delete(page);
   }
@@ -57,6 +81,14 @@ function beginTestScope() {
   seenPages = new Set(armedPages);
   seenContexts = new Set(armedContexts);
   state = readFault() ? { blankChecks: 0, blankMisses: 0, counts: {} } : null;
+}
+
+function endTestScope() {
+  for (const page of testLocalPages) armedPages.delete(page);
+  for (const context of testLocalContexts) armedContexts.delete(context);
+  testLocalPages.clear();
+  testLocalContexts.clear();
+  inTestBody = false;
 }
 
 function domScript(fault) {
@@ -120,6 +152,7 @@ function trackPage(page, fault) {
   armedPages.add(page);
   if (trackedPages.has(page)) return;
   trackedPages.add(page);
+  if (inTestBody) testLocalPages.add(page);
   if (!isDom(fault)) return;
   const script = domScript(fault);
   const original = page.setContent.bind(page);
@@ -138,11 +171,13 @@ function trackPage(page, fault) {
 
 async function armContext(context, fault) {
   if (!fault || !context) return;
-  if (!instrumentedContexts.has(context)) {
+  const fresh = !instrumentedContexts.has(context);
+  if (fresh) {
     instrumentedContexts.add(context);
     context.on('close', () => {
       closedContexts.add(context);
       armedContexts.delete(context);
+      testLocalContexts.delete(context);
     });
     if (isDom(fault)) await context.addInitScript({ content: domScript(fault) });
     if (isBlock(fault)) {
@@ -157,6 +192,7 @@ async function armContext(context, fault) {
   if (contextIsClosed(context)) return;
   armedContexts.add(context);
   seenContexts.add(context);
+  if (fresh && inTestBody) testLocalContexts.add(context);
 }
 
 async function rememberSeen(fault) {
@@ -236,14 +272,79 @@ function installBrowser(browser) {
   };
 }
 
-export const test = base.extend({
+function wrapBody(fn) {
+  if (typeof fn !== 'function' || fn.__qcvWrapped) return fn;
+  const wrapped = async function(args, testInfo) {
+    inTestBody = true;
+    return await fn.call(this, args, testInfo);
+  };
+  wrapped.__qcvWrapped = true;
+  wrapped.toString = function() {
+    return fn.toString();
+  };
+  return wrapped;
+}
+
+function wrapTestArgs(args) {
+  const copy = args.slice();
+  for (let i = 0; i < copy.length; i++) {
+    if (typeof copy[i] === 'function') copy[i] = wrapBody(copy[i]);
+  }
+  return copy;
+}
+
+function proxyTest(inner) {
+  return new Proxy(inner, {
+    apply(target, thisArg, args) {
+      skipProxyFrame = true;
+      try {
+        return Reflect.apply(target, thisArg, wrapTestArgs(args));
+      } finally {
+        skipProxyFrame = false;
+      }
+    },
+    get(target, prop, receiver) {
+      if (prop === 'extend') {
+        const extend = Reflect.get(target, prop, receiver);
+        return function() {
+          skipProxyFrame = true;
+          try {
+            return proxyTest(extend.apply(target, arguments));
+          } finally {
+            skipProxyFrame = false;
+          }
+        };
+      }
+      if (prop === 'only') {
+        const only = Reflect.get(target, prop, receiver);
+        return new Proxy(only, {
+          apply(fn, thisArg, args) {
+            skipProxyFrame = true;
+            try {
+              return Reflect.apply(fn, thisArg, wrapTestArgs(args));
+            } finally {
+              skipProxyFrame = false;
+            }
+          },
+        });
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
+export const test = proxyTest(base.extend({
   _qcvFaultLog: [async ({}, use, testInfo) => {
     const fault = readFault();
     beginTestScope();
-    await use();
-    if (fault) {
-      await rememberSeen(fault);
-      writeLog(testInfo, fault);
+    try {
+      await use();
+      if (fault) {
+        await rememberSeen(fault);
+        writeLog(testInfo, fault);
+      }
+    } finally {
+      endTestScope();
     }
   }, { auto: true }],
   browser: async ({ browser }, use) => {
@@ -265,7 +366,7 @@ export const test = base.extend({
     await use(page);
     if (fault) await rememberPage(page, fault);
   },
-});
+}));
 
 export const expect = baseExpect;
 

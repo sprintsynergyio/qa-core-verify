@@ -53,6 +53,8 @@ test('fault fixture source applies DOM faults and blocked requests', () => {
   assert.equal(source.includes('page.route'), false);
   assert.equal(source.includes('isClosed'), true);
   assert.equal(source.includes('pages: 0'), false);
+  assert.equal(source.includes('inTestBody'), true);
+  assert.equal(source.includes('endTestScope'), true);
   assert.equal(source.includes('browser.newContext'), true);
   assert.equal(source.includes('page.setContent'), true);
   assert.equal(source.includes('MutationObserver'), true);
@@ -500,6 +502,115 @@ test('api only returns widget', async ({ request }) => {
   assert.equal(cell('api only returns widget', 'no-h1').result, 'not-run');
   assert.equal(rules('api only returns widget').includes('QCV-F002'), false);
   assert.equal(rules('api only returns widget').includes('QCV-F004'), false);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+test('a page left open by an earlier test does not count for a later test', { timeout: 180000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-leak-');
+  const scratch = tempDir(t, 'qcv-fault-leak-tmp-');
+  const out = tempDir(t, 'qcv-fault-leak-out-');
+  const port = await reservePort();
+  fs.writeFileSync(
+    path.join(project, 'server.mjs'),
+    `import http from 'node:http';
+const home = '<!doctype html><html><body><h1>Products</h1></body></html>';
+http.createServer((req, res) => {
+  const url = (req.url || '/').split('?')[0];
+  if (url === '/api/widget') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ name: 'widget' }));
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(home);
+}).listen(${port}, '127.0.0.1');
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 15000,
+  testDir: '.',
+  webServer: { command: 'node server.mjs', url: 'http://127.0.0.1:${port}', timeout: 10000, reuseExistingServer: false },
+  use: { baseURL: 'http://127.0.0.1:${port}', headless: true },
+  expect: { timeout: 3000 },
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+
+test('leaves its page open', async ({ browser }) => {
+  const page = await browser.newPage();
+  await page.goto('/');
+  expect(1).toBe(1);
+});
+
+test('page less after an open page', async () => {
+  expect(1).toBe(1);
+});
+
+test('request only after an open page', async ({ request }) => {
+  const response = await request.get('/api/widget');
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.name).toBe('widget');
+});
+
+test('reads the title and leaves the page open', async ({ browser }) => {
+  const page = await browser.newPage();
+  await page.goto('/');
+  await expect(page.locator('h1')).toHaveText('Products');
+});
+
+test('page less after a failed open', async () => {
+  expect(1).toBe(1);
+});
+
+test('request only after a failed open', async ({ request }) => {
+  const response = await request.get('/api/widget');
+  expect(response.ok()).toBeTruthy();
+});
+`,
+  );
+  writeFaults(project, [
+    {
+      id: 'no-h1',
+      type: 'remove-element',
+      params: { selector: 'h1' },
+      expectedToBreak: ['page less after', 'request only after'],
+    },
+    {
+      id: 'block-data',
+      type: 'block-request',
+      params: { urlPattern: '**/api/widget' },
+      expectedToBreak: ['request only after'],
+    },
+  ]);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = (title) => report.tests.find((entry) => entry.titlePath.at(-1) === title);
+  const cell = (title, id) => row(title).faults.find((entry) => entry.id === id);
+  const rules = (title) => row(title).findings.map((finding) => finding.ruleId);
+  assert.equal(cell('leaves its page open', 'blank-app').result, 'pass');
+  assert.equal(rules('leaves its page open').includes('QCV-F002'), true);
+  for (const title of ['page less after an open page', 'request only after an open page', 'page less after a failed open', 'request only after a failed open']) {
+    assert.equal(cell(title, 'blank-app').result, 'not-run', title);
+    assert.match(cell(title, 'blank-app').reason, /not applied to a page/);
+    assert.equal(cell(title, 'no-h1').result, 'not-run', title);
+    assert.equal(rules(title).includes('QCV-F002'), false, title);
+    assert.equal(rules(title).includes('QCV-F003'), false, title);
+    assert.equal(rules(title).includes('QCV-F004'), false, title);
+  }
+  assert.equal(cell('request only after an open page', 'block-data').result, 'not-run');
+  assert.equal(cell('request only after a failed open', 'block-data').result, 'not-run');
+  assert.equal(cell('reads the title and leaves the page open', 'blank-app').result, 'fail');
+  assert.equal(cell('reads the title and leaves the page open', 'no-h1').result, 'fail');
+  assert.equal(rules('reads the title and leaves the page open').includes('QCV-F002'), false);
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
 });
 
