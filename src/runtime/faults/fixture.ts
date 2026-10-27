@@ -6,9 +6,14 @@ import { test as base, expect as baseExpect } from '@playwright/test';
 
 export * from '@playwright/test';
 
-const armedContexts = new WeakSet();
+const instrumentedContexts = new WeakSet();
+const armedContexts = new Set();
+const closedContexts = new WeakSet();
+const armedPages = new Set();
 const trackedPages = new WeakSet();
 const wrappedBrowsers = new WeakSet();
+let seenPages = new Set();
+let seenContexts = new Set();
 let state = null;
 
 function readFault() {
@@ -31,11 +36,27 @@ function isBlock(fault) {
   return fault.type === 'block-request' && fault.params && typeof fault.params.urlPattern === 'string';
 }
 
-function ensureState() {
-  if (!state) {
-    state = { pages: 0, contexts: 0, blankChecks: 0, blankMisses: 0, counts: {} };
+function contextIsClosed(context) {
+  if (closedContexts.has(context)) return true;
+  try {
+    context.pages();
+    return false;
+  } catch {
+    closedContexts.add(context);
+    return true;
   }
-  return state;
+}
+
+function beginTestScope() {
+  for (const page of [...armedPages]) {
+    if (page.isClosed()) armedPages.delete(page);
+  }
+  for (const context of [...armedContexts]) {
+    if (contextIsClosed(context)) armedContexts.delete(context);
+  }
+  seenPages = new Set(armedPages);
+  seenContexts = new Set(armedContexts);
+  state = readFault() ? { blankChecks: 0, blankMisses: 0, counts: {} } : null;
 }
 
 function domScript(fault) {
@@ -94,9 +115,11 @@ function domScript(fault) {
 }
 
 function trackPage(page, fault) {
+  if (!page || page.isClosed()) return;
+  seenPages.add(page);
+  armedPages.add(page);
   if (trackedPages.has(page)) return;
   trackedPages.add(page);
-  ensureState().pages += 1;
   if (!isDom(fault)) return;
   const script = domScript(fault);
   const original = page.setContent.bind(page);
@@ -114,22 +137,38 @@ function trackPage(page, fault) {
 }
 
 async function armContext(context, fault) {
-  if (!fault || armedContexts.has(context)) return;
-  armedContexts.add(context);
-  ensureState().contexts += 1;
-  if (isDom(fault)) await context.addInitScript({ content: domScript(fault) });
-  if (isBlock(fault)) {
-    const pattern = fault.params.urlPattern;
-    await context.route(pattern, (route) => route.abort());
+  if (!fault || !context) return;
+  if (!instrumentedContexts.has(context)) {
+    instrumentedContexts.add(context);
+    context.on('close', () => {
+      closedContexts.add(context);
+      armedContexts.delete(context);
+    });
+    if (isDom(fault)) await context.addInitScript({ content: domScript(fault) });
+    if (isBlock(fault)) {
+      const pattern = fault.params.urlPattern;
+      await context.route(pattern, (route) => route.abort());
+    }
+    context.on('page', (page) => {
+      trackPage(page, fault);
+    });
+    for (const page of context.pages()) trackPage(page, fault);
   }
-  context.on('page', (page) => {
-    trackPage(page, fault);
-  });
-  for (const page of context.pages()) trackPage(page, fault);
+  if (contextIsClosed(context)) return;
+  armedContexts.add(context);
+  seenContexts.add(context);
+}
+
+async function rememberSeen(fault) {
+  if (!state || !isDom(fault)) return;
+  for (const page of [...seenPages]) {
+    if (page.isClosed()) continue;
+    await rememberPage(page, fault);
+  }
 }
 
 async function rememberPage(page, fault) {
-  if (!state || !isDom(fault)) return;
+  if (!state || !isDom(fault) || !page || page.isClosed()) return;
   let snap;
   try {
     snap = await page.evaluate(() => {
@@ -168,8 +207,8 @@ function writeLog(testInfo, fault) {
     line: testInfo.line,
     column: testInfo.column,
     title: titlePath.join(' > '),
-    armedPages: state.pages,
-    armedContexts: state.contexts,
+    armedPages: seenPages.size,
+    armedContexts: seenContexts.size,
     blankChecks: state.blankChecks,
     blankMisses: state.blankMisses,
     counts: state.counts,
@@ -200,9 +239,12 @@ function installBrowser(browser) {
 export const test = base.extend({
   _qcvFaultLog: [async ({}, use, testInfo) => {
     const fault = readFault();
-    state = fault ? { pages: 0, contexts: 0, blankChecks: 0, blankMisses: 0, counts: {} } : null;
+    beginTestScope();
     await use();
-    if (fault) writeLog(testInfo, fault);
+    if (fault) {
+      await rememberSeen(fault);
+      writeLog(testInfo, fault);
+    }
   }, { auto: true }],
   browser: async ({ browser }, use) => {
     if (readFault()) installBrowser(browser);

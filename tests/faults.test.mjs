@@ -51,6 +51,8 @@ test('fault fixture source applies DOM faults and blocked requests', () => {
   assert.equal(source.includes('context.addInitScript'), true);
   assert.equal(source.includes('context.route'), true);
   assert.equal(source.includes('page.route'), false);
+  assert.equal(source.includes('isClosed'), true);
+  assert.equal(source.includes('pages: 0'), false);
   assert.equal(source.includes('browser.newContext'), true);
   assert.equal(source.includes('page.setContent'), true);
   assert.equal(source.includes('MutationObserver'), true);
@@ -375,6 +377,129 @@ test('popup loads data', async ({ page }) => {
   assert.equal(rules('api only returns widget').includes('QCV-F004'), false);
   assert.equal(cell('popup loads data', 'block-data').result, 'fail');
   assert.equal(rules('popup loads data').includes('QCV-F003'), false);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+test('a page armed in beforeAll or a worker fixture stays applied', { timeout: 180000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-shared-');
+  const scratch = tempDir(t, 'qcv-fault-shared-tmp-');
+  const out = tempDir(t, 'qcv-fault-shared-out-');
+  const port = await reservePort();
+  fs.writeFileSync(
+    path.join(project, 'server.mjs'),
+    `import http from 'node:http';
+const home = '<!doctype html><html><body><h1>Products</h1></body></html>';
+http.createServer((req, res) => {
+  const url = (req.url || '/').split('?')[0];
+  if (url === '/api/widget') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ name: 'widget' }));
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(home);
+}).listen(${port}, '127.0.0.1');
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 15000,
+  testDir: '.',
+  webServer: { command: 'node server.mjs', url: 'http://127.0.0.1:${port}', timeout: 10000, reuseExistingServer: false },
+  use: { baseURL: 'http://127.0.0.1:${port}', headless: true },
+  expect: { timeout: 3000 },
+});
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect, type Page } from '@playwright/test';
+
+let shared: Page;
+test.describe('shared page', () => {
+  test.beforeAll(async ({ browser }) => {
+    shared = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+    await shared.goto('/');
+  });
+  test.afterAll(async () => {
+    await shared.context().close();
+  });
+
+  test('shared page reads title', async () => {
+    await expect(shared.locator('h1')).toHaveText('Products');
+  });
+  test('shared page vacuous', async () => {
+    void shared;
+    expect(1).toBe(1);
+  });
+});
+
+let workerPage: Page | undefined;
+const wtest = test.extend<{ wapp: Page }>({
+  wapp: [async ({ browser }, use) => {
+    workerPage = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+    await workerPage.goto('/');
+    await use(workerPage);
+  }, { scope: 'worker' }],
+});
+
+test.describe('worker page', () => {
+  test.afterAll(async () => {
+    if (workerPage) await workerPage.context().close();
+  });
+  wtest('worker page vacuous', async ({ wapp }) => {
+    void wapp;
+    expect(1).toBe(1);
+  });
+  wtest('worker page reads title', async ({ wapp }) => {
+    await expect(wapp.locator('h1')).toHaveText('Products');
+  });
+});
+
+test('api only returns widget', async ({ request }) => {
+  const response = await request.get('/api/widget');
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.name).toBe('widget');
+});
+`,
+  );
+  writeFaults(project, [
+    {
+      id: 'no-h1',
+      type: 'remove-element',
+      params: { selector: 'h1' },
+      expectedToBreak: [],
+    },
+  ]);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = (title) => report.tests.find((entry) => entry.titlePath.at(-1) === title);
+  const cell = (title, id) => row(title).faults.find((entry) => entry.id === id);
+  const rules = (title) => row(title).findings.map((finding) => finding.ruleId);
+  assert.equal(cell('shared page reads title', 'blank-app').result, 'fail');
+  assert.equal(cell('shared page reads title', 'no-h1').result, 'fail');
+  assert.equal(cell('shared page reads title', 'blank-app').reason, undefined);
+  assert.equal(rules('shared page reads title').includes('QCV-F002'), false);
+  assert.equal(rules('shared page reads title').includes('QCV-F003'), false);
+  assert.equal(cell('shared page vacuous', 'blank-app').result, 'pass');
+  assert.equal(rules('shared page vacuous').includes('QCV-F002'), true);
+  assert.equal(cell('worker page vacuous', 'blank-app').result, 'pass');
+  assert.equal(cell('worker page vacuous', 'no-h1').result, 'pass');
+  assert.equal(rules('worker page vacuous').includes('QCV-F002'), true);
+  assert.equal(cell('worker page reads title', 'blank-app').result, 'fail');
+  assert.equal(cell('worker page reads title', 'no-h1').result, 'fail');
+  assert.equal(cell('worker page reads title', 'blank-app').reason, undefined);
+  assert.equal(rules('worker page reads title').includes('QCV-F002'), false);
+  assert.equal(cell('api only returns widget', 'blank-app').result, 'not-run');
+  assert.match(cell('api only returns widget', 'blank-app').reason, /not applied to a page/);
+  assert.equal(cell('api only returns widget', 'no-h1').result, 'not-run');
+  assert.equal(rules('api only returns widget').includes('QCV-F002'), false);
+  assert.equal(rules('api only returns widget').includes('QCV-F004'), false);
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
 });
 

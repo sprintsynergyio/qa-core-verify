@@ -548,37 +548,38 @@ test('locator evidence on SauceDemo is skipped unless QCV_LIVE=1', { skip: proce
   assert.equal(run.evidence.records.every((record) => !record.file.startsWith('/') && !record.testFile.startsWith('/')), true);
 });
 
-test('a SauceDemo .qa-core directory that already exists is left in place', (t) => {
-  const runtime = path.join(sauceDemo, '.qa-core');
+test('an existing .qa-core directory on a SauceDemo copy is left in place', (t) => {
+  const before = hashTree(sauceDemo);
+  const hadRuntimeDir = fs.existsSync(path.join(sauceDemo, '.qa-core'));
+  const copy = tempDir(t, 'qcv-sauce-runtime-');
+  fs.cpSync(sauceDemo, copy, {
+    recursive: true,
+    filter: (source) => {
+      const base = path.basename(source);
+      return source === sauceDemo || !['node_modules', '.qa-core', 'test-results', 'playwright-report', '.git'].includes(base);
+    },
+  });
+  const runtime = path.join(copy, '.qa-core');
   const verify = path.join(runtime, 'verify');
   const stamp = path.join(verify, 'preexisting.txt');
-  const hadRuntimeDir = fs.existsSync(runtime);
-  const hadStamp = fs.existsSync(stamp);
+  const note = path.join(runtime, 'note.txt');
   fs.mkdirSync(verify, { recursive: true });
-  if (!hadStamp) fs.writeFileSync(stamp, 'preexisting\n');
-  t.after(() => {
-    if (!hadStamp && fs.existsSync(stamp)) fs.rmSync(stamp, { force: true });
-    if (!hadRuntimeDir) {
-      try {
-        fs.rmdirSync(verify);
-      } catch {
-        // The directory holds other runtime files, so it stays.
-      }
-      try {
-        fs.rmdirSync(runtime);
-      } catch {
-        // The directory holds other runtime files, so it stays.
-      }
-    }
-  });
-  const out = tempDir(t, 'qcv-sauce-static-');
-  const result = spawnSync(process.execPath, [path.join(repoRoot, 'dist/cli.js'), sauceDemo, '--out', out], {
+  fs.writeFileSync(stamp, 'preexisting\n');
+  fs.writeFileSync(note, 'keep\n');
+  const result = spawnSync(process.execPath, [path.join(repoRoot, 'dist/cli.js'), copy], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(fs.existsSync(stamp), true);
-  assert.equal(fs.existsSync(runtime), true);
+  assert.equal(fs.readFileSync(stamp, 'utf8'), 'preexisting\n');
+  assert.equal(fs.readFileSync(note, 'utf8'), 'keep\n');
+  for (const name of ['report.json', 'report.md', 'report.html']) {
+    assert.equal(fs.existsSync(path.join(verify, name)), true, name);
+  }
+  assert.match(result.stdout, /Reports: \.qa-core\/verify\/report\.json/);
+  assert.equal(hashTree(sauceDemo), before);
+  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core')), hadRuntimeDir);
+  assert.equal(fs.existsSync(path.join(sauceDemo, '.qa-core', 'verify', 'preexisting.txt')), false);
 });
 
 const HELPER_SOURCE = `import { expect } from '@playwright/test';
