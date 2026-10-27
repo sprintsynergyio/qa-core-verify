@@ -9,6 +9,7 @@ export * from '@playwright/test';
 const wrapped = Symbol('qcvWrapped');
 const storeKey = Symbol('qcvStore');
 const parentKey = Symbol('qcvParent');
+const nthKey = Symbol('qcvNth');
 const evidenceDir = process.env.QCV_EVIDENCE_DIR || '';
 let pendingRecords = 0;
 
@@ -102,13 +103,18 @@ async function readCount(locator) {
   return null;
 }
 
-function absenceOption(name, args, negated) {
-  if (negated) return false;
-  const options = args.find((arg) => arg && typeof arg === 'object');
+function absenceOption(name, args) {
+  const options = args.find((arg) => arg && typeof arg === 'object' && !Array.isArray(arg));
   if (!options) return false;
   if (name === 'toBeVisible') return options.visible === false;
   if (name === 'toBeAttached') return options.attached === false;
   return false;
+}
+
+function listLength(name, args) {
+  if (name !== 'toHaveText' && name !== 'toContainText') return null;
+  const first = args[0];
+  return Array.isArray(first) ? first.length : null;
 }
 
 async function record(store, locator, phase, call, negated, succeeded, stack, countExpected, optionAbsence) {
@@ -151,6 +157,7 @@ async function record(store, locator, phase, call, negated, succeeded, stack, co
       resolvedOnAction: actionSucceeded,
       parentCount,
       countExpected: typeof countExpected === 'number' ? countExpected : null,
+      nthIndex: typeof locator[nthKey] === 'number' ? locator[nthKey] : null,
       optionAbsence: optionAbsence === true,
       stack,
       testFile: store.testInfo.file,
@@ -186,6 +193,7 @@ function wrapLocator(locator, store) {
       if (NARROW.has(name) && wrappedChild && typeof wrappedChild === 'object') {
         try {
           wrappedChild[parentKey] = locator;
+          if (name === 'nth' && typeof args[0] === 'number') wrappedChild[nthKey] = args[0];
         } catch {
           // A sealed child still returns. The parent count stays unset.
         }
@@ -206,6 +214,13 @@ function wrapLocator(locator, store) {
         await record(store, locator, 'action', name, false, false, stack, null, false);
         throw error;
       }
+    };
+  }
+  const originalContentFrame = locator.contentFrame;
+  if (typeof originalContentFrame === 'function') {
+    locator.contentFrame = function (...args) {
+      const frame = originalContentFrame.apply(locator, args);
+      return remember(frame, store);
     };
   }
   return locator;
@@ -281,8 +296,10 @@ function wrapMatcherResult(result, actual, store, negated) {
       if (typeof value !== 'function') return value;
       return async (...args) => {
         const stack = callStack();
-        const countExpected = prop === 'toHaveCount' && typeof args[0] === 'number' ? args[0] : null;
-        const optionAbsence = absenceOption(String(prop), args, negated);
+        const countedArg = prop === 'toHaveCount' && typeof args[0] === 'number' ? args[0] : null;
+        const listed = listLength(String(prop), args);
+        const countExpected = countedArg === null ? listed : countedArg;
+        const optionAbsence = absenceOption(String(prop), args);
         try {
           return await value.apply(target, args);
         } finally {
@@ -316,23 +333,35 @@ export const test = base.extend({
   },
 });
 
-export const expect = new Proxy(baseExpect, {
-  apply(target, thisArg, args) {
-    return callExpect(target, thisArg, args);
-  },
-  get(target, prop, receiver) {
-    if (prop === 'soft') {
-      const soft = Reflect.get(target, prop, receiver);
-      return new Proxy(soft, {
-        apply(softTarget, thisArg, args) {
-          return callExpect(softTarget, thisArg, args);
-        },
-      });
-    }
-    const value = Reflect.get(target, prop, receiver);
-    return typeof value === 'function' ? value.bind(target) : value;
-  },
-});
+function wrapExpect(expectFn) {
+  return new Proxy(expectFn, {
+    apply(target, thisArg, args) {
+      return callExpect(target, thisArg, args);
+    },
+    get(target, prop, receiver) {
+      if (prop === 'soft') {
+        const soft = Reflect.get(target, prop, receiver);
+        return new Proxy(soft, {
+          apply(softTarget, thisArg, args) {
+            return callExpect(softTarget, thisArg, args);
+          },
+        });
+      }
+      if (prop === 'configure') {
+        const configure = Reflect.get(target, prop, receiver);
+        if (typeof configure !== 'function') return configure;
+        return function (...args) {
+          const configured = Reflect.apply(configure, target, args);
+          return wrapExpect(configured);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+export const expect = wrapExpect(baseExpect);
 
 export default test;
 `;

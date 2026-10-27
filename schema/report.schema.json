@@ -16,6 +16,7 @@
       "items": { "enum": ["weak-assertion", "locator", "cannot-fail"] }
     },
     "summary": { "$ref": "#/$defs/summary" },
+    "inversion": { "$ref": "#/$defs/inversion" },
     "tests": {
       "type": "array",
       "items": { "$ref": "#/$defs/test" }
@@ -98,7 +99,49 @@
         "locators": {
           "type": "array",
           "items": { "$ref": "#/$defs/locator" }
+        },
+        "assertions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assertion" }
         }
+      }
+    },
+    "inversion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutants", "runs", "stoppedAtLimit", "outcomes"],
+      "properties": {
+        "mutants": { "type": "integer", "minimum": 0 },
+        "runs": { "type": "integer", "minimum": 0 },
+        "stoppedAtLimit": { "type": "boolean" },
+        "outcomes": { "$ref": "#/$defs/outcomes" }
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["killed", "survived", "timeout", "error", "not-run", "skipped"],
+      "properties": {
+        "killed": { "type": "integer", "minimum": 0 },
+        "survived": { "type": "integer", "minimum": 0 },
+        "timeout": { "type": "integer", "minimum": 0 },
+        "error": { "type": "integer", "minimum": 0 },
+        "not-run": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "line", "column", "matcher", "outcome", "source"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "matcher": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["killed", "survived", "timeout", "error", "not-run", "skipped"] },
+        "source": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 }
       }
     },
     "locator": {

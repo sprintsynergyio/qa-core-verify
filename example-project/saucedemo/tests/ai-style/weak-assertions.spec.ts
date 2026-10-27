@@ -49,6 +49,7 @@ test('expect inside an if', async ({ page }) => {
   const missing = page.locator('#not-on-the-inventory-page');
   if ((await missing.count()) > 0) {
     // SEEDED: QCV-W007 this expect runs only when the locator matches
+    // SEEDED: QCV-F001 inverting this expect still passes because the branch does not run
     await expect(missing).toHaveText('will not run');
   }
 });
@@ -57,6 +58,7 @@ test('swallows a failed assertion', async ({ page }) => {
   await page.goto('/');
   try {
     // SEEDED: QCV-W008 the catch discards the assertion failure
+    // SEEDED: QCV-F001 inverting this expect still passes because the catch discards the result
     await expect(page.locator('#login-error-banner')).toBeVisible({ timeout: 1000 });
   } catch {
     // The failure is discarded.

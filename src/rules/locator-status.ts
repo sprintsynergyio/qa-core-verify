@@ -79,10 +79,13 @@ export function statusOf(uses: readonly EvidenceRecord[]): ReportLocator['status
  */
 export function isAbsence(use: EvidenceRecord): boolean {
   if (use.phase !== 'assertion') return false;
-  if (use.optionAbsence && (use.call === 'toBeVisible' || use.call === 'toBeAttached')) return true;
-  if (use.call === 'toBeHidden' && !use.negated) return true;
-  if (use.call === 'toBeVisible' && use.negated) return true;
-  if (use.call === 'toBeAttached' && use.negated) return true;
+  if (use.call === 'toBeHidden') return !use.negated;
+  if (use.call === 'toBeVisible' || use.call === 'toBeAttached') {
+    const optionSaysAbsence = use.optionAbsence === true;
+    if (optionSaysAbsence && use.negated) return false;
+    if (optionSaysAbsence || use.negated) return true;
+    return false;
+  }
   if (use.call === 'toHaveCount' && !use.negated && use.countExpected === 0) return true;
   return false;
 }
@@ -97,14 +100,24 @@ export function neverMatched(uses: readonly EvidenceRecord[]): boolean {
 
 /**
  * `toHaveCount(n)` with the same n the page returned is the test naming that count.
- * `.first()`, `.last()`, and `.nth()` are not that kind of narrowing: the parent count is the signal.
+ * An array passed to `toHaveText` or `toContainText` is the same kind of count when its length equals the match count.
+ * `.nth(index)` with a stated index is narrowed. `.first()` and `.last()` are not: the parent count is the signal.
  */
 export function multiMatchUnaccounted(uses: readonly EvidenceRecord[]): boolean {
   const multi = uses.filter((use) => (use.matchCount !== null && use.matchCount > 1) || (use.parentCount !== null && use.parentCount > 1));
   if (multi.length === 0) return false;
   return multi.some((use) => {
-    if (use.parentCount !== null && use.parentCount > 1) return true;
-    return !(use.phase === 'assertion' && use.call === 'toHaveCount' && !use.negated && use.countExpected === use.matchCount);
+    if (use.parentCount !== null && use.parentCount > 1) {
+      if (typeof use.nthIndex === 'number') return false;
+      return true;
+    }
+    const namedCount =
+      use.phase === 'assertion' &&
+      !use.negated &&
+      use.countExpected !== null &&
+      use.countExpected === use.matchCount &&
+      (use.call === 'toHaveCount' || use.call === 'toHaveText' || use.call === 'toContainText');
+    return !namedCount;
   });
 }
 
@@ -120,9 +133,13 @@ export function columnsFor(test: InventoryTest): number[] {
 }
 
 /**
- * Match evidence to the source test by file and test line, then by a shared column.
+ * Match evidence to the test that recorded it, by file, line, column, and title.
  * One `test(\`param ${n}\`)` call is one row. Two calls on that line stay apart.
- * When several rows still fit, every one of them is returned so the finding is not dropped.
+ * A record is not given to every test on the line.
+ * When the column matches several rows, the title narrows them.
+ * When the column and the title both miss the only row that was passed in, the record belongs to another test and is not attached.
+ * When the record has a column or a title and neither matches a remaining row, no row is returned.
+ * When both the column and the title are absent, every remaining row is returned.
  */
 export function matchInventory(tests: readonly InventoryTest[], projectDir: string, group: LocatorGroup): InventoryTest[] {
   const eligible = tests.filter((test) => {
@@ -130,14 +147,27 @@ export function matchInventory(tests: readonly InventoryTest[], projectDir: stri
     const file = path.relative(projectDir, test.file).split(path.sep).join('/');
     return file === group.testFile && test.line === group.testLine;
   });
+  const titled =
+    group.testTitle.length > 0 ? eligible.filter((test) => test.titlePath.join(' > ') === group.testTitle) : [];
   if (group.testColumn > 0) {
     const byColumn = eligible.filter((test) => columnsFor(test).includes(group.testColumn));
     if (byColumn.length === 1) return byColumn;
-    if (byColumn.length > 1) return byColumn;
+    if (byColumn.length > 1) {
+      const narrowed = byColumn.filter((test) => titled.includes(test));
+      if (narrowed.length > 0) return narrowed;
+      return byColumn;
+    }
   }
-  if (eligible.length === 1) return eligible;
-  const titled = eligible.filter((test) => test.titlePath.join(' > ') === group.testTitle);
-  if (titled.length === 1) return titled;
+  if (titled.length > 0) return titled;
+  if (eligible.length === 1) {
+    const only = eligible[0];
+    if (!only) return [];
+    const columnOk = group.testColumn === 0 || columnsFor(only).includes(group.testColumn);
+    const titleOk = group.testTitle.length === 0 || only.titlePath.join(' > ') === group.testTitle;
+    if (columnOk || titleOk) return [only];
+    return [];
+  }
+  if (group.testColumn > 0 || group.testTitle.length > 0) return [];
   return eligible;
 }
 

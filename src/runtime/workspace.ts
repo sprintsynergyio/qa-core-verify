@@ -320,6 +320,72 @@ export interface WorkspacePhase {
   after?: (workspaceDir: string, playwright: PlaywrightRun) => void;
 }
 
+export interface CopiedProject {
+  runRoot: string;
+  workspaceDir: string;
+  skippedLinks: string[];
+  /** Run Playwright in the copy. A later call removes the previous browser temp first. */
+  run: (args?: string[], env?: NodeJS.ProcessEnv) => Promise<PlaywrightRun>;
+}
+
+/**
+ * Copy `projectDir` and call `body` with a way to run Playwright in that copy.
+ * The copy is removed afterwards unless `keep` is set. The original project is not written.
+ * SIGINT, SIGTERM, and SIGHUP stop the current child and remove the copy.
+ */
+export async function withCopiedProject<T>(
+  projectDir: string,
+  options: { keep: boolean; configFile?: string },
+  body: (session: CopiedProject) => Promise<T>,
+): Promise<{ result: T; runRoot: string; workspaceDir: string; kept: boolean; skippedLinks: string[] }> {
+  const source = path.resolve(projectDir);
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-run-'));
+  const workspaceDir = path.join(runRoot, 'project');
+  fs.mkdirSync(workspaceDir);
+  fs.writeFileSync(path.join(runRoot, 'owner.pid'), `${process.pid}\n`);
+  const state: ActiveWorkspace = { keep: options.keep, projectCopy: workspaceDir };
+  activeWorkspaces.set(runRoot, state);
+  installSignalCleanup();
+  const modules = resolveNodeModules(source);
+  try {
+    const skippedLinks = copyProject(source, workspaceDir);
+    const link = path.join(workspaceDir, 'node_modules');
+    if (fs.existsSync(link)) fs.rmSync(link, { recursive: true, force: true });
+    fs.symlinkSync(modules, link, 'dir');
+    const session: CopiedProject = {
+      runRoot,
+      workspaceDir,
+      skippedLinks,
+      run: (args, env) => {
+        if (!signalStop) removeBrowserTemp(state);
+        return runPlaywright(
+          workspaceDir,
+          env,
+          state,
+          (child) => {
+            state.child = child;
+          },
+          commandArgs(workspaceDir, args, options.configFile),
+        );
+      },
+    };
+    const result = await body(session);
+    if (!signalStop) removeBrowserTemp(state);
+    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
+    else if (options.keep && !signalStop) removeRunExtras(runRoot);
+    if (signalStop) await new Promise(() => {});
+    return { result, runRoot, workspaceDir, kept: options.keep, skippedLinks };
+  } catch (error) {
+    if (!signalStop) removeBrowserTemp(state);
+    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
+    else if (options.keep && !signalStop) removeRunExtras(runRoot);
+    if (signalStop) await new Promise(() => {});
+    throw error;
+  } finally {
+    if (!signalStop) activeWorkspaces.delete(runRoot);
+  }
+}
+
 /**
  * Copy `projectDir` to a temp folder, symlink `node_modules`, and run Playwright there with `--retries=0`.
  * The copy is removed afterwards unless `keep` is set. The original project is not written.
@@ -342,57 +408,25 @@ export async function runPlaywrightInWorkspace(
     second?: WorkspacePhase;
   },
 ): Promise<WorkspaceRun> {
-  const source = path.resolve(projectDir);
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-run-'));
-  const workspaceDir = path.join(runRoot, 'project');
-  fs.mkdirSync(workspaceDir);
-  fs.writeFileSync(path.join(runRoot, 'owner.pid'), `${process.pid}\n`);
-  const state: ActiveWorkspace = { keep: options.keep, projectCopy: workspaceDir };
-  activeWorkspaces.set(runRoot, state);
-  installSignalCleanup();
-  const modules = resolveNodeModules(source);
-  try {
-    const skippedLinks = copyProject(source, workspaceDir);
-    const link = path.join(workspaceDir, 'node_modules');
-    if (fs.existsSync(link)) fs.rmSync(link, { recursive: true, force: true });
-    fs.symlinkSync(modules, link, 'dir');
-    options.prepare?.(workspaceDir);
-    options.onWorkspace?.(workspaceDir);
-    const first = await runPlaywright(workspaceDir, options.env, state, (child) => {
-      state.child = child;
-    }, commandArgs(workspaceDir, options.playwrightArgs, options.configFile));
-    options.after?.(workspaceDir, first);
-    let playwright = first;
-    let baseline: PlaywrightRun | undefined;
-    if (options.second) {
-      baseline = first;
-      if (!signalStop) removeBrowserTemp(state);
-      options.second.prepare?.(workspaceDir);
-      playwright = await runPlaywright(
-        workspaceDir,
-        { ...options.env, ...options.second.env },
-        state,
-        (child) => {
-          state.child = child;
-        },
-        commandArgs(workspaceDir, options.second.playwrightArgs, options.configFile),
-      );
-      options.second.after?.(workspaceDir, playwright);
-    }
-    if (!signalStop) removeBrowserTemp(state);
-    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
-    else if (options.keep && !signalStop) removeRunExtras(runRoot);
-    if (signalStop) await new Promise(() => {});
-    return { runRoot, workspaceDir, kept: options.keep, playwright, baseline, skippedLinks };
-  } catch (error) {
-    if (!signalStop) removeBrowserTemp(state);
-    if (!options.keep && !signalStop) fs.rmSync(runRoot, { recursive: true, force: true });
-    else if (options.keep && !signalStop) removeRunExtras(runRoot);
-    if (signalStop) await new Promise(() => {});
-    throw error;
-  } finally {
-    if (!signalStop) activeWorkspaces.delete(runRoot);
-  }
+  const wrapped = await withCopiedProject(projectDir, { keep: options.keep, configFile: options.configFile }, async (session) => {
+    options.prepare?.(session.workspaceDir);
+    options.onWorkspace?.(session.workspaceDir);
+    const first = await session.run(options.playwrightArgs, options.env);
+    options.after?.(session.workspaceDir, first);
+    if (!options.second) return { playwright: first, baseline: undefined as PlaywrightRun | undefined };
+    options.second.prepare?.(session.workspaceDir);
+    const playwright = await session.run(options.second.playwrightArgs, { ...options.env, ...options.second.env });
+    options.second.after?.(session.workspaceDir, playwright);
+    return { playwright, baseline: first };
+  });
+  return {
+    runRoot: wrapped.runRoot,
+    workspaceDir: wrapped.workspaceDir,
+    kept: wrapped.kept,
+    playwright: wrapped.result.playwright,
+    baseline: wrapped.result.baseline,
+    skippedLinks: wrapped.skippedLinks,
+  };
 }
 
 /**
@@ -405,7 +439,8 @@ export function configInsideProject(configFile: string, projectDir: string, cwd:
   const project = path.resolve(projectDir);
   const resolved = path.resolve(cwd, configFile);
   const relative = path.relative(project, resolved);
-  if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+  // An empty relative path is the project directory itself. Playwright accepts that directory.
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new ToolError(
       `Refusing --config ${resolved} because it is outside the project. The checker will not run Playwright against the original tree.`,
     );
@@ -454,19 +489,81 @@ interface SkippedLink {
   reason: 'dangling' | 'loop';
 }
 
+/** Stop a directory-link DAG from copying the same bytes without a bound. */
+const COPY_SIZE_FLOOR = 8 * 1024 * 1024;
+const COPY_SIZE_FACTOR = 32;
+
+interface CopyBudget {
+  used: number;
+  cap: number;
+}
+
 function copyProject(source: string, dest: string): string[] {
   const skipped: SkippedLink[] = [];
-  const stack: string[] = [];
-  copyTree(source, dest, stack, skipped, source);
+  const budget: CopyBudget = { used: 0, cap: Math.max(COPY_SIZE_FLOOR, sourceBytes(source) * COPY_SIZE_FACTOR) };
+  copyTree(source, dest, [], skipped, source, '', budget);
   return skipped.map((item) => `${item.relativePath} (${item.reason})`);
+}
+
+/** Unique file bytes in `source`. A directory link is counted once. */
+function sourceBytes(source: string): number {
+  let total = 0;
+  const seen = new Set<string>();
+  const walk = (from: string): void => {
+    if (from !== source && SKIP_COPY.has(path.basename(from))) return;
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(from);
+    } catch {
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = fs.realpathSync(from);
+      } catch {
+        return;
+      }
+      walk(real);
+      return;
+    }
+    if (stat.isDirectory()) {
+      const real = realOf(from);
+      if (seen.has(real)) return;
+      seen.add(real);
+      let names: string[];
+      try {
+        names = fs.readdirSync(from);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (SKIP_COPY.has(name)) continue;
+        walk(path.join(from, name));
+      }
+      return;
+    }
+    if (stat.isFile()) total += stat.size;
+  };
+  walk(source);
+  return total;
 }
 
 /**
  * A directory symlink is a loop only when its target is an ancestor of the link,
  * or that target is already on the current copy stack. A link to a directory copied
  * somewhere else is copied again.
+ * `copyRelative` is the path inside the copy. A loop message prints that path and the real path.
  */
-function copyTree(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
+function copyTree(
+  from: string,
+  to: string,
+  stack: string[],
+  skipped: SkippedLink[],
+  source: string,
+  copyRelative: string,
+  budget: CopyBudget,
+): void {
   if (from !== source && SKIP_COPY.has(path.basename(from))) return;
   let stat: fs.Stats;
   try {
@@ -478,23 +575,41 @@ function copyTree(from: string, to: string, stack: string[], skipped: SkippedLin
     throw new ToolError(`Cannot copy ${from}: ${message}`);
   }
   if (stat.isSymbolicLink()) {
-    copyLink(from, to, stack, skipped, source);
+    copyLink(from, to, stack, skipped, source, copyRelative, budget);
     return;
   }
   if (stat.isDirectory()) {
-    copyDirectory(from, to, stack, skipped, source);
+    copyDirectory(from, to, stack, skipped, source, copyRelative, budget);
     return;
   }
   if (stat.isFile()) {
+    noteCopiedBytes(budget, stat.size);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.copyFileSync(from, to);
   }
 }
 
-function copyDirectory(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
+function noteCopiedBytes(budget: CopyBudget, size: number): void {
+  budget.used += size;
+  if (budget.used > budget.cap) {
+    throw new ToolError(
+      `The temp copy stopped at ${budget.cap} bytes. Directory links copied the same tree more than once, and the copy would have grown without a limit.`,
+    );
+  }
+}
+
+function copyDirectory(
+  from: string,
+  to: string,
+  stack: string[],
+  skipped: SkippedLink[],
+  source: string,
+  copyRelative: string,
+  budget: CopyBudget,
+): void {
   const real = realOf(from);
   if (stack.includes(real)) {
-    skipped.push({ relativePath: projectRelative(source, from), reason: 'loop' });
+    skipped.push({ relativePath: loopLabel(copyRelative, source, from), reason: 'loop' });
     return;
   }
   stack.push(real);
@@ -502,26 +617,35 @@ function copyDirectory(from: string, to: string, stack: string[], skipped: Skipp
     fs.mkdirSync(to, { recursive: true });
     for (const entry of fs.readdirSync(from)) {
       if (SKIP_COPY.has(entry)) continue;
-      copyTree(path.join(from, entry), path.join(to, entry), stack, skipped, source);
+      const child = copyRelative.length === 0 ? entry : `${copyRelative}/${entry}`;
+      copyTree(path.join(from, entry), path.join(to, entry), stack, skipped, source, child, budget);
     }
   } finally {
     stack.pop();
   }
 }
 
-function copyLink(from: string, to: string, stack: string[], skipped: SkippedLink[], source: string): void {
-  const relativePath = projectRelative(source, from);
+function copyLink(
+  from: string,
+  to: string,
+  stack: string[],
+  skipped: SkippedLink[],
+  source: string,
+  copyRelative: string,
+  budget: CopyBudget,
+): void {
+  const shown = copyRelative.length === 0 ? projectRelative(source, from) : copyRelative;
   let real: string;
   try {
     real = fs.realpathSync(from);
   } catch (error) {
     const code = errorCode(error);
     if (code === 'ENOENT' || code === 'ELOOP') {
-      skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+      skipped.push({ relativePath: shown, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    throw new ToolError(`Cannot copy symlink ${relativePath}: ${message}`);
+    throw new ToolError(`Cannot copy symlink ${shown}: ${message}`);
   }
   let target: fs.Stats;
   try {
@@ -529,25 +653,33 @@ function copyLink(from: string, to: string, stack: string[], skipped: SkippedLin
   } catch (error) {
     const code = errorCode(error);
     if (code === 'ENOENT' || code === 'ELOOP') {
-      skipped.push({ relativePath, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
+      skipped.push({ relativePath: shown, reason: code === 'ELOOP' ? 'loop' : 'dangling' });
       return;
     }
-    throw new ToolError(`Cannot copy symlink ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new ToolError(`Cannot copy symlink ${shown}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (target.isDirectory()) {
     if (stack.includes(real) || linkTargetIsAncestor(from, real)) {
-      skipped.push({ relativePath, reason: 'loop' });
+      skipped.push({ relativePath: loopLabel(shown, source, real), reason: 'loop' });
       return;
     }
-    copyDirectory(real, to, stack, skipped, source);
+    copyDirectory(real, to, stack, skipped, source, shown, budget);
     return;
   }
   if (target.isFile()) {
+    noteCopiedBytes(budget, target.size);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.copyFileSync(real, to);
     return;
   }
-  skipped.push({ relativePath, reason: 'dangling' });
+  skipped.push({ relativePath: shown, reason: 'dangling' });
+}
+
+/** Copy path, plus the real path when the two differ. */
+function loopLabel(copyRelative: string, source: string, realOrFrom: string): string {
+  const realRelative = projectRelative(source, realOrFrom);
+  if (realRelative.length === 0 || realRelative === copyRelative || realRelative.startsWith('..')) return copyRelative;
+  return `${copyRelative} (real ${realRelative})`;
 }
 
 function linkTargetIsAncestor(linkPath: string, targetReal: string): boolean {

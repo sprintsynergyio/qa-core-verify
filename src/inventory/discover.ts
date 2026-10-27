@@ -51,8 +51,10 @@ interface MatchPattern {
 interface ScanTarget {
   testDir: string;
   testMatch: MatchPattern[];
+  testIgnore: MatchPattern[];
   testDirLabel: string;
   testMatchLabel: string;
+  testIgnoreLabel?: string;
 }
 
 /**
@@ -101,13 +103,19 @@ export function discoverSpecs(
     if (!fs.existsSync(target.testDir) || !fs.statSync(target.testDir).isDirectory()) continue;
     for (const file of walkFiles(target.testDir)) {
       if (!PLAYWRIGHT_TEST_EXTENSIONS.has(path.extname(file))) continue;
-      if (matchesTestMatch(file, target.testMatch)) files.add(file);
+      if (!matchesTestMatch(file, target.testMatch)) continue;
+      if (target.testIgnore.length > 0 && matchesTestMatch(file, target.testIgnore)) continue;
+      files.add(file);
     }
   }
   const labels = read.targets.map((target) => `testDir ${target.testDirLabel}, testMatch ${target.testMatchLabel}`);
+  const ignoreLabels = [...new Set(read.targets.map((target) => target.testIgnoreLabel).filter((label) => label !== undefined))];
+  const ignoreParts = [...ignoreLabels];
+  if (read.ignoreNote) ignoreParts.push(read.ignoreNote);
+  const ignoreNote = ignoreParts.length > 0 ? ` testIgnore ${ignoreParts.join('; ')}.` : '';
   return {
     files: [...files].sort(comparePaths),
-    method: `Discovery: Playwright config ${configName}. ${labels.join('; ')}.`,
+    method: `Discovery: Playwright config ${configName}. ${labels.join('; ')}.${ignoreNote}`,
   };
 }
 
@@ -230,7 +238,7 @@ function walkFiles(dir: string): string[] {
   return files;
 }
 
-type ConfigRead = { kind: 'ok'; targets: ScanTarget[] } | { kind: 'fallback'; reason: string };
+type ConfigRead = { kind: 'ok'; targets: ScanTarget[]; ignoreNote?: string } | { kind: 'fallback'; reason: string };
 
 function readPlaywrightConfig(configFile: string): ConfigRead {
   const name = path.basename(configFile);
@@ -251,21 +259,27 @@ function readPlaywrightConfig(configFile: string): ConfigRead {
     return { kind: 'fallback', reason: `Playwright config ${name} is not a plain object literal.` };
   }
 
-  const targets = readTargets(object, path.dirname(configFile));
+  const notes: { ignore?: string } = {};
+  const targets = readTargets(object, path.dirname(configFile), notes);
   if (targets === 'unreadable') {
     return { kind: 'fallback', reason: `Playwright config ${name} is not a plain object literal.` };
   }
   if (typeof targets === 'string') {
     return { kind: 'fallback', reason: `Playwright config ${name} testMatch pattern is not supported yet: ${targets}.` };
   }
-  return { kind: 'ok', targets };
+  return { kind: 'ok', targets, ignoreNote: notes.ignore };
 }
 
-function readTargets(object: ts.ObjectLiteralExpression, configDir: string): ScanTarget[] | 'unreadable' | string {
+function readTargets(
+  object: ts.ObjectLiteralExpression,
+  configDir: string,
+  notes: { ignore?: string },
+): ScanTarget[] | 'unreadable' | string {
   if (hasSpread(object)) return 'unreadable';
   const testDir = readStringProperty(object, 'testDir');
   const testMatch = readMatchProperty(object, 'testMatch');
   const projects = readProjectsProperty(object);
+  const rootIgnore = readIgnore(object, notes);
   if (testDir === 'unreadable' || testMatch === 'unreadable' || projects === 'unreadable') return 'unreadable';
   if (typeof testMatch === 'string' && testMatch !== 'missing') return testMatch;
 
@@ -280,8 +294,10 @@ function readTargets(object: ts.ObjectLiteralExpression, configDir: string): Sca
       {
         testDir: rootDir.directory,
         testMatch: rootMatch.patterns,
+        testIgnore: rootIgnore.patterns,
         testDirLabel: rootDir.label,
         testMatchLabel: rootMatch.label,
+        testIgnoreLabel: rootIgnore.label,
       },
     ];
   }
@@ -291,6 +307,7 @@ function readTargets(object: ts.ObjectLiteralExpression, configDir: string): Sca
     if (hasSpread(project)) return 'unreadable';
     const projectDir = readStringProperty(project, 'testDir');
     const projectMatch = readMatchProperty(project, 'testMatch');
+    const projectIgnore = readIgnore(project, notes);
     if (projectDir === 'unreadable' || projectMatch === 'unreadable') return 'unreadable';
     if (typeof projectMatch === 'string' && projectMatch !== 'missing') return projectMatch;
     const dir =
@@ -298,11 +315,14 @@ function readTargets(object: ts.ObjectLiteralExpression, configDir: string): Sca
         ? rootDir
         : { directory: path.resolve(configDir, projectDir.value), label: projectDir.label };
     const match = projectMatch === 'missing' ? rootMatch : projectMatch;
+    const ignore = projectIgnore.present ? projectIgnore : rootIgnore;
     targets.push({
       testDir: dir.directory,
       testMatch: match.patterns,
+      testIgnore: ignore.patterns,
       testDirLabel: dir.label,
       testMatchLabel: match.label,
+      testIgnoreLabel: ignore.label,
     });
   }
   return targets;
@@ -371,6 +391,24 @@ function readMatchProperty(
   if (typeof patterns === 'string') return patterns;
   if (!patterns) return 'unreadable';
   return { patterns, label: initializer.getText() };
+}
+
+function readIgnore(
+  object: ts.ObjectLiteralExpression,
+  notes: { ignore?: string },
+): { patterns: MatchPattern[]; label?: string; present: boolean } {
+  const initializer = propertyInitializer(object, 'testIgnore');
+  if (initializer === 'missing') return { patterns: [], present: false };
+  if (initializer === 'unreadable') {
+    notes.ignore = 'was not applied';
+    return { patterns: [], present: true };
+  }
+  const patterns = matchPatterns(initializer);
+  if (typeof patterns === 'string' || !patterns) {
+    notes.ignore = 'was not applied';
+    return { patterns: [], present: true };
+  }
+  return { patterns, label: initializer.getText(), present: true };
 }
 
 function readProjectsProperty(object: ts.ObjectLiteralExpression): ts.ObjectLiteralExpression[] | 'missing' | 'unreadable' {

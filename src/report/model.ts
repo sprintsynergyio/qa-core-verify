@@ -49,6 +49,28 @@ export interface ReportTest {
   findings: ReportFinding[];
   /** Present when the locator check evaluated this row. */
   locators?: ReportLocator[];
+  /** Present when the assertion-inversion check listed this row's assertions. */
+  assertions?: ReportAssertion[];
+}
+
+export type AssertionOutcomeName = 'killed' | 'survived' | 'timeout' | 'error' | 'not-run' | 'skipped';
+
+/** One assertion from the inversion check, with the outcome of inverting it. */
+export interface ReportAssertion {
+  file: string;
+  line: number;
+  column: number;
+  matcher: string;
+  outcome: AssertionOutcomeName;
+  source: string;
+  reason?: string;
+}
+
+export interface InversionSummary {
+  mutants: number;
+  runs: number;
+  stoppedAtLimit: boolean;
+  outcomes: Record<AssertionOutcomeName, number>;
 }
 
 export interface ReportSummary {
@@ -69,6 +91,8 @@ export interface Report {
   };
   checksRun: string[];
   summary: ReportSummary;
+  /** Present when `--only inversion` ran. Counts are computed from `tests[].assertions`. */
+  inversion?: InversionSummary;
   tests: ReportTest[];
 }
 
@@ -107,6 +131,8 @@ export interface ReportInput {
   notRun?: ReadonlySet<string>;
   /** Owner ids the locator check evaluated, mapped to the per-locator summary. */
   locatorSummaries?: ReadonlyMap<string, ReportLocator[]>;
+  /** Owner ids mapped to assertion outcomes from the inversion check. */
+  assertionSummaries?: ReadonlyMap<string, ReportAssertion[]>;
 }
 
 interface Row {
@@ -121,6 +147,7 @@ interface Row {
   baselineRed: boolean;
   absent: boolean;
   locators?: ReportLocator[];
+  assertions?: ReportAssertion[];
 }
 
 /** ISO 8601 in local time, with the offset of `date` (for example `+05:00`). */
@@ -198,13 +225,16 @@ export function buildReport(input: ReportInput): Report {
   const tool = readToolIdentity();
   const rows = rowsFor(input);
   const tests = rows
-    .map((row) => toReportTest(row, input.projectDir))
+    .map((row) => ({ row, test: toReportTest(row, input.projectDir) }))
     .sort((left, right) => {
-      const byFile = left.file.localeCompare(right.file);
+      const byFile = left.test.file.localeCompare(right.test.file);
       if (byFile !== 0) return byFile;
-      if (left.line !== right.line) return left.line - right.line;
-      return left.id.localeCompare(right.id);
-    });
+      if (left.test.line !== right.test.line) return left.test.line - right.test.line;
+      if (left.row.column !== right.row.column) return left.row.column - right.row.column;
+      return left.test.id.localeCompare(right.test.id);
+    })
+    .map((item) => item.test);
+  const inversion = input.assertionSummaries ? inversionSummary(tests) : undefined;
   return {
     schemaVersion: 1,
     tool,
@@ -218,8 +248,32 @@ export function buildReport(input: ReportInput): Report {
     },
     checksRun: [...input.checksRun],
     summary: summarize(tests),
+    ...(inversion ? { inversion } : {}),
     tests,
   };
+}
+
+const EMPTY_OUTCOMES = (): Record<AssertionOutcomeName, number> => ({
+  killed: 0,
+  survived: 0,
+  timeout: 0,
+  error: 0,
+  'not-run': 0,
+  skipped: 0,
+});
+
+/** Counts come from the assertion rows. A stopped run is one whose reason is the limit note. */
+function inversionSummary(tests: readonly ReportTest[]): InversionSummary {
+  const outcomes = EMPTY_OUTCOMES();
+  let stopped = 0;
+  for (const test of tests) {
+    for (const assertion of test.assertions ?? []) {
+      outcomes[assertion.outcome] += 1;
+      if (assertion.outcome === 'not-run' && assertion.reason === 'Stopped at limit.') stopped += 1;
+    }
+  }
+  const runs = outcomes.killed + outcomes.survived + outcomes.timeout + outcomes.error;
+  return { mutants: runs + stopped, runs, stoppedAtLimit: stopped > 0, outcomes };
 }
 
 function rowsFor(input: ReportInput): Row[] {
@@ -265,6 +319,13 @@ function rowsFor(input: ReportInput): Row[] {
       row.locators = input.locatorSummaries.get(row.ownerId) ?? [];
     }
   }
+  if (input.assertionSummaries) {
+    for (const row of rows) {
+      if (row.kind === 'describe') continue;
+      const listed = input.assertionSummaries.get(row.ownerId);
+      if (listed) row.assertions = listed.map((assertion) => ({ ...assertion }));
+    }
+  }
   return rows;
 }
 
@@ -280,6 +341,7 @@ function toReportTest(row: Row, projectDir: string): ReportTest {
     findings: row.findings.map((finding) => toReportFinding(finding, projectDir)),
   };
   if (row.locators) report.locators = row.locators;
+  if (row.assertions) report.assertions = row.assertions;
   return report;
 }
 

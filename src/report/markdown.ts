@@ -60,6 +60,13 @@ function formatTest(test: ReportTest): string[] {
   lines.push('');
   lines.push(`- File: ${inline(displayText(test.file))}:${test.line}`);
   lines.push(`- Verdict: ${test.verdict}`);
+  if (test.assertions && test.assertions.length > 0) {
+    lines.push('- Assertions:');
+    for (const assertion of test.assertions) {
+      const reason = assertion.reason ? ` (${inline(assertion.reason)})` : '';
+      lines.push(`  - ${assertion.outcome}: ${inline(assertion.matcher)} at ${assertion.line}:${assertion.column}${reason}`);
+    }
+  }
   if (test.locators && test.locators.length > 0) {
     lines.push('- Locators:');
     for (const locator of test.locators) {

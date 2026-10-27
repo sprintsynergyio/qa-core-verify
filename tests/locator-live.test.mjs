@@ -22,8 +22,14 @@ test('SauceDemo locator check matches the active manifest', { skip: !live, timeo
     env: { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
     timeout: 170000,
   });
-  assert.equal(result.status === 0 || result.status === 1, true, result.stderr);
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stderr}\n${result.stdout}`);
+  assert.match(result.stderr, /Baseline: 18 passed, 0 failed, 1 skipped/, `${result.stderr}\n${result.stdout}`);
   const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assert.equal(report.summary.verdict.trusted, 14, JSON.stringify(report.summary));
+  assert.equal(report.summary.verdict.review, 2, JSON.stringify(report.summary));
+  assert.equal(report.summary.verdict.untrusted, 2, JSON.stringify(report.summary));
+  assert.equal(report.summary.verdict['baseline-red'], 0, JSON.stringify(report.summary));
+  assert.equal(report.summary.verdict['not-run'], 1, JSON.stringify(report.summary));
   const findings = report.tests.flatMap((entry) => entry.findings.map((finding) => ({ ...finding, file: finding.file })));
   const keys = findings.map((finding) => `${finding.file}:${finding.line}:${finding.ruleId}`).sort();
   for (const expected of [

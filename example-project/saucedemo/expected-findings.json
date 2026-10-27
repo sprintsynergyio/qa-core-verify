@@ -3,7 +3,7 @@
     "file": "tests/ai-style/cannot-fail.spec.ts",
     "line": 7,
     "ruleId": "QCV-F001",
-    "status": "pending"
+    "status": "active"
   },
   {
     "file": "tests/ai-style/cannot-fail.spec.ts",
@@ -73,32 +73,44 @@
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 52,
+    "line": 53,
     "ruleId": "QCV-W007",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 60,
+    "line": 53,
+    "ruleId": "QCV-F001",
+    "status": "active"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 62,
     "ruleId": "QCV-W008",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 67,
+    "line": 62,
+    "ruleId": "QCV-F001",
+    "status": "active"
+  },
+  {
+    "file": "tests/ai-style/weak-assertions.spec.ts",
+    "line": 69,
     "ruleId": "QCV-W009",
     "status": "active",
     "reason": "Playwright skips this test, so the run does not count it as passed."
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 72,
+    "line": 74,
     "ruleId": "QCV-W001",
     "status": "active"
   },
   {
     "file": "tests/ai-style/weak-assertions.spec.ts",
-    "line": 75,
+    "line": 77,
     "ruleId": "QCV-W010",
     "status": "active"
   }

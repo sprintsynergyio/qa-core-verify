@@ -20,8 +20,13 @@ export interface EvidenceRecord {
   resolvedOnAction: boolean;
   /** Count of the locator before `.first()`, `.last()`, or `.nth()`. Null when this use was not narrowed. */
   parentCount: number | null;
-  /** The number passed to `toHaveCount`, when that matcher was used. */
+  /**
+   * The number passed to `toHaveCount`, or the length of an array passed to `toHaveText` or `toContainText`.
+   * Null when the matcher was not one of those, or the argument was not a number or an array.
+   */
   countExpected: number | null;
+  /** The number passed to `.nth()`. Null when this use was not `.nth(number)`. */
+  nthIndex: number | null;
   /**
    * True when the matcher option asks for the negative state:
    * `visible: false`, `attached: false`, `enabled: false`, `checked: false`, or `editable: false`.
@@ -57,6 +62,7 @@ export interface RawEvidencePart {
   actionSucceeded?: boolean;
   parentCount?: number | null;
   countExpected?: number | null;
+  nthIndex?: number | null;
   optionAbsence?: boolean;
   stack: string;
   testFile: string;
@@ -174,6 +180,7 @@ function normalizePart(part: RawEvidencePart, workspaceDir: string): EvidenceRec
     resolvedOnAction: part.actionSucceeded === true,
     parentCount: countOrNull(part.parentCount),
     countExpected: countOrNull(part.countExpected),
+    nthIndex: countOrNull(part.nthIndex),
     optionAbsence: part.optionAbsence === true,
     file: callFile,
     line: site?.line ?? part.testLine,
@@ -247,6 +254,7 @@ function compareRecords(left: EvidenceRecord, right: EvidenceRecord): number {
     'resolvedOnAction',
     'parentCount',
     'countExpected',
+    'nthIndex',
     'optionAbsence',
     'testColumn',
   ];
