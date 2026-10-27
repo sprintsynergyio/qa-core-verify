@@ -465,7 +465,9 @@ async function runFaults(options: CliOptions, cwd: string, now: () => Date): Pro
       process.stdout.write(`${consoleText(result.report, shown)}\n`);
     }
     if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
-    return exitCodeFor(result.findings, options.failOn);
+    const code = exitCodeFor(result.findings, options.failOn);
+    if (code === 0 && result.unmatchedBaseline) return 1;
+    return code;
   } catch (error) {
     noteKeptWorkspace(options.keepWorkspace, error);
     if (error instanceof BaselineStartError) return explainBaseline(error);

@@ -175,7 +175,9 @@ const TIMER_NAMES = new Set(['setTimeout', 'setInterval', 'setImmediate']);
  * file. Those imports are not executed. A relative helper or page object file
  * is parsed one level deep so a test can see its assertions and locators.
  * A second import level is not opened. A call to `extend` on a known test
- * binding, and `expect.configure`, become bindings too. Condition-only
+ * binding, and `expect.configure`, become bindings too. A named import from a
+ * relative file is a test binding when that file exports it from `extend` or
+ * `mergeTests`. Condition-only
  * `skip`, `fixme`, `fail`, and `slow` calls are annotations. At suite level,
  * callbacks passed to other calls are searched so data-driven tests are found.
  * Callbacks of beforeEach, afterEach, beforeAll, afterAll, setTimeout,
@@ -726,7 +728,7 @@ function dedupeModifiers(modifiers: readonly TestModifier[]): TestModifier[] {
   return result;
 }
 
-function collectBindings(sourceFile: ts.SourceFile): Bindings {
+function collectBindings(sourceFile: ts.SourceFile, depth = 0): Bindings {
   const testLocals = new Set<string>();
   const expectLocals = new Set<string>();
   const softLocals = new Set<string>();
@@ -737,6 +739,9 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
       bindImport(node.importClause, isPlaywrightSpecifier(node.moduleSpecifier), testLocals, expectLocals, namespaces, mergeLocals);
+      if (depth < 1 && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
+        bindImportedFixtures(sourceFile, node, testLocals, depth);
+      }
     }
     if (ts.isVariableDeclaration(node)) {
       bindRequire(node, testLocals, expectLocals, namespaces, mergeLocals);
@@ -771,6 +776,77 @@ function collectBindings(sourceFile: ts.SourceFile): Bindings {
   };
   visit(sourceFile);
   return bindings;
+}
+
+function bindImportedFixtures(
+  sourceFile: ts.SourceFile,
+  node: ts.ImportDeclaration,
+  testLocals: Set<string>,
+  depth: number,
+): void {
+  if (!node.importClause?.namedBindings || !ts.isNamedImports(node.importClause.namedBindings)) return;
+  if (!ts.isStringLiteral(node.moduleSpecifier)) return;
+  const resolved = resolveRelativeSpec(sourceFile.fileName, node.moduleSpecifier.text);
+  if (!resolved) return;
+  let text: string;
+  try {
+    text = fs.readFileSync(resolved, 'utf8');
+  } catch {
+    return;
+  }
+  const imported = ts.createSourceFile(resolved, text, ts.ScriptTarget.ES2022, true, scriptKindFor(resolved));
+  const exported = exportedTestNames(imported, collectBindings(imported, depth + 1));
+  for (const element of node.importClause.namedBindings.elements) {
+    const importedName = element.propertyName?.text ?? element.name.text;
+    if (exported.has(importedName)) testLocals.add(element.name.text);
+  }
+}
+
+function exportedTestNames(sourceFile: ts.SourceFile, bindings: Bindings): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isVariableStatement(stmt) && hasExportModifier(stmt)) {
+      for (const declaration of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && bindings.testLocals.has(declaration.name.text)) {
+          names.add(declaration.name.text);
+        }
+      }
+    }
+    if (!ts.isExportDeclaration(stmt) || !stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
+    for (const element of stmt.exportClause.elements) {
+      const local = element.propertyName?.text ?? element.name.text;
+      if (bindings.testLocals.has(local)) names.add(element.name.text);
+    }
+  }
+  return names;
+}
+
+function hasExportModifier(statement: ts.VariableStatement): boolean {
+  return statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) === true;
+}
+
+function resolveRelativeSpec(fromFile: string, specifier: string): string | undefined {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.mts`,
+    `${base}.js`,
+    `${base}.mjs`,
+    path.join(base, 'index.ts'),
+    path.join(base, 'index.tsx'),
+    path.join(base, 'index.js'),
+  ];
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      if (fs.statSync(file).isFile()) return file;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 function isFileSoftAlias(expr: ts.Expression, expectLocals: Set<string>, softLocals: Set<string>): boolean {

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyConfig } from '../dist/config.js';
 import { parseSpecFile } from '../dist/inventory/parse.js';
 import { classifyFindings, ownerForTest } from '../dist/runtime/faults/findings.js';
+import { FAULT_NOT_FOUND_REASON, faultRunGap } from '../dist/runtime/faults/run.js';
 import { faultFixtureSource } from '../dist/runtime/faults/fixture.js';
 import { loadFaultFile, titleMatches, validateFaultFile } from '../dist/runtime/faults/types.js';
 import { validateSchema } from './schema-validate.mjs';
@@ -53,7 +54,9 @@ test('fault fixture source applies DOM faults and blocked requests', () => {
   assert.equal(source.includes('page.route'), false);
   assert.equal(source.includes('isClosed'), true);
   assert.equal(source.includes('pages: 0'), false);
-  assert.equal(source.includes('inTestBody'), true);
+  assert.equal(source.includes('inTestScope'), true);
+  assert.equal(source.includes('fixtureScope'), true);
+  assert.equal(source.includes('qcvCaptureStackTrace'), true);
   assert.equal(source.includes('endTestScope'), true);
   assert.equal(source.includes('browser.newContext'), true);
   assert.equal(source.includes('page.setContent'), true);
@@ -613,6 +616,298 @@ test('request only after a failed open', async ({ request }) => {
   assert.equal(rules('reads the title and leaves the page open').includes('QCV-F002'), false);
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
 });
+
+test('playwright stays pinned at 1.60.0', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  assert.equal(pkg.dependencies['@playwright/test'], '1.60.0');
+  assert.equal(pkg.dependencies.playwright, '1.60.0');
+});
+
+test('a fault run that drops a baseline location is a gap', () => {
+  const seen = new Set(['probe.spec.ts:4:1', 'probe.spec.ts:8:1']);
+  const baseline = {
+    ok: true,
+    exitCode: 0,
+    passed: 2,
+    failed: 0,
+    skipped: 0,
+    failedKeys: new Set(),
+    seenKeys: seen,
+    skippedKeys: new Set(),
+    stdout: '',
+    stderr: '',
+  };
+  const fault = { ...baseline, seenKeys: new Set(['probe.spec.ts:4:1']) };
+  assert.equal(faultRunGap(baseline, fault), 1);
+  assert.equal(faultRunGap(baseline, baseline), 0);
+  assert.equal(FAULT_NOT_FOUND_REASON, 'The test was not found in the fault run.');
+});
+
+test('mergeTests of imported fixtures is inventoried', (t) => {
+  const dir = tempDir(t, 'qcv-merge-inv-');
+  fs.writeFileSync(
+    path.join(dir, 'fx.ts'),
+    `import { test as base } from '@playwright/test';
+export const a = base.extend<{ one: number }>({ one: async ({}, use) => { await use(1); } });
+export const b = base.extend<{ two: number }>({ two: async ({}, use) => { await use(2); } });
+`,
+  );
+  const file = path.join(dir, 'probe.spec.ts');
+  fs.writeFileSync(
+    file,
+    `import { mergeTests, expect } from '@playwright/test';
+import { a, b } from './fx';
+const test = mergeTests(a, b);
+test('merged leaky', async ({ one, two }) => { expect(one + two).toBe(3); });
+test('page less after merged', async () => { expect(1).toBe(1); });
+`,
+  );
+  const inventory = parseSpecFile(file, emptyConfig());
+  assert.deepEqual(
+    inventory.tests.map((entry) => entry.titlePath.at(-1)),
+    ['merged leaky', 'page less after merged'],
+  );
+});
+
+test('test, test.fail, and mergeTests keep the spec line', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-loc-'));
+  try {
+    fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(project, 'node_modules'));
+    fs.writeFileSync(path.join(project, 'fixture.mjs'), faultFixtureSource());
+    fs.writeFileSync(
+      path.join(project, 'fx.mjs'),
+      `import { test as base } from './fixture.mjs';
+export const a = base.extend({ one: async ({}, use) => { await use(1); } });
+export const b = base.extend({ two: async ({}, use) => { await use(2); } });
+`,
+    );
+    fs.writeFileSync(
+      path.join(project, 'probe.spec.ts'),
+      `import { mergeTests, expect } from './fixture.mjs';
+import { a, b } from './fx.mjs';
+const test = mergeTests(a, b);
+test('merged', async ({ one, two }) => { expect(one + two).toBe(3); });
+test.fail('fails', async () => { expect(1).toBe(2); });
+test('plain', async () => { expect(1).toBe(1); });
+`,
+    );
+    fs.writeFileSync(
+      path.join(project, 'playwright.config.ts'),
+      `import { defineConfig } from '@playwright/test';
+export default defineConfig({ testDir: '.', retries: 0 });
+`,
+    );
+    const listed = spawnSync(
+      process.execPath,
+      [
+        path.join(repoRoot, 'node_modules', '@playwright/test', 'cli.js'),
+        'test',
+        '--list',
+        '--config',
+        path.join(project, 'playwright.config.ts'),
+      ],
+      { encoding: 'utf8', cwd: project },
+    );
+    assert.equal(listed.status, 0, `${listed.stdout}\n${listed.stderr}`);
+    assert.equal(listed.stdout.includes('index.js'), false, listed.stdout);
+    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › merged/);
+    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › fails/);
+    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › plain/);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('a page leaked by beforeEach does not count for the next test', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-each-',
+    port,
+    `import { test, expect, type Page } from '@playwright/test';
+test.describe('each', () => {
+  let pg: Page;
+  test.beforeEach(async ({ browser }) => { pg = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' }); await pg.goto('/'); });
+  test('beforeEach leak vacuous', async () => { void pg; expect(1).toBe(1); });
+});
+test('page less after beforeEach leak', async () => { expect(1).toBe(1); });
+`,
+  );
+  assertLeak(result, report, 'beforeEach leak vacuous', 'page less after beforeEach leak');
+});
+
+test('a page leaked by a test scoped fixture does not count for the next test', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-fixleak-',
+    port,
+    `import { test as base, expect, type Page } from '@playwright/test';
+const test = base.extend<{ leaky: Page }>({
+  leaky: async ({ browser }, use) => {
+    const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+    await p.goto('/');
+    await use(p);
+  },
+});
+test('fixture leak vacuous', async ({ leaky }) => { void leaky; expect(1).toBe(1); });
+test('page less after fixture leak', async () => { expect(1).toBe(1); });
+`,
+  );
+  assertLeak(result, report, 'fixture leak vacuous', 'page less after fixture leak');
+});
+
+test('a page leaked by test.fail does not count for the next test', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-fail-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test.fail('expected failure leaks page', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  expect(1).toBe(2);
+});
+test('page less after test.fail', async () => { expect(1).toBe(1); });
+`,
+  );
+  assertLeak(result, report, 'expected failure leaks page', 'page less after test.fail');
+});
+
+test('a page in a test.skip or test.fixme body does not count for the next test', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-skip-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test.skip('skip body leaks page', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  expect(1).toBe(1);
+});
+test('page less after test.skip', async () => { expect(1).toBe(1); });
+test.fixme('fixme body leaks page', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  expect(1).toBe(1);
+});
+test('page less after test.fixme', async () => { expect(1).toBe(1); });
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  for (const title of ['page less after test.skip', 'page less after test.fixme']) {
+    assert.equal(cell(title, 'blank-app').result, 'not-run', title);
+    assert.match(cell(title, 'blank-app').reason, /not applied to a page/);
+    assert.equal(rules(title).includes('QCV-F002'), false, title);
+    assert.equal(rules(title).includes('QCV-F004'), false, title);
+  }
+});
+
+test('mergeTests keeps fault results on the spec tests', { timeout: 180000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-merge-');
+  const scratch = tempDir(t, 'qcv-fault-merge-tmp-');
+  const out = tempDir(t, 'qcv-fault-merge-out-');
+  const port = await reservePort();
+  writeBlankServer(project, port);
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    blankConfig(port),
+  );
+  fs.writeFileSync(
+    path.join(project, 'fx.ts'),
+    `import { test as base } from '@playwright/test';
+export const a = base.extend<{ one: number }>({ one: async ({}, use) => { await use(1); } });
+export const b = base.extend<{ two: number }>({ two: async ({}, use) => { await use(2); } });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { mergeTests, expect } from '@playwright/test';
+import { a, b } from './fx';
+const test = mergeTests(a, b);
+test('merged leaky', async ({ browser, one, two }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  expect(one + two).toBe(3);
+});
+test('page less after merged', async () => { expect(1).toBe(1); });
+`,
+  );
+  writeFaults(project, []);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  assertLeak(result, report, 'merged leaky', 'page less after merged');
+  assert.equal(result.stderr.includes('0 fail, 0 pass, 0 skipped, 0 not-run'), false, result.stderr);
+  assert.equal(result.stderr.includes('did not include every test'), false, result.stderr);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+function assertLeak(result, report, leaker, follower) {
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const { row, cell, rules } = faultView(report);
+  assert.equal(cell(leaker, 'blank-app').result, 'pass', leaker);
+  assert.equal(cell(leaker, 'blank-app').reason, undefined, leaker);
+  assert.equal(rules(leaker).includes('QCV-F002'), true, leaker);
+  assert.equal(row(leaker).verdict, 'untrusted', leaker);
+  assert.equal(cell(follower, 'blank-app').result, 'not-run', follower);
+  assert.match(cell(follower, 'blank-app').reason, /not applied to a page/);
+  assert.equal(rules(follower).includes('QCV-F002'), false, follower);
+  assert.equal(rules(follower).includes('QCV-F003'), false, follower);
+  assert.equal(rules(follower).includes('QCV-F004'), false, follower);
+  assert.equal(result.stderr.includes('did not include every test'), false, result.stderr);
+}
+
+function faultView(report) {
+  const row = (title) => report.tests.find((entry) => entry.titlePath.at(-1) === title);
+  const cell = (title, id) => row(title).faults.find((entry) => entry.id === id);
+  const rules = (title) => row(title).findings.map((finding) => finding.ruleId);
+  return { row, cell, rules };
+}
+
+async function runBlankSuite(t, prefix, port, spec) {
+  const project = tempDir(t, prefix);
+  const scratch = tempDir(t, `${prefix}tmp-`);
+  const out = tempDir(t, `${prefix}out-`);
+  writeBlankServer(project, port);
+  fs.writeFileSync(path.join(project, 'playwright.config.ts'), blankConfig(port));
+  fs.writeFileSync(path.join(project, 'probe.spec.ts'), spec);
+  writeFaults(project, []);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  const reportPath = path.join(out, 'report.json');
+  const report = fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, 'utf8')) : null;
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+  return { result, report };
+}
+
+function writeBlankServer(project, port) {
+  fs.writeFileSync(
+    path.join(project, 'server.mjs'),
+    `import http from 'node:http';
+const home = '<!doctype html><html><body><h1>Products</h1><span id="badge">3</span></body></html>';
+http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(home);
+}).listen(${port}, '127.0.0.1');
+`,
+  );
+}
+
+function blankConfig(port) {
+  return `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  retries: 0,
+  timeout: 15000,
+  testDir: '.',
+  webServer: { command: 'node server.mjs', url: 'http://127.0.0.1:${port}', timeout: 10000, reuseExistingServer: false },
+  use: { baseURL: 'http://127.0.0.1:${port}', headless: true },
+  expect: { timeout: 3000 },
+});
+`;
+}
 
 function writeFaults(dir, faults) {
   fs.writeFileSync(path.join(dir, 'qa-core-verify.faults.json'), `${JSON.stringify(faults, null, 2)}\n`);

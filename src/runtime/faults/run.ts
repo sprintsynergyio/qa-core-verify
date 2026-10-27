@@ -16,6 +16,7 @@ import { loadFaultFile, type Fault, type FaultResultName, type FaultType } from 
 
 export const FAULT_NOT_APPLIED_REASON = 'The fault was not applied to a page this test used.';
 export const BLANK_NOT_PRESENT_REASON = 'The blank page was not present when the test finished.';
+export const FAULT_NOT_FOUND_REASON = 'The test was not found in the fault run.';
 
 export interface FaultCheckRun {
   report: Report;
@@ -27,6 +28,8 @@ export interface FaultCheckRun {
   durationMs: number;
   /** One stderr line per fault, computed from the matrix. */
   faultLines: string[];
+  /** Baseline ran tests and the report has no row for them. */
+  unmatchedBaseline: boolean;
 }
 
 /**
@@ -52,6 +55,9 @@ export async function collectFaults(options: {
   let baselineSummary: BaselineSummary | undefined;
   const cells = new Map<string, FaultCell[]>();
   const counts = new Map<string, Map<string, Record<string, number>>>();
+  const quietBroke = new Set<string>();
+  const missingOwners = new Set<string>();
+  const statusReasons = new Map<string, string>();
   for (const test of inventory.tests) {
     cells.set(ownerForTest(test), []);
     counts.set(ownerForTest(test), new Map());
@@ -89,7 +95,21 @@ export async function collectFaults(options: {
           const detail = parsedFault.loadError ?? `Playwright exited ${faultRun.exitCode} and produced no report.`;
           throw new ToolError(`Fault ${fault.id} failed. ${detail}`);
         }
-        noteFault(projectDir, session.workspaceDir, inventory.tests, siblings, fault, parsedFault, logFile, cells, counts);
+        noteFault(
+          projectDir,
+          session.workspaceDir,
+          inventory.tests,
+          siblings,
+          fault,
+          parsed,
+          parsedFault,
+          logFile,
+          cells,
+          counts,
+          quietBroke,
+          missingOwners,
+          statusReasons,
+        );
       }
       return baseline;
     },
@@ -108,7 +128,7 @@ export async function collectFaults(options: {
     return row;
   });
   const findings = classifyFindings(projectDir, faults, classified);
-  const faultLines = summaryLines(faults, classified);
+  const faultLines = summaryLines(faults, classified, quietBroke);
   for (const line of faultLines) console.error(line);
   const durationMs = Date.now() - wallStart;
   console.error(`Fault time: ${durationMs} ms.`);
@@ -127,7 +147,8 @@ export async function collectFaults(options: {
     startedAt,
     finishedAt: now(),
     baselineRed: idsFor(classified, 'fail'),
-    notRun: idsFor(classified, 'not-run', 'skipped'),
+    notRun: unionIds(idsFor(classified, 'not-run', 'skipped'), missingOwners),
+    statusReasons,
     faultCells,
     faultRun: { faults: faults.map((fault) => ({ id: fault.id, type: fault.type })) },
   });
@@ -140,7 +161,31 @@ export async function collectFaults(options: {
     baseline: baselineSummary,
     durationMs,
     faultLines,
+    unmatchedBaseline: inventory.tests.length === 0 && baselineRan(baseline),
   };
+}
+
+function baselineRan(summary: BaselineSummary): boolean {
+  return summary.passed + summary.failed + summary.skipped > 0;
+}
+
+function unionIds(left: Set<string>, right: Set<string>): Set<string> {
+  const ids = new Set(left);
+  for (const id of right) ids.add(id);
+  return ids;
+}
+
+/** How many baseline locations are absent from the fault run. */
+export function faultRunGap(baseline: BaselineSummary, fault: BaselineSummary): number {
+  const baseKeys = baseline.seenKeys;
+  if (!baseKeys || baseKeys.size === 0) return 0;
+  const faultKeys = fault.seenKeys;
+  if (!faultKeys) return baseKeys.size;
+  let missing = 0;
+  for (const key of baseKeys) {
+    if (!faultKeys.has(key)) missing += 1;
+  }
+  return missing;
 }
 
 function noteFault(
@@ -149,20 +194,38 @@ function noteFault(
   tests: readonly InventoryTest[],
   siblings: Map<string, number>,
   fault: Fault,
+  baseline: BaselineSummary,
   summary: BaselineSummary,
   logFile: string,
   cells: Map<string, FaultCell[]>,
   counts: Map<string, Map<string, Record<string, number>>>,
+  quietBroke: Set<string>,
+  missingOwners: Set<string>,
+  statusReasons: Map<string, string>,
 ): void {
   const logged = readCountLog(workspaceDir, logFile);
+  const gap = faultRunGap(baseline, summary);
+  const baselineHadTests = baselineRan(baseline);
+  if (gap > 0 || (tests.length === 0 && baselineHadTests)) {
+    quietBroke.add(fault.id);
+    console.error(`Fault ${fault.id} did not include every test from the baseline. Missing tests are not-run.`);
+  }
   for (const test of tests) {
     const ownerId = ownerForTest(test);
     const list = cells.get(ownerId) ?? [];
     const recorded = matchLog(workspaceDir, projectDir, test, siblings, logged);
+    const baselineOutcome = outcomeFor(baseline, projectDir, test, siblings);
     const outcome = outcomeFor(summary, projectDir, test, siblings);
-    list.push(cellFor(fault, outcome, recorded));
+    if (baselineOutcome !== 'not-run' && outcome === 'not-run') {
+      list.push({ id: fault.id, result: 'not-run', reason: FAULT_NOT_FOUND_REASON });
+      missingOwners.add(ownerId);
+      statusReasons.set(ownerId, FAULT_NOT_FOUND_REASON);
+      quietBroke.add(fault.id);
+    } else {
+      list.push(cellFor(fault, outcome, recorded));
+    }
     cells.set(ownerId, list);
-    if (recorded && Object.keys(recorded.counts).length > 0) {
+    if (recorded && Object.keys(recorded.counts).length > 0 && outcome !== 'not-run') {
       const byFault = counts.get(ownerId) ?? new Map();
       byFault.set(fault.id, recorded.counts);
       counts.set(ownerId, byFault);
@@ -259,7 +322,7 @@ function matchLog(
   return onLine.find((row) => columns.includes(row.column)) ?? onLine[0];
 }
 
-function summaryLines(faults: readonly Fault[], rows: readonly ClassifiedTest[]): string[] {
+function summaryLines(faults: readonly Fault[], rows: readonly ClassifiedTest[], quietBroke: ReadonlySet<string>): string[] {
   const lines: string[] = [];
   for (const fault of faults) {
     const tally = { pass: 0, fail: 0, skipped: 0, 'not-run': 0 };
@@ -273,7 +336,9 @@ function summaryLines(faults: readonly Fault[], rows: readonly ClassifiedTest[])
     lines.push(
       `Fault ${fault.id}: ${tally.fail} fail, ${tally.pass} pass, ${tally.skipped} skipped, ${tally['not-run']} not-run.`,
     );
-    if (brokeGreen === 0) lines.push(`Fault ${fault.id} broke no test that passed the baseline.`);
+    if (brokeGreen === 0 && !quietBroke.has(fault.id)) {
+      lines.push(`Fault ${fault.id} broke no test that passed the baseline.`);
+    }
   }
   return lines;
 }

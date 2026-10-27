@@ -16,26 +16,36 @@ let seenPages = new Set();
 let seenContexts = new Set();
 let testLocalPages = new Set();
 let testLocalContexts = new Set();
-let inTestBody = false;
+let carriedPages = new Set();
+let carriedContexts = new Set();
+let inTestScope = false;
+let fixtureScope = '';
 let skipProxyFrame = false;
 let state = null;
 
 const originalCaptureStackTrace = Error.captureStackTrace;
-Error.captureStackTrace = function(targetObject, constructorOpt) {
-  if (skipProxyFrame && typeof Error.prepareStackTrace === 'function') {
-    const prepare = Error.prepareStackTrace;
-    const limit = Error.stackTraceLimit;
-    // Playwright keeps two frames and reads frame 1 as the caller. This wrapper
-    // is frame 0 and the proxy apply is frame 2, so the spec call is frame 3.
-    Error.stackTraceLimit = Math.max(limit, 0) + 2;
+function qcvCaptureStackTrace(targetObject, constructorOpt) {
+  const hideWrapper = skipProxyFrame;
+  skipProxyFrame = false;
+  const limit = Error.stackTraceLimit;
+  const prepare = Error.prepareStackTrace;
+  // Playwright 1.60 sets stackTraceLimit to 2 and reads frame 1.
+  // constructorOpt drops this wrapper. extend() adds one frame beyond that.
+  const extra = hideWrapper ? 2 : 1;
+  Error.stackTraceLimit = Math.max(limit, 0) + extra;
+  if (hideWrapper && typeof prepare === 'function') {
     Error.prepareStackTrace = function(error, frames) {
-      const user = frames.length > 3 ? frames[3] : frames[frames.length - 1];
+      const user = frames.length > 2 ? frames[2] : frames[frames.length - 1];
       return prepare(error, [frames[0], user]);
     };
-    skipProxyFrame = false;
   }
-  return originalCaptureStackTrace.call(this, targetObject, constructorOpt);
-};
+  try {
+    return originalCaptureStackTrace(targetObject, constructorOpt || qcvCaptureStackTrace);
+  } finally {
+    Error.stackTraceLimit = limit;
+  }
+}
+Error.captureStackTrace = qcvCaptureStackTrace;
 
 function readFault() {
   const raw = process.env.QCV_FAULT;
@@ -69,7 +79,7 @@ function contextIsClosed(context) {
 }
 
 function beginTestScope() {
-  inTestBody = false;
+  inTestScope = true;
   testLocalPages = new Set();
   testLocalContexts = new Set();
   for (const page of [...armedPages]) {
@@ -78,6 +88,8 @@ function beginTestScope() {
   for (const context of [...armedContexts]) {
     if (contextIsClosed(context)) armedContexts.delete(context);
   }
+  carriedPages = new Set(armedPages);
+  carriedContexts = new Set(armedContexts);
   seenPages = new Set(armedPages);
   seenContexts = new Set(armedContexts);
   state = readFault() ? { blankChecks: 0, blankMisses: 0, counts: {} } : null;
@@ -88,7 +100,11 @@ function endTestScope() {
   for (const context of testLocalContexts) armedContexts.delete(context);
   testLocalPages.clear();
   testLocalContexts.clear();
-  inTestBody = false;
+  inTestScope = false;
+}
+
+function ownedByThisTest(carried, item) {
+  return inTestScope && fixtureScope !== 'worker' && !carried.has(item);
 }
 
 function domScript(fault) {
@@ -152,7 +168,7 @@ function trackPage(page, fault) {
   armedPages.add(page);
   if (trackedPages.has(page)) return;
   trackedPages.add(page);
-  if (inTestBody) testLocalPages.add(page);
+  if (ownedByThisTest(carriedPages, page)) testLocalPages.add(page);
   if (!isDom(fault)) return;
   const script = domScript(fault);
   const original = page.setContent.bind(page);
@@ -192,7 +208,7 @@ async function armContext(context, fault) {
   if (contextIsClosed(context)) return;
   armedContexts.add(context);
   seenContexts.add(context);
-  if (fresh && inTestBody) testLocalContexts.add(context);
+  if (fresh && ownedByThisTest(carriedContexts, context)) testLocalContexts.add(context);
 }
 
 async function rememberSeen(fault) {
@@ -272,68 +288,65 @@ function installBrowser(browser) {
   };
 }
 
-function wrapBody(fn) {
-  if (typeof fn !== 'function' || fn.__qcvWrapped) return fn;
-  const wrapped = async function(args, testInfo) {
-    inTestBody = true;
-    return await fn.call(this, args, testInfo);
+function wrapFixtureFn(fn, scope) {
+  if (typeof fn !== 'function' || fn.__qcvFixture) return fn;
+  const wrapped = async function(fixtures, use, info) {
+    const previous = fixtureScope;
+    fixtureScope = scope;
+    try {
+      return await fn.call(this, fixtures, async (value) => {
+        fixtureScope = previous;
+        try {
+          await use(value);
+        } finally {
+          fixtureScope = scope;
+        }
+      }, info);
+    } finally {
+      fixtureScope = previous;
+    }
   };
-  wrapped.__qcvWrapped = true;
+  wrapped.__qcvFixture = true;
   wrapped.toString = function() {
     return fn.toString();
   };
   return wrapped;
 }
 
-function wrapTestArgs(args) {
-  const copy = args.slice();
-  for (let i = 0; i < copy.length; i++) {
-    if (typeof copy[i] === 'function') copy[i] = wrapBody(copy[i]);
+function wrapFixtureValue(value) {
+  let scope = 'test';
+  if (Array.isArray(value)) {
+    const options = value[1];
+    if (options && typeof options === 'object' && options.scope === 'worker') scope = 'worker';
+    if (typeof value[0] !== 'function') return value;
+    const copy = value.slice();
+    copy[0] = wrapFixtureFn(value[0], scope);
+    return copy;
   }
+  if (typeof value === 'function') return wrapFixtureFn(value, scope);
+  return value;
+}
+
+function wrapFixtureBag(bag) {
+  const copy = {};
+  for (const key of Object.keys(bag)) copy[key] = wrapFixtureValue(bag[key]);
   return copy;
 }
 
-function proxyTest(inner) {
-  return new Proxy(inner, {
-    apply(target, thisArg, args) {
-      skipProxyFrame = true;
-      try {
-        return Reflect.apply(target, thisArg, wrapTestArgs(args));
-      } finally {
-        skipProxyFrame = false;
-      }
-    },
-    get(target, prop, receiver) {
-      if (prop === 'extend') {
-        const extend = Reflect.get(target, prop, receiver);
-        return function() {
-          skipProxyFrame = true;
-          try {
-            return proxyTest(extend.apply(target, arguments));
-          } finally {
-            skipProxyFrame = false;
-          }
-        };
-      }
-      if (prop === 'only') {
-        const only = Reflect.get(target, prop, receiver);
-        return new Proxy(only, {
-          apply(fn, thisArg, args) {
-            skipProxyFrame = true;
-            try {
-              return Reflect.apply(fn, thisArg, wrapTestArgs(args));
-            } finally {
-              skipProxyFrame = false;
-            }
-          },
-        });
-      }
-      return Reflect.get(target, prop, receiver);
-    },
-  });
+function installExtend(inner) {
+  const extend = inner.extend.bind(inner);
+  inner.extend = function(fixtures) {
+    skipProxyFrame = true;
+    try {
+      return installExtend(extend(wrapFixtureBag(fixtures)));
+    } finally {
+      skipProxyFrame = false;
+    }
+  };
+  return inner;
 }
 
-export const test = proxyTest(base.extend({
+export const test = installExtend(base.extend(wrapFixtureBag({
   _qcvFaultLog: [async ({}, use, testInfo) => {
     const fault = readFault();
     beginTestScope();
@@ -366,7 +379,7 @@ export const test = proxyTest(base.extend({
     await use(page);
     if (fault) await rememberPage(page, fault);
   },
-}));
+})));
 
 export const expect = baseExpect;
 
