@@ -95,7 +95,7 @@ function f004(projectDir: string, row: ClassifiedTest, cells: readonly FaultCell
     testTitle: row.test.titlePath.join(' > '),
     message: 'This test stayed green under every fault other than blank-app.',
     evidence: `Faults other than blank-app: ${ids}.`,
-    fixHint: 'Add an assertion that fails when one of these faults is applied.',
+    fixHint: 'Add an assertion that fails when one of these faults is applied, or add a fault in qa-core-verify.faults.json that this test should catch.',
     ownerId: row.ownerId,
   };
 }

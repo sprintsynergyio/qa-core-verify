@@ -678,7 +678,7 @@ The constant assertion in QCV-F002 stays green under every DOM fault and every u
 await expect(page.getByTestId('shopping-cart-badge')).toHaveText('1');
 ```
 
-A `change-text` fault on that badge fails the test, so the test did not stay green under every fault.
+A `change-text` fault on that badge fails the test, so the test did not stay green under every fault. If the test already asserts the right thing and no listed fault changes it, add a fault in `qa-core-verify.faults.json` that this test should catch. The SauceDemo file does that for the locked-out error text.
 
 ### Severity
 

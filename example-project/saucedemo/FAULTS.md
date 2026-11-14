@@ -46,4 +46,6 @@ The PR 08 review re-run saw the login based tests take about 5.5 seconds each fo
 
 `qa-core-verify.faults.json` includes a `user-swap` for `problem_user` because that user broke a test in `tests/good`. `locked_out_user` also broke tests in `tests/good`. It is not a fault entry. The cart and checkout tests waited for a button that was not there, and that wait used the project test timeout.
 
+The same file has `locked-out-error`, a `change-text` fault on `[data-test='error']` with the replacement text `not the locked out message`. `expectedToBreak` names `locked out user sees the error`. On 2026-11-14, three `--only faults` runs each failed that test on this fault with `Error: expect(locator).toHaveText(expected) failed`. The row was `trusted`. The other three tests in `tests/good` passed this fault.
+
 Inventory images on the inventory page were a mix of inline `data:image/png` sources and `/assets/*.jpg` files. On the same date a `block-request` fault for `**/assets/*.jpg` was run through the checker. It broke no test that had passed the baseline, including every test in `tests/good`. That entry is not in the fault file.

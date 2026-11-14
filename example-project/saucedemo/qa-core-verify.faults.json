@@ -41,5 +41,14 @@
       }
     },
     "expectedToBreak": ["checkout overview shows the backpack item total"]
+  },
+  {
+    "id": "locked-out-error",
+    "type": "change-text",
+    "params": {
+      "selector": "[data-test='error']",
+      "text": "not the locked out message"
+    },
+    "expectedToBreak": ["locked out user sees the error"]
   }
 ]

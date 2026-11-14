@@ -1138,10 +1138,9 @@ test('blocks the page then stays green', async ({ page }) => {
   assert.equal(rules('blocks the page then stays green').includes('QCV-F002'), false);
 });
 
-test('a copy note is printed after the baseline line', { timeout: 120000 }, (t) => {
+test('a copy note is printed after the baseline line', { timeout: 180000 }, (t) => {
   const project = tempDir(t, 'qcv-fault-link-');
   const scratch = tempDir(t, 'qcv-fault-link-tmp-');
-  const out = tempDir(t, 'qcv-fault-link-out-');
   fs.writeFileSync(
     path.join(project, 'playwright.config.ts'),
     `import { defineConfig } from '@playwright/test';
@@ -1155,11 +1154,14 @@ test('alpha', async () => { expect(1).toBe(1); });
 `,
   );
   fs.symlinkSync(path.join(project, 'missing-target'), path.join(project, 'dangling-link'));
-  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
-  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
-  const baselineAt = result.stderr.indexOf('Baseline:');
-  const noteAt = result.stderr.indexOf('Copy note: Skipped symlink dangling-link (dangling).');
-  assert.equal(baselineAt >= 0 && noteAt > baselineAt, true, result.stderr);
+  for (const mode of ['faults', 'inversion', 'locator']) {
+    const out = tempDir(t, `qcv-link-${mode}-`);
+    const result = runCli([project, '--only', mode, '--out', out], privateEnv(scratch));
+    assert.equal(result.status === 0 || result.status === 1, true, `${mode}\n${result.stdout}\n${result.stderr}`);
+    const baselineAt = result.stderr.indexOf('Baseline:');
+    const noteAt = result.stderr.indexOf('Copy note: Skipped symlink dangling-link (dangling).');
+    assert.equal(baselineAt >= 0 && noteAt > baselineAt, true, `${mode}\n${result.stderr}`);
+  }
 });
 
 test('restoreStackHooks puts the original stack hooks back', async (t) => {
