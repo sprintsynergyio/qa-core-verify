@@ -1,7 +1,28 @@
 {
   "name": "qa-core-verify",
-  "version": "0.0.1",
-  "description": "Audit a Playwright suite for weak assertions and write console, JSON, Markdown, and HTML reports. Work in progress, private until v0.1 review.",
+  "version": "0.1.0",
+  "description": "Private internal review build. Audits a Playwright suite and reports whether each test can be trusted to go red when the feature breaks.",
+  "keywords": [
+    "playwright",
+    "playwright-test",
+    "test-automation",
+    "testing",
+    "mutation-testing",
+    "qa",
+    "e2e"
+  ],
+  "homepage": "https://github.com/sprintsynergyio/qa-core-verify#readme",
+  "bugs": {
+    "url": "https://github.com/sprintsynergyio/qa-core-verify/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sprintsynergyio/qa-core-verify.git"
+  },
+  "author": {
+    "name": "SprintSynergy",
+    "url": "https://sprintsynergy.com"
+  },
   "type": "module",
   "license": "MIT",
   "private": true,
@@ -11,8 +32,17 @@
   "bin": {
     "qa-core-verify": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "docs",
+    "schema",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
     "verify": "npm run build && node dist/cli.js",

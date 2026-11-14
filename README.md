@@ -1,24 +1,14 @@
 # qa-core-verify
 
-qa-core-verify audits a Playwright test suite, often one written by an AI, and reports whether each test can be trusted to go red when the feature breaks. This repository is work in progress, private, internal use only. It stays private until v0.1 review.
+qa-core-verify audits a Playwright test suite, often one written by an AI, and reports whether each test can be trusted to go red when the feature breaks.
 
-## Quick Start
+Private, internal review build. Not released.
 
-Clone this repository and run the checker from that clone. This version reads spec files with the TypeScript parser. It does not run the tests, it does not execute spec code, and it does not open a browser. The install can skip the Playwright browser download.
-
-```sh
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
-npm run build
-node dist/cli.js <project-dir>
-```
-
-`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the scan. `--json` prints the JSON report and nothing else on stdout. The report uses `schemaVersion: 1`. See [docs/report-schema.md](docs/report-schema.md).
-
-## Output
-
-A default run prints one line per test, indented findings, a summary, the checks that ran, and the report paths. Paths are relative to the project folder. This sample is copied from `node dist/cli.js example-project/saucedemo` in this repository. Other test lines from that run are left out. The summary line is the full run.
+No LLM, no API key. The checker is deterministic: same suite, same app state, same findings, when the live site does not change a result.
 
 ```text
+$ node dist/cli.js example-project/saucedemo
+
 trusted  tests/good/shopping.spec.ts:5  login lands on the inventory page
 
 untrusted  tests/ai-style/weak-assertions.spec.ts:5  opens the login page and stops
@@ -32,9 +22,147 @@ Trusted means no warn or error findings from the checks that ran. Locator and ca
 Reports: .qa-core/verify/report.json, .qa-core/verify/report.md, .qa-core/verify/report.html.
 ```
 
-That run writes `example-project/saucedemo/.qa-core/verify/report.json`, `report.md`, and `report.html`. `.qa-core/` is gitignored. `--out <dir>` writes the files in another directory. When that directory is inside the project, the console prints the paths relative to the project folder. When it is outside the project, the console prints the `--out` path as it was typed. `--format console,json,md,html` chooses which reports to produce. The default is all four. `--format console` writes no files.
+Copied from `node dist/cli.js example-project/saucedemo` on 2026-11-14. Other test lines from that run are left out. The summary line is the full run. Exit code was 1.
 
-An optional `qa-core-verify.config.json` in the project directory can name assertion helpers. A call that matches `assertFunctionNames` or `assertFunctionPatterns` counts as an assertion for QCV-W001. Patterns are regular expressions, the same idea as eslint-plugin-playwright `expect-expect`.
+## What It Checks
+
+Each test gets one verdict:
+
+| Verdict | Meaning |
+| --- | --- |
+| trusted | No warn or error from the checks that ran |
+| review | At least one warn, and no error |
+| untrusted | At least one error |
+| baseline-red | The test failed the baseline run |
+| not-run | The check did not evaluate the test |
+
+Info does not lower a test that ran.
+
+Static rules, QCV-W000 through QCV-W010, read the spec files. They do not open a browser.
+
+| Rule | What it detects | Severity |
+| --- | --- | --- |
+| QCV-W000 | Could not resolve a helper past one import | info |
+| QCV-W001 | Test has no assertion | error |
+| QCV-W002 | Generic matcher on a locator | error |
+| QCV-W003 | Async assertion is not awaited | error |
+| QCV-W004 | Value compared with itself | error |
+| QCV-W005 | Existence check on a page read | warn |
+| QCV-W006 | Presence only after the last action | warn |
+| QCV-W007 | Expect in a branch or a loop | warn |
+| QCV-W008 | Try catch swallows the assertion | error |
+| QCV-W009 | Skipped or focused test | info |
+| QCV-W010 | Hard wait with no assertion after it | info |
+
+`--only locator` adds QCV-L001 through QCV-L004. `--only inversion` adds QCV-F001. `--only faults` adds QCV-F002, QCV-F003, and QCV-F004. Each rule is described in [docs/rules.md](docs/rules.md).
+
+## Quick Start
+
+Clone this repository and run the checker from that clone. This build is not published and is not installed from a registry.
+
+```sh
+git clone https://github.com/sprintsynergyio/qa-core-verify.git
+cd qa-core-verify
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
+npm run build
+node dist/cli.js example-project/saucedemo
+```
+
+`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the static scan. Runtime checks (`--only locator`, `--only inversion`, `--only faults`) run the whole Playwright project and refuse spec paths.
+
+The static command does not run the tests and does not open a browser. Locator, inversion, and fault checks do. Install Chromium first:
+
+```sh
+npx playwright install chromium
+npm run build
+node dist/cli.js example-project/saucedemo --only locator
+node dist/cli.js example-project/saucedemo --only faults
+```
+
+Node.js 22.6 or later is required. `@playwright/test` and `playwright` are pinned to 1.60.0 in this package. A suite under test uses its own Playwright from its `node_modules`.
+
+## How It Decides
+
+### Static Rules
+
+The static pass parses each spec with the TypeScript compiler API. It does not execute spec code. Helpers and page objects are followed one import level. A second import is QCV-W000 when the call could be an assertion or a locator.
+
+A test is trusted when the checks that ran found no warn or error. A warn is review. An error is untrusted. Skip and fixme are not-run. That includes a skip or fixme on the test, `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a test that `test.describe.serial` did not run after an earlier failure. A test skipped in one project and run in another is not `not-run`. It is `not-run` only when no project ran it.
+
+### Hallucinated Locators
+
+`--only locator` runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. Failure is Playwright status `unexpected`. `test.fail()` that fails as expected has status `expected`, so the Baseline line counts it as passed and locator findings still apply. `test.fail()` that passes has status `unexpected`, so the row is `baseline-red`. The baseline runs with `--retries=0`, so a test that fails its first attempt unexpectedly is `baseline-red` even if retries would make it pass. An expected `test.fail()` failure is not that case.
+
+An absence assertion is not proof that the locator is real. This stays green when the element is missing:
+
+```ts
+await expect(page.locator('#login-error-banner')).toBeHidden();
+```
+
+QCV-L002 warns. QCV-L001 is an error when an action or a positive assertion never matched. QCV-L003 warns when a locator matched more than one element and the test did not account for that. `.first()` and `.last()` still warn. `.nth(index)` with a stated index does not. QCV-L004 is info for a long CSS chain, XPath, `nth-child`, or a class. The report lists each locator as `unique`, `ambiguous`, or `never-matched`.
+
+### Assertion Inversion
+
+`--only inversion` runs the suite once as a baseline in a temp copy. For each assertion in a green test it writes one mutant, runs only that test, then restores the file. The mutant adds `.not` when it is absent and removes `.not` when it is present. `.soft` and `.poll` stay. `toPass` and a custom matcher are not inverted. Those rows are `skipped` and the finding is info.
+
+The unawaited `toBeVisible` at `example-project/saucedemo/tests/ai-style/weak-assertions.spec.ts:18` is killed. Playwright 1.60 fails that test when the unawaited locator assertion fails or is still pending at the end of the test. The static finding on that line stays QCV-W003.
+
+Before the mutants, each green test is run on its own with no mutation. A test that does not pass that control run is not inverted. stderr prints `Control run did not pass for <file>:<line>.` and, when Playwright reported one, the first error line. On a live site that line is how a slow response shows up. The assertions are `not-run`. They are not counted as good.
+
+`killed` means the inverted test broke its contract. `survived` is QCV-F001 at error. `timeout` and `error` are not counted as good. `--max-runs <n>` stops after n mutant runs. Control runs are not part of that count. stderr prints the plan after the control runs.
+
+### Fault Injection
+
+`--only faults` runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture. The fixture applies one fault per run with `context.addInitScript` and `context.route`. `browser.newContext()` and `browser.newPage()` get the same script and the same route. The original project is not written.
+
+`blank-app` is built in. A green test that stays green on an empty body is QCV-F002. The blank check runs on each open page the test used, and again just before `page.close()`, because a page the test closes cannot be read afterwards. Each of those checks waits at most 1 second.
+
+A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body counts only for that test. A page left open by a hook or a test scoped fixture counts only for the test that used it. A page left open by `beforeAll`, `afterAll`, or a worker scoped fixture stays armed for later tests while it is open, including tests outside that describe.
+
+A test that never opens a page is `not-run` for a DOM fault. The row can still say `trusted`, because trusted means no warn or error from the checks that ran. The report then adds: `Every fault was not-run, so the cannot-fail check did not exercise this test.`
+
+`qa-core-verify.faults.json` may add faults. `expectedToBreak` holds JavaScript regular expressions. A pattern that matches no inventoried test prints `Fault <id> expectedToBreak pattern "<pattern>" matched no test.` A listed test that stays green is QCV-F003. QCV-F004 warns when every fault cell passed and QCV-F002 did not already fire. `blank-app` is always in the run, so a test that stays green under every fault already has QCV-F002 and does not also get QCV-F004. The SauceDemo seeded constant test is that case.
+
+A failed cell includes a short reason: the first line of the Playwright error.
+
+Fault types:
+
+- `blank-app`, params `{}`.
+- `remove-element`, params `{ "selector": "css" }`.
+- `hide-element`, params `{ "selector": "css" }`.
+- `change-text`, params `{ "selector": "css", "text": "replacement" }`. When an absence assertion uses that same `locator()` selector and the selector still matches nothing, QCV-L002 is raised from warn to error. The SauceDemo demo does not show that upgrade.
+- `block-request`, params `{ "urlPattern": "**/path" }`. `context.route` aborts the request for pages in the context. It does not affect the Playwright `request` fixture or a service worker.
+- `user-swap`, params `{ "env": { "NAME": "value" } }`. The variables reach the Playwright process. Names match `[A-Za-z_][A-Za-z0-9_]*` and must not start with `QCV_`. Other names, including `PATH` and `NODE_OPTIONS`, are passed through.
+
+Fault ids that differ only by case are rejected. `Blank-App` cannot sit beside the built-in `blank-app`.
+
+The idea of mutating the DOM in the browser, instead of application source, comes from Yandrapally and Mesbah, "Mutation Analysis for Assessing End-to-End Web Tests", ICSME 2021. See [RESEARCH.md](RESEARCH.md). This checker does not claim to be that framework.
+
+While a fault is active the `page` fixture sets the action timeout to 8 seconds and the navigation timeout to 15 seconds. The baseline keeps the project timeouts. Other pages keep the project timeouts.
+
+Copy notes such as `Copy note: Skipped symlink ...` are printed after the `Baseline:` line.
+
+When the baseline ran tests and none of the inventory locations match, stderr says `Baseline locations match no inventoried test. Fault cells are not-run. This run exits 2.` The run does not say the fault broke no test.
+
+## Output
+
+A default run prints one line per test, indented findings, a summary, the checks that ran, and the report paths. Paths inside the project are relative to the project folder. `--out <dir>` writes the files in another directory. When that directory is outside the project, the console prints the `--out` path as it was typed.
+
+Reports:
+
+- `.qa-core/verify/report.json` with `schemaVersion: 1`
+- `.qa-core/verify/report.md`
+- `.qa-core/verify/report.html`, one file, no external assets
+
+`--json` prints the JSON report and nothing else on stdout. `--format console,json,md,html` chooses which reports to produce. The default is all four. `--format console` writes no files.
+
+Exit codes: `0` no finding at or above `failOn` (default `error`), `1` a finding at or above `failOn`, `2` a tool or setup error. A fault run whose locations match no inventoried test exits 2.
+
+The JSON shape is [docs/report-schema.md](docs/report-schema.md). The schema file is [schema/report.schema.json](schema/report.schema.json).
+
+## Configuration
+
+An optional `qa-core-verify.config.json` in the project directory names assertion helpers. A call that matches `assertFunctionNames` or `assertFunctionPatterns` counts as an assertion for QCV-W001.
 
 ```json
 {
@@ -43,117 +171,49 @@ An optional `qa-core-verify.config.json` in the project directory can name asser
 }
 ```
 
-## How It Decides
+Faults live in `qa-core-verify.faults.json` in the project directory. A missing file still runs `blank-app`. A file that omits `blank-app` still runs it first. An entry whose id is `blank-app` and whose type is not `blank-app` exits 2 before the temp copy.
 
-A test is trusted when the checks that ran found no warn or error. A warn is review. An error is untrusted. Skip and fixme are not-run. That includes a skip or fixme on the test, `test.skip()` or `test.fixme()` in the body, `testInfo.skip()`, and a test that `test.describe.serial` did not run after an earlier failure. A test skipped in one project and run in another is not `not-run`. It is `not-run` only when no project ran it. A test with no baseline result is `not-run`. A failure in any project is `baseline-red`. Info does not lower a test that ran.
+`--config <file>` forwards a Playwright config to a temp run. `--config .` is accepted when that directory holds a `playwright.config.*` file. A directory with no such file is refused before the copy, and the command exits 2.
 
-The static pass reads the spec files. It does not open a browser. Those rules are QCV-W000 through QCV-W010.
+## CI
 
-Hallucinated locators are a second pass, `--only locator`. It runs the suite once as a baseline, then again in a temp copy that records how many elements each locator matched. A test that fails the baseline is `baseline-red` and gets no locator finding. Failure is Playwright status `unexpected`. `test.fail()` that fails as expected has status `expected`, so the Baseline line counts it as passed and locator findings still apply. `test.fail()` that passes has status `unexpected`, so the Baseline line counts it as failed and the row is `baseline-red`. A test the baseline report marks skipped is `not-run` only when every project skipped it. A test with no baseline result is `not-run`. The baseline runs with `--retries=0`, so a test that fails its first attempt unexpectedly is `baseline-red` even if retries would make it pass. An expected `test.fail()` failure is not that case. On a live site, one slow response can make that row `baseline-red` for the same reason. The retries stay at 0.
+Run the static command on every pull request. Run locator, inversion, and fault checks on a schedule or from a manual trigger. The example is [examples/github-action.yml](examples/github-action.yml). The steps are in [docs/ci.md](docs/ci.md).
 
-An absence assertion is not proof that the locator is real. This stays green when the element is missing:
+This repository's own CI typechecks and tests on Node 22 and Node 24, on `ubuntu-latest`. It does not call SauceDemo unless someone starts the live demo workflow by hand.
 
-```ts
-await expect(page.locator('#login-error-banner')).toBeHidden();
-```
+## Limits
 
-QCV-L002 warns, and the message is: This test stays green even if this element does not exist. Check the locator against a state where the element is shown.
+A clean report does not prove a suite is complete or correct. It only reports the checks that ran.
 
-QCV-L001 is an error when an action or a positive assertion never matched. QCV-L003 warns when a locator matched more than one element and the test did not account for that. `.first()` and `.last()` still warn. `.nth(index)` with a stated index does not, and neither does `toHaveText` or `toContainText` when the array length equals the match count. QCV-L004 is info for a long CSS chain, XPath, `nth-child`, or a class. Every class in a `locator()` or `frameLocator()` string counts. The report lists each locator as `unique`, `ambiguous`, or `never-matched`.
-
-## Assertion Inversion
-
-`--only inversion` is the cannot-fail check, rule QCV-F001. It runs the suite once as a baseline in a temp copy. For each assertion in a green test it writes one mutant, runs only that test (`<file>:<line>`) with `--retries=0` and `--workers=1`, then restores the file before the next mutant. The mutant adds `.not` when it is absent and removes `.not` when it is present. `.soft` and `.poll` stay. `toPass` and a custom matcher are not inverted. Those rows are `skipped` and the finding is info. A `skipped` outcome does not lower the row. A test whose assertions are all `skipped` stays `trusted` when it has no warn or error.
-
-Before those mutants, each green test is run on its own with the same `<file>:<line>` command and no mutation. A test that does not pass that control run is not inverted. Its assertions are `not-run`.
-
-Outcomes are read from the test status in the Playwright JSON reporter (`tests[].status`), not from the raw result status. `killed` means status `unexpected`: the inverted test broke its contract. `survived` means status `expected`, including an expected `test.fail()`, and a run where one project passed and the others skipped. That is QCV-F001 at error when the mutant survived. `timeout` is a result status `timedOut`. `error` is a missing report, an interrupted run, or a status this check cannot classify. A timeout or an error is not counted as good. The test row is `not-run` when an assertion was not checked and none survived. That covers `not-run`, `timeout`, and `error`. It does not cover `skipped`. `--max-runs <n>` stops after n mutant runs. Control runs are not part of that count. stderr prints the plan after the control runs (`Inversion plan: N mutants, M runs. Control runs are already finished and are not part of this count.`) and `Stopped at limit.` when the cap is hit. Assertions that were not started are `not-run` with that reason. `inversion.mutants` counts the mutant runs plus the assertions stopped at the limit. A baseline `not-run` assertion is not a mutant. See [docs/report-schema.md](docs/report-schema.md).
-
-The unawaited `toBeVisible` at `example-project/saucedemo/tests/ai-style/weak-assertions.spec.ts:18` is killed. Playwright 1.60 fails that test when the unawaited locator assertion fails or is still pending at the end of the test. The static finding on that line stays QCV-W003.
-
-This check runs the suite once, then once for each green test that has an assertion to invert, then once more per assertion. A large suite costs that many Playwright runs. The runs are one at a time.
-
-`--config <file>` is forwarded to the temp run. `--config .` and `--config` set to the project directory are accepted when that directory holds a `playwright.config.*` file. A directory that holds no `playwright.config.*` is refused before the copy, and the command exits 2. Playwright itself would run that directory with default settings. A missing config file is refused the same way, with one line, before the copy.
-
-A `qcv-run-*` directory whose `owner.pid` is dead is not removed. That happens when SIGKILL stops the CLI and the watchdog together. Delete that `qcv-run-*` directory by hand. Startup does not sweep other runs.
-
-## Rules
-
-The static rules are QCV-W000 through QCV-W010. Each section in [docs/rules.md](docs/rules.md) says what the rule detects, why, a bad example, a good example, the severity, and the related lint rule when there is one.
-
-- QCV-W000 Could Not Resolve Helper (info)
-- QCV-W001 Test Has No Assertion (error)
-- QCV-W002 Generic Matcher On A Locator (error)
-- QCV-W003 Async Assertion Not Awaited (error)
-- QCV-W004 Value Compared With Itself (error)
-- QCV-W005 Existence Check On A Page Read (warn)
-- QCV-W006 Presence Only After The Last Action (warn)
-- QCV-W007 Expect In A Branch Or A Loop (warn)
-- QCV-W008 Try Catch Swallows The Assertion (error)
-- QCV-W009 Skipped Or Focused Test (info)
-- QCV-W010 Hard Wait With No Assertion After It (info)
-
-`--only locator` adds QCV-L001 through QCV-L004. The command opens a browser. It is not part of `npm test` unless `QCV_LIVE=1`.
-
-`--only inversion` adds QCV-F001. The command opens a browser once for the baseline and once per inverted assertion. It is not part of `npm test` unless `QCV_LIVE=1`.
-
-## Fault Injection
-
-`--only faults` is the other cannot-fail check. It runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture, the same approach as locator evidence. The fixture applies one fault per run with `context.addInitScript` and `context.route`. The route covers every page in that context, including a popup. `browser.newContext()` and `browser.newPage()` get the same script and the same route. `page.setContent` replaces the document, so the DOM script runs again after it. Pages and contexts armed in `beforeAll`, `afterAll`, or a worker scoped fixture are remembered for the worker while they stay open. A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body counts only for that test and stops counting when the test ends, even if it is still open. Each test counts the carried pages that are still open, plus pages armed during that test. A page that is already closed when the test starts does not count. While a fault is active the `page` fixture sets the action timeout to 8 seconds and the navigation timeout to 15 seconds, so a missing element does not wait out the project's test timeout. Other pages keep the project timeouts. The baseline run does not change those timeouts. The original project is not written.
-
-The idea of mutating the DOM in the browser, instead of application source, comes from Yandrapally and Mesbah, "Mutation Analysis for Assessing End-to-End Web Tests", ICSME 2021. See [RESEARCH.md](RESEARCH.md). This checker does not claim to be that framework. It uses a smaller set of faults.
-
-`blank-app` is built in. After the document loads it replaces the body with one empty element and keeps the body empty when the app renders again. A green test that stays green under `blank-app` is QCV-F002. That finding is raised only when the blank body was on a page the test used, including a page opened in `beforeAll` or a worker scoped fixture while that page is still open. A page left open by an earlier test, hook, or test scoped fixture does not count. The blank check runs on each open page the test used. A test that never opens a page, and a passing test whose page was replaced and is no longer blank, gets `not-run` for that fault and does not get QCV-F002, QCV-F003, or QCV-F004 for it. `user-swap` is an environment variable on the Playwright process, so it still applies when the test opens no page.
-
-The project may add `qa-core-verify.faults.json`. Each entry is `{ id, type, params, expectedToBreak }`. `expectedToBreak` holds JavaScript regular expressions matched against the title path and the test title. A listed test that stays green is QCV-F003. A test that stays green under every fault, including `blank-app`, is QCV-F004, a warn that lists the fault ids.
-
-Fault types:
-
-- `blank-app`, params `{}`.
-- `remove-element`, params `{ "selector": "css" }`. The selector is removed, including after a re-render.
-- `hide-element`, params `{ "selector": "css" }`. The selector is hidden with `display: none`.
-- `change-text`, params `{ "selector": "css", "text": "replacement" }`. The text is replaced, including after a re-render. When an absence assertion uses that same `locator()` selector and the selector still matches nothing, QCV-L002 is raised from warn to error.
-- `block-request`, params `{ "urlPattern": "**/path" }`. `context.route` aborts the request for every page in the context, including a popup. The pattern is a Playwright URL pattern.
-- `user-swap`, params `{ "env": { "NAME": "value" } }`. The named variables are set on the Playwright process for that run. Names match `[A-Za-z_][A-Za-z0-9_]*`. The SauceDemo suite reads `SAUCE_USER` and `SAUCE_PASSWORD`. The demo file lists only users that were observed to break a test in `tests/good`. See `example-project/saucedemo/FAULTS.md`.
-
-A missing fault file still runs `blank-app`. A file that omits `blank-app` still runs it first. Every other fault keeps the file order. An entry whose id is `blank-app` and whose type is not `blank-app` is rejected before the temp copy, with exit 2. Two entries with the same id are still rejected.
-
-Test locations in a fault run depend on Playwright 1.60.0. `@playwright/test` and `playwright` are pinned to that version. The generated fixture wraps `Error.captureStackTrace` so the call site stays the spec file. In 1.60.0, `wrapFunctionWithLocation` reads stack frame 1 after setting `Error.stackTraceLimit` to 2. A different Playwright build can report every test at `playwright/lib/common/index.js`, and the fault run then matches no baseline test. Those missing tests are `not-run`, and the fault does not say it broke no test.
-
-The report lists a fault matrix on each test: the fault id and `pass`, `fail`, `skipped`, or `not-run`. The console summary line starts with `Faults:`. A baseline test that the fault run did not include has reason `The test was not found in the fault run.`
-
-```sh
-npm run build
-node dist/cli.js example-project/saucedemo --only faults
-```
-
-The command opens a browser. The local fixture tests do not use the network. The SauceDemo demo does. It is not part of `npm test` unless `QCV_LIVE=1` for the live golden test. The local HTML fixture test is part of `npm test`.
-
-`--only faults` adds QCV-F002, QCV-F003, and QCV-F004.
-
-Install Chromium, then run the locator demo:
-
-```sh
-npx playwright install chromium
-npm run build
-node dist/cli.js example-project/saucedemo --only locator
-```
+- The static pass does not open a browser and does not follow imports past one level.
+- Coverage gaps are not part of this build. An AI agent red-team pack is not part of this build.
+- Under any fault the `page` fixture action timeout is 8 seconds and the navigation timeout is 15 seconds. The baseline keeps the project values. A test that needs longer fails under every fault and counts as broken, which hides QCV-F002 and QCV-F004 for it. The fault file does not set these timeouts. `performance_glitch_user` on SauceDemo can be slow enough to hit that cap. See [example-project/saucedemo/FAULTS.md](example-project/saucedemo/FAULTS.md).
+- `user-swap` variables reach the Playwright process. Names that start with `QCV_` are refused.
+- `block-request` does not affect the Playwright `request` fixture or a service worker. A request-only test listed under that fault can still be QCV-F003.
+- A page the test closes is checked just before `page.close()`. A page closed some other way, after the test has finished with it, is judged from the pages still open.
+- A page left open by `afterAll` counts for later tests in the worker. The fixture does not know which describe opened it.
+- The QCV-L002 upgrade to error is not shown in the SauceDemo demo.
+- On a live site, one slow response can make a baseline or a control run fail. The row is `baseline-red`, or the control line names the test. Repeating a SauceDemo command does not promise byte-identical stdout when the site flakes.
+- The tool does not modify the suite. Runtime work uses a temp copy. `.qa-core/` is gitignored.
 
 ## Demo Suite
 
-The folder `example-project/saucedemo` is a Playwright suite for [SauceDemo](https://www.saucedemo.com), a free practice app. It has a few honest tests and deliberately weak tests. The weak spots are marked with `SEEDED` comments and listed in `expected-findings.json`. See [example-project/saucedemo/README.md](example-project/saucedemo/README.md).
+`example-project/saucedemo` is a Playwright suite for [SauceDemo](https://www.saucedemo.com), a free practice app. It has a few honest tests and deliberately weak tests. The weak spots are marked with `SEEDED` comments and listed in `expected-findings.json`. See [example-project/saucedemo/README.md](example-project/saucedemo/README.md).
 
 ```sh
 npx playwright install chromium
 npm run demo:saucedemo -- tests/good
 ```
 
-`npm test` includes a golden test that reads that manifest. The golden test does not open a browser. To print the current findings:
+`npm test` includes a golden test that reads the manifest. The golden test does not open a browser. The SauceDemo runtime checks run when `QCV_LIVE=1`.
 
-```sh
-npm run build
-node dist/cli.js example-project/saucedemo
-```
+## Related Tools
+
+[eslint-plugin-playwright](https://github.com/playwright-community/eslint-plugin-playwright) lints a spec for some of the same static mistakes, including `expect-expect` and `missing-playwright-await`. It does not run the suite, and it is not a dependency of this package. Where a rule overlaps, [docs/rules.md](docs/rules.md) names the lint rule.
+
+[StrykerJS](https://stryker-mutator.io/) mutates application source and reruns tests. This checker does not need application source. It inverts assertions and changes the page in the browser.
+
+[qa-core-heal](https://github.com/sprintsynergyio/qa-core-heal) repairs a broken Playwright locator and re-runs the test. It answers a different question: the locator is already red, what should replace it. This checker asks whether a green test would go red.
 
 ## License
 

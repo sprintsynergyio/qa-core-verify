@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (internal review)
 
+Prepared for internal review on 2026-11-14. Not released. `package.json` stays `"private": true`.
+
+This version audits a Playwright suite with static rules QCV-W000 through QCV-W010, locator rules QCV-L001 through QCV-L004, assertion inversion QCV-F001, and fault injection QCV-F002, QCV-F003, and QCV-F004. Reports are console, JSON (`schemaVersion: 1`), Markdown, and HTML. The SauceDemo demo suite is in `example-project/saucedemo`.
+
+- Copy notes for a skipped symlink are printed after the `Baseline:` line. An `expectedToBreak` pattern that matches no test is printed on stderr. A `user-swap` name that starts with `QCV_` is rejected. Fault ids that match ignoring case are rejected. A failed fault cell includes the first line of the Playwright error. QCV-F004 is not added when QCV-F002 already fired. A test whose fault cells are all `not-run` keeps `trusted` and says the cannot-fail check did not exercise it. When baseline locations match no inventoried test, the fault run exits 2 and does not say the fault broke no test.
+- The blank check runs just before `page.close()` and waits at most 1 second. The generated fixture restores `Error.captureStackTrace` and `prepareStackTrace` when the worker exits. `mergeTests()` results get the same fixture wrapper as `test.extend`.
 - A page or context opened in `beforeEach`, `afterEach`, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body stops counting when that test ends. `beforeAll`, `afterAll`, and worker scoped fixtures still count while open. A baseline test missing from a fault run is `not-run` with `The test was not found in the fault run.`, and that fault does not say it broke no test. `mergeTests` keeps the spec file line. Playwright stays pinned at 1.60.0.
 - A page or context opened in a test body stops counting when that test ends, even if it stays open. A later page-less or `request` test stays `not-run` and does not get QCV-F002, QCV-F003, or QCV-F004 from that page. Pages from `beforeAll` and worker scoped fixtures still count while they are open.
 - A page armed in `beforeAll` or a worker scoped fixture stays applied on later tests while that page is open. A page closed before the test starts does not count, so a request only test stays `not-run`. The blank check includes those open pages. The check that an existing `.qa-core` directory is kept runs on a temp copy of SauceDemo, with no `--out`, and expects `report.json`, `report.md`, and `report.html` in `.qa-core/verify`.
