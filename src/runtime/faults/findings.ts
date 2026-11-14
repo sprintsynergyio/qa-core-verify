@@ -33,10 +33,9 @@ export function classifyFindings(projectDir: string, faults: readonly Fault[], r
       if (!fault.expectedToBreak.some((pattern) => titleMatches(pattern, row.test.titlePath))) continue;
       findings.push(f003(projectDir, row, fault));
     }
-    // blank-app is always in the run. A test that stays green under every fault already has QCV-F002.
-    // QCV-F004 is not added on top of that error. It still applies when blank-app did not pass.
-    if (row.cells.length > 0 && row.cells.every((cell) => cell.result === 'pass') && !blankPassed) {
-      findings.push(f004(projectDir, row));
+    const nonBlank = row.cells.filter((cell) => faults.find((fault) => fault.id === cell.id)?.type !== 'blank-app');
+    if (nonBlank.length > 0 && nonBlank.every((cell) => cell.result === 'pass')) {
+      findings.push(f004(projectDir, row, nonBlank));
     }
     findings.push(...upgradedAbsence(projectDir, faults, row));
   }
@@ -83,9 +82,9 @@ function f003(projectDir: string, row: ClassifiedTest, fault: Fault): Finding {
   };
 }
 
-function f004(projectDir: string, row: ClassifiedTest): Finding {
+function f004(projectDir: string, row: ClassifiedTest, cells: readonly FaultCell[]): Finding {
   const site = siteOf(row.test);
-  const ids = row.cells.map((cell) => cell.id).join(', ');
+  const ids = cells.map((cell) => cell.id).join(', ');
   return {
     ruleId: 'QCV-F004',
     check: 'cannot-fail',
@@ -94,8 +93,8 @@ function f004(projectDir: string, row: ClassifiedTest): Finding {
     line: site.line,
     column: site.column,
     testTitle: row.test.titlePath.join(' > '),
-    message: 'This test stayed green under every fault.',
-    evidence: `Faults: ${ids}.`,
+    message: 'This test stayed green under every fault other than blank-app.',
+    evidence: `Faults other than blank-app: ${ids}.`,
     fixHint: 'Add an assertion that fails when one of these faults is applied.',
     ownerId: row.ownerId,
   };

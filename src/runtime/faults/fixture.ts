@@ -26,6 +26,8 @@ let state = null;
 const originalCaptureStackTrace = Error.captureStackTrace;
 const originalPrepareStackTrace = Error.prepareStackTrace;
 function qcvCaptureStackTrace(targetObject, constructorOpt) {
+  // QCV_TEST_LOCATION_DRIFT is test-only. It forces wrong locations so the drift guard can be tested.
+  // Do not set it. A fault run then exits 2. user-swap cannot set it, because QCV_ names are refused.
   const hideWrapper = process.env.QCV_TEST_LOCATION_DRIFT === '1' || skipProxyFrame;
   skipProxyFrame = false;
   const limit = Error.stackTraceLimit;
@@ -48,10 +50,13 @@ function qcvCaptureStackTrace(targetObject, constructorOpt) {
   }
 }
 Error.captureStackTrace = qcvCaptureStackTrace;
-process.on('exit', () => {
+function restoreStackHooks() {
   Error.captureStackTrace = originalCaptureStackTrace;
   Error.prepareStackTrace = originalPrepareStackTrace;
-});
+}
+// The worker process is already finished when this runs. It does not change fault results.
+process.on('exit', restoreStackHooks);
+export { restoreStackHooks };
 
 function readFault() {
   const raw = process.env.QCV_FAULT;
@@ -98,7 +103,7 @@ function beginTestScope() {
   carriedContexts = new Set(armedContexts);
   seenPages = new Set(armedPages);
   seenContexts = new Set(armedContexts);
-  state = readFault() ? { blankChecks: 0, blankMisses: 0, counts: {} } : null;
+  state = readFault() ? { blankChecks: 0, blankMisses: 0, blankUnknown: 0, counts: {} } : null;
 }
 
 function endTestScope() {
@@ -257,6 +262,10 @@ async function rememberPage(page, fault) {
     void check.catch(() => undefined);
     snap = await Promise.race([check, timeout]);
   } catch {
+    if (state && fault && fault.type === 'blank-app') {
+      state.blankChecks += 1;
+      state.blankUnknown += 1;
+    }
     return;
   } finally {
     clearTimeout(timer);
@@ -286,6 +295,7 @@ function writeLog(testInfo, fault) {
     armedContexts: seenContexts.size,
     blankChecks: state.blankChecks,
     blankMisses: state.blankMisses,
+    blankUnknown: state.blankUnknown,
     counts: state.counts,
   });
   fs.mkdirSync(path.dirname(logFile), { recursive: true });

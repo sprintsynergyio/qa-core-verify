@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { emptyConfig } from '../dist/config.js';
 import { parseSpecFile } from '../dist/inventory/parse.js';
 import { classifyFindings, ownerForTest } from '../dist/runtime/faults/findings.js';
@@ -186,8 +186,8 @@ test('shows the original text', async ({ page }) => {
   });
   const findings = classifyFindings(dir, faults, rows);
   const ids = (title) => findings.filter((finding) => finding.testTitle === title).map((finding) => finding.ruleId);
-  assert.deepEqual(ids('checks a constant'), ['QCV-F002', 'QCV-F003']);
-  assert.deepEqual(ids('absent banner stays hidden'), ['QCV-F002', 'QCV-F003', 'QCV-L002']);
+  assert.deepEqual(ids('checks a constant'), ['QCV-F002', 'QCV-F003', 'QCV-F004']);
+  assert.deepEqual(ids('absent banner stays hidden'), ['QCV-F002', 'QCV-F003', 'QCV-F004', 'QCV-L002']);
   assert.deepEqual(ids('shows the original text'), []);
   const renameOnly = faults.filter((fault) => fault.id === 'rename-note');
   const constantRow = rows.find((row) => row.test.title === 'checks a constant');
@@ -232,7 +232,7 @@ test('a local page proves each fault type', { timeout: 300000 }, async (t) => {
   assert.equal(cell('checks a constant', 'blank-app').result, 'pass');
   assert.equal(cell('checks a constant', 'rename-note').result, 'pass');
   const constantRules = constant.findings.map((finding) => finding.ruleId).sort();
-  assert.deepEqual(constantRules, ['QCV-F002', 'QCV-F003']);
+  assert.deepEqual(constantRules, ['QCV-F002', 'QCV-F003', 'QCV-F004']);
   assert.equal(constant.verdict, 'untrusted');
   const absent = byTitle('absent banner stays hidden');
   const l002 = absent.findings.find((finding) => finding.ruleId === 'QCV-L002');
@@ -1062,6 +1062,123 @@ test('after the worker page', async () => { expect(1).toBe(1); });
   assert.equal(cell('after the worker page', 'blank-app').result, 'pass');
   assert.equal(rules('after the worker page').includes('QCV-F002'), true);
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+test('a closed blank page still gets QCV-F002', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-close-blank-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('closes a blank page', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  await p.close();
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('closes a blank page', 'blank-app').result, 'pass');
+  assert.equal(rules('closes a blank page').includes('QCV-F002'), true);
+});
+
+test('a blank check that errors is not a confirmed blank page', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-blank-err-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('hides the body then stays green', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'body', {
+      configurable: true,
+      get() { throw new Error('blocked'); },
+    });
+  });
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('hides the body then stays green', 'blank-app').result, 'not-run');
+  assert.match(cell('hides the body then stays green', 'blank-app').reason, /blank check did not finish/);
+  assert.equal(rules('hides the body then stays green').includes('QCV-F002'), false);
+});
+
+test('a blank check that exceeds one second is not a confirmed blank page', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-blank-slow-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('blocks the page then stays green', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    setTimeout(() => {
+      const start = Date.now();
+      while (Date.now() - start < 4000) {}
+    }, 0);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('blocks the page then stays green', 'blank-app').result, 'not-run');
+  assert.match(cell('blocks the page then stays green', 'blank-app').reason, /blank check did not finish/);
+  assert.equal(rules('blocks the page then stays green').includes('QCV-F002'), false);
+});
+
+test('a copy note is printed after the baseline line', { timeout: 120000 }, (t) => {
+  const project = tempDir(t, 'qcv-fault-link-');
+  const scratch = tempDir(t, 'qcv-fault-link-tmp-');
+  const out = tempDir(t, 'qcv-fault-link-out-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({ retries: 0, timeout: 15000, testDir: '.' });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('alpha', async () => { expect(1).toBe(1); });
+`,
+  );
+  fs.symlinkSync(path.join(project, 'missing-target'), path.join(project, 'dangling-link'));
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
+  const baselineAt = result.stderr.indexOf('Baseline:');
+  const noteAt = result.stderr.indexOf('Copy note: Skipped symlink dangling-link (dangling).');
+  assert.equal(baselineAt >= 0 && noteAt > baselineAt, true, result.stderr);
+});
+
+test('restoreStackHooks puts the original stack hooks back', async (t) => {
+  const dir = tempDir(t, 'qcv-restore-');
+  fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(dir, 'node_modules'));
+  const file = path.join(dir, 'fixture.mjs');
+  fs.writeFileSync(file, faultFixtureSource());
+  const savedCapture = Error.captureStackTrace;
+  const savedPrepare = Error.prepareStackTrace;
+  const loaded = await import(pathToFileURL(file).href);
+  try {
+    assert.notEqual(Error.captureStackTrace, savedCapture);
+    loaded.restoreStackHooks();
+    assert.equal(Error.captureStackTrace, savedCapture);
+    assert.equal(Error.prepareStackTrace, savedPrepare);
+  } finally {
+    Error.captureStackTrace = savedCapture;
+    Error.prepareStackTrace = savedPrepare;
+  }
 });
 
 function assertLeak(result, report, leaker, follower) {

@@ -200,8 +200,10 @@ test('a namespace import from chai is not a Playwright test', (t) => {
   fs.writeFileSync(
     file,
     `import * as chai from 'chai';
+import * as nodeFs from 'node:fs';
 import { test, expect } from '@playwright/test';
 chai.test('not a row', () => {});
+nodeFs.test('not a node row', () => {});
 test('real', () => { expect(1).toBe(1); });
 `,
   );

@@ -70,15 +70,14 @@ jobs:
       - name: Install The Suite
         run: npm ci
 
+      - name: Install Chromium For The Suite
+        run: npx playwright install --with-deps chromium
+
       - name: Build qa-core-verify
         working-directory: .qa-core-verify
         run: npm ci && npm run build
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-
-      - name: Install Chromium
-        working-directory: .qa-core-verify
-        run: npx playwright install --with-deps chromium
 
       - name: Locator Check
         run: node .qa-core-verify/dist/cli.js . --only locator

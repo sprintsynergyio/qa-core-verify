@@ -16,6 +16,7 @@ import { loadFaultFile, titleMatches, type Fault, type FaultResultName, type Fau
 
 export const FAULT_NOT_APPLIED_REASON = 'The fault was not applied to a page this test used.';
 export const BLANK_NOT_PRESENT_REASON = 'The blank page was not present when the test finished.';
+export const BLANK_CHECK_FAILED_REASON = 'The blank check did not finish, so the page was not confirmed blank.';
 export const FAULT_NOT_FOUND_REASON = 'The test was not found in the fault run.';
 export const LOCATION_DRIFT_REASON = 'The baseline locations do not match the inventoried tests.';
 export const UNEVALUATED_REASON = 'Every fault was not-run, so the cannot-fail check did not exercise this test.';
@@ -310,6 +311,9 @@ function cellFor(
   if (!faultReached(fault.type, log)) {
     return { id: fault.id, result: 'not-run', reason: FAULT_NOT_APPLIED_REASON };
   }
+  if (fault.type === 'blank-app' && log && outcome === 'pass' && log.blankUnknown > 0) {
+    return { id: fault.id, result: 'not-run', reason: BLANK_CHECK_FAILED_REASON };
+  }
   if (fault.type === 'blank-app' && log && log.blankMisses > 0 && outcome === 'pass') {
     return { id: fault.id, result: 'not-run', reason: BLANK_NOT_PRESENT_REASON };
   }
@@ -330,6 +334,7 @@ interface CountLog {
   armedPages: number;
   armedContexts: number;
   blankMisses: number;
+  blankUnknown: number;
 }
 
 function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
@@ -353,6 +358,7 @@ function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
       armedPages?: unknown;
       armedContexts?: unknown;
       blankMisses?: unknown;
+      blankUnknown?: unknown;
     };
     if (typeof record.file !== 'string' || typeof record.line !== 'number') continue;
     const counts: Record<string, number> = {};
@@ -370,6 +376,7 @@ function readCountLog(workspaceDir: string, logFile: string): CountLog[] {
       armedPages: typeof record.armedPages === 'number' ? record.armedPages : 0,
       armedContexts: typeof record.armedContexts === 'number' ? record.armedContexts : 0,
       blankMisses: typeof record.blankMisses === 'number' ? record.blankMisses : 0,
+      blankUnknown: typeof record.blankUnknown === 'number' ? record.blankUnknown : 0,
     });
   }
   return rows;

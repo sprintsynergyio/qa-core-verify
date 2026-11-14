@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyConfig } from '../dist/config.js';
 import { parseSpecFile } from '../dist/inventory/parse.js';
 import { planMutations } from '../dist/runtime/inversion/mutate.js';
-import { classifyMutantOutput } from '../dist/runtime/inversion/run.js';
+import { classifyMutantOutput, controlFailureDetail } from '../dist/runtime/inversion/run.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(repoRoot, 'dist/cli.js');
@@ -551,6 +551,29 @@ test('swallowed from fixture', async ({ page }) => {
   assert.equal(row.assertions[0].outcome, 'survived', JSON.stringify(row.assertions));
   assert.equal((row.assertions[0].reason ?? '').includes('could not be mapped'), false);
   assert.equal(row.findings.some((finding) => finding.ruleId === 'QCV-F001' && finding.severity === 'error'), true);
+});
+
+test('a control failure detail uses the report error and ignores JSON reporter text', () => {
+  const json = `${JSON.stringify({
+    suites: [{
+      specs: [{
+        file: 'a.spec.ts',
+        line: 4,
+        column: 1,
+        tests: [{
+          status: 'unexpected',
+          results: [{ status: 'failed', error: { message: 'Error: from the report\nLocator: x' } }],
+        }],
+      }],
+    }],
+  })}\n`;
+  const fromReport = controlFailureDetail(json, '', 1, undefined);
+  assert.match(fromReport, /Error: from the report/);
+  assert.equal(fromReport.includes('Locator'), false);
+  const fragment = controlFailureDetail('{"status":"failed"}\n', 'at some frame\n', 1, undefined);
+  assert.equal(fragment.includes('failed'), false);
+  const fromStderr = controlFailureDetail('', 'Error: the control run broke\n', 1, undefined);
+  assert.match(fromStderr, /Error: the control run broke/);
 });
 
 test('the docs explain why an unawaited locator assertion is killed', () => {

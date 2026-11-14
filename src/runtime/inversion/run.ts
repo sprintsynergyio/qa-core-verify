@@ -101,15 +101,19 @@ export function classifyMutantOutput(
   return { outcome: 'error', reason: `The inverted test ended as ${described.join(', ')}.` };
 }
 
-/** First Playwright error line from a control run, or an empty string when the report has none. */
-function controlFailureDetail(stdout: string, stderr: string, exitCode: number, workspaceDir: string): string {
+/**
+ * First Playwright error line from a control run, or an empty string when the report has none.
+ * The JSON reporter's stdout is not scanned. A line of that JSON can contain the word failed.
+ */
+export function controlFailureDetail(stdout: string, stderr: string, exitCode: number, workspaceDir: string): string {
   const parsed = parseBaseline(stdout, stderr, exitCode, workspaceDir);
   const reason = parsed.failReasons ? [...parsed.failReasons.values()][0] : undefined;
   if (reason) return ` ${reason}.`;
-  for (const line of `${stderr}\n${stdout}`.split('\n')) {
+  for (const line of stderr.split('\n')) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith('at ') || trimmed.startsWith('at\t')) continue;
-    if (/Error|Timeout|timeout|failed/.test(trimmed)) {
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) continue;
+    if (/^Error:|^TimeoutError:|Timeout \d+ms exceeded/.test(trimmed)) {
       return ` ${trimmed.length > 180 ? `${trimmed.slice(0, 177)}...` : trimmed}.`;
     }
   }

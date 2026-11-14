@@ -580,6 +580,9 @@ The blank is applied to every browser context the test opens, including `browser
 ```ts
 test.beforeEach(async ({ page }) => {
   await page.goto('https://www.saucedemo.com/');
+  await page.getByTestId('username').fill('standard_user');
+  await page.getByTestId('password').fill('secret_sauce');
+  await page.getByTestId('login-button').click();
 });
 
 test('login lands on the inventory page', async ({ page }) => {
@@ -593,7 +596,7 @@ test('a later test does not inherit that page', async () => {
 
 The login test is checked against the page from `beforeEach`. The later test is not. The same rule applies to a page a test scoped fixture leaves open.
 
-The checker counts the carried pages that are still open when the test starts, plus any page armed during that test. A page that is already closed when the test starts does not count. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body of each open page the test used, not only the `page` fixture. It also looks just before `page.close()`, because a page the test closes cannot be read after it is gone. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. The row stays `trusted` when no warn or error was raised, and the report adds `Every fault was not-run, so the cannot-fail check did not exercise this test.` QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables on the Playwright process, so it still applies when no page is opened. Each blank check waits at most 1 second, so a stuck dialog does not add the project's full timeout at teardown.
+The checker counts the carried pages that are still open when the test starts, plus any page armed during that test. A page that is already closed when the test starts does not count. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body of each open page the test used, not only the `page` fixture. It also looks just before `page.close()`, because a page the test closes cannot be read after it is gone. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. The row stays `trusted` when no warn or error was raised, and the report adds `Every fault was not-run, so the cannot-fail check did not exercise this test.` QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables on the Playwright process, so it still applies when no page is opened. Each blank check waits at most 1 second, so a stuck dialog does not add the project's full timeout at teardown. A timeout or an error is not a confirmed blank page. That cell is `not-run` with `The blank check did not finish, so the page was not confirmed blank.`
 
 ### Why
 
@@ -659,7 +662,7 @@ None.
 
 ### What
 
-A test that passed the baseline also passed under every fault in the run. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. `blank-app` is always in the run. When that cell is `pass`, QCV-F002 is already an error on the same test, so QCV-F004 is not added on top of it. The SauceDemo demo therefore shows QCV-F002 and QCV-F003 on the seeded constant test, and it does not show QCV-F004. QCV-F004 still applies when every cell passed and `blank-app` did not. A `not-run` cell means that fault was not applied, so the test does not get this warn.
+A test that passed the baseline also passed under every fault other than `blank-app`, and the run had at least one such fault. The evidence lists those fault ids, not `blank-app`. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. `blank-app` does not decide it. A test can have both QCV-F002 and QCV-F004. The SauceDemo seeded constant test does: it stays green on a blank page and under the other demo faults. A `not-run` or `fail` cell on a non-blank fault means this warn is not raised. A suite whose only fault is `blank-app` does not get QCV-F004.
 
 ### Why
 
@@ -700,6 +703,8 @@ A failed fault cell includes a short reason, the first line of the Playwright er
 Fault ids that match when case is ignored are rejected. `Blank-App` does not run beside the built-in `blank-app`.
 
 When the baseline ran tests and none of those locations match the inventory, stderr says `Baseline locations match no inventoried test. Fault cells are not-run. This run exits 2.` The cells get that reason. The run does not say the fault broke no test. The fault run uses the project's own Playwright from its `node_modules`, not a second copy of the tool's pin. On Playwright 1.58.2, 1.59.1, 1.60.0, 1.61.1, 1.62.1, and 1.64.1 the generated fixture kept spec lines for `test`, `test.extend`, `test.describe`, `mergeTests`, `test.fail`, and `extend` on a `mergeTests` result. That list is from the PR 08 review, not from a new run in this change.
+
+`QCV_TEST_LOCATION_DRIFT=1` is a test-only environment variable. It forces the generated fixture to report the wrong test locations, so the drift guard above can be tested. Do not set it for a real suite. A fault run then exits 2. `user-swap` cannot set it, because names that start with `QCV_` are refused. The worker restores `Error.captureStackTrace` and `Error.prepareStackTrace` on process exit. That restore runs as the worker process ends, so it does not change the fault results of the run. The spec line of a plain test in a fault run is the check that the wrapper kept the call site.
 
 Imports are followed one level, into a helper or a page object in a local file. A call that needs a second import is QCV-W000 when that call could be an assertion or a locator. A call used only as an argument to a Playwright action, such as a user name passed to `fill`, is not reported.
 

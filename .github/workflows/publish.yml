@@ -1,5 +1,8 @@
 # Prepared for a later public release. It does not run on pull requests.
-# package.json still has "private": true, so a tag push fails at npm publish until that line is removed.
+# No sibling repository (qa-core-heal, qa-core-flaky, qa-core-prcheck) has an npm publish workflow.
+# Those repositories only have CI. This file is not copied from them.
+# npm publish --provenance refuses a private repository, and it can write a public
+# Sigstore entry before that refusal. The visibility step exits before publish.
 name: Publish
 
 on:
@@ -10,6 +13,10 @@ on:
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -30,6 +37,25 @@ jobs:
         run: npm ci
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tag Matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}."
+            exit 1
+          fi
+
+      - name: Refuse Provenance From A Private Repository
+        run: |
+          if [ "${{ github.event.repository.visibility }}" != "public" ]; then
+            echo "npm publish --provenance needs a public repository. Make the repository public before pushing a tag."
+            exit 1
+          fi
 
       - name: Publish
         run: npm publish --provenance --access public

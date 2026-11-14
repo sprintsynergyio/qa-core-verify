@@ -9,7 +9,7 @@ No LLM, no API key. The checker is deterministic: same suite, same app state, sa
 ```text
 $ node dist/cli.js example-project/saucedemo
 
-trusted  tests/good/shopping.spec.ts:5  login lands on the inventory page
+trusted  tests/ai-style/cannot-fail.spec.ts:3  assertion is never reached
 
 untrusted  tests/ai-style/weak-assertions.spec.ts:5  opens the login page and stops
   QCV-W001  error  5:1  Test has no assertion.
@@ -115,13 +115,13 @@ Before the mutants, each green test is run on its own with no mutation. A test t
 
 `--only faults` runs the suite once as a baseline, then once per fault, in a temp copy. The copy rewrites `@playwright/test` imports to a generated fixture. The fixture applies one fault per run with `context.addInitScript` and `context.route`. `browser.newContext()` and `browser.newPage()` get the same script and the same route. The original project is not written.
 
-`blank-app` is built in. A green test that stays green on an empty body is QCV-F002. The blank check runs on each open page the test used, and again just before `page.close()`, because a page the test closes cannot be read afterwards. Each of those checks waits at most 1 second.
+`blank-app` is built in. A green test that stays green on an empty body is QCV-F002. The blank check runs on each open page the test used, and again just before `page.close()`, because a page the test closes cannot be read afterwards. Each of those checks waits at most 1 second. A timeout or an error is not a confirmed blank page. That cell is `not-run`.
 
 A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body counts only for that test. A page left open by a hook or a test scoped fixture counts only for the test that used it. A page left open by `beforeAll`, `afterAll`, or a worker scoped fixture stays armed for later tests while it is open, including tests outside that describe.
 
 A test that never opens a page is `not-run` for a DOM fault. The row can still say `trusted`, because trusted means no warn or error from the checks that ran. The report then adds: `Every fault was not-run, so the cannot-fail check did not exercise this test.`
 
-`qa-core-verify.faults.json` may add faults. `expectedToBreak` holds JavaScript regular expressions. A pattern that matches no inventoried test prints `Fault <id> expectedToBreak pattern "<pattern>" matched no test.` A listed test that stays green is QCV-F003. QCV-F004 warns when every fault cell passed and QCV-F002 did not already fire. `blank-app` is always in the run, so a test that stays green under every fault already has QCV-F002 and does not also get QCV-F004. The SauceDemo seeded constant test is that case.
+`qa-core-verify.faults.json` may add faults. `expectedToBreak` holds JavaScript regular expressions. A pattern that matches no inventoried test prints `Fault <id> expectedToBreak pattern "<pattern>" matched no test.` A listed test that stays green is QCV-F003. QCV-F004 warns when every fault other than `blank-app` passed, and at least one such fault ran. The evidence lists those fault ids. `blank-app` does not decide QCV-F004. A test that also stayed green on a blank page still has QCV-F002. The SauceDemo seeded constant test gets both.
 
 A failed cell includes a short reason: the first line of the Playwright error.
 
