@@ -13,7 +13,8 @@ concurrency:
 jobs:
   test:
     name: Typecheck And Test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04. Playwright 1.60.0 refuses Chromium there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -62,7 +63,8 @@ jobs:
   live-demo:
     name: Live Demo
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04. Playwright 1.60.0 refuses Chromium there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Checkout

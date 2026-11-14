@@ -179,7 +179,7 @@ Faults live in `qa-core-verify.faults.json` in the project directory. A missing 
 
 Run the static command on every pull request. Run locator, inversion, and fault checks on a schedule or from a manual trigger. The example is [examples/github-action.yml](examples/github-action.yml). The steps are in [docs/ci.md](docs/ci.md).
 
-This repository's own CI typechecks and tests on Node 22 and Node 24, on `ubuntu-latest`. It does not call SauceDemo unless someone starts the live demo workflow by hand.
+This repository's own CI typechecks and tests on Node 22 and Node 24, on Ubuntu 24.04. `ubuntu-latest` is Ubuntu 26.04, and Playwright 1.60.0 refuses Chromium there. It does not call SauceDemo unless someone starts the live demo workflow by hand.
 
 ## Limits
 

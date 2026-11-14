@@ -18,7 +18,7 @@ Exit code `0` means no finding at or above `failOn`. The default `failOn` is `er
 
 ## Runtime Checks
 
-`--only locator`, `--only inversion`, and `--only faults` copy the suite to a temp directory and run Playwright there. The original files are not written. Install Chromium in the job that runs them.
+`--only locator`, `--only inversion`, and `--only faults` copy the suite to a temp directory and run Playwright there. The original files are not written. Install Chromium in the job that runs them. Use Ubuntu 24.04 for that job. Playwright 1.60.0 refuses Chromium on Ubuntu 26.04.
 
 ```sh
 npx playwright install --with-deps chromium
@@ -38,6 +38,6 @@ Build from the checkout and call `node .qa-core-verify/dist/cli.js`. Do not `npm
 
 ## This Repository
 
-The workflow in `.github/workflows/ci.yml` typechecks and tests this repo on Node 22 and Node 24, on `ubuntu-latest`. It installs Chromium for the local fixture tests. It does not call SauceDemo. The live SauceDemo job runs only from `workflow_dispatch`.
+The workflow in `.github/workflows/ci.yml` typechecks and tests this repo on Node 22 and Node 24, on Ubuntu 24.04. `ubuntu-latest` is Ubuntu 26.04, and Playwright 1.60.0 refuses to install Chromium there. The job installs Chromium for the local fixture tests. It does not call SauceDemo. The live SauceDemo job runs only from `workflow_dispatch`.
 
 `.github/workflows/publish.yml` is prepared for a later tag push. It is not used while `"private": true` stays set.

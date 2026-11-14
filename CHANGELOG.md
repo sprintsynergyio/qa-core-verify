@@ -2,7 +2,7 @@
 
 ## 0.1.0 (internal review)
 
-Prepared for internal review on 2026-11-14. Not released. `package.json` stays `"private": true`.
+Prepared for internal review on 2026-11-14. Not released. `package.json` stays `"private": true`. CI runs on Ubuntu 24.04 because Playwright 1.60.0 refuses Chromium on Ubuntu 26.04.
 
 This version audits a Playwright suite with static rules QCV-W000 through QCV-W010, locator rules QCV-L001 through QCV-L004, assertion inversion QCV-F001, and fault injection QCV-F002, QCV-F003, and QCV-F004. Reports are console, JSON (`schemaVersion: 1`), Markdown, and HTML. The SauceDemo demo suite is in `example-project/saucedemo`.
 

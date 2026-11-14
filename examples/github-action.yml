@@ -18,7 +18,7 @@ jobs:
   static:
     name: Static Checks
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout The Suite
@@ -48,7 +48,8 @@ jobs:
   runtime:
     name: Runtime Checks
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # Playwright 1.60.0 refuses Chromium on Ubuntu 26.04, which is ubuntu-latest.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout The Suite
