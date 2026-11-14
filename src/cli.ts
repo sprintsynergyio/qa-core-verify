@@ -25,6 +25,7 @@ Audit a Playwright suite for weak assertions (QCV-W000 through QCV-W010).
 --only locator runs QCV-L001 through QCV-L004 against a temp copy of the suite.
 --only inversion runs QCV-F001 by inverting one assertion at a time in a temp copy.
 --only faults runs QCV-F002, QCV-F003, and QCV-F004 against a temp copy. blank-app always runs.
+QCV-F004 warns when every fault other than blank-app passed, and at least one such fault ran.
 
 Options:
   --json              Print the JSON report to stdout and nothing else to stdout.
@@ -47,6 +48,7 @@ Options:
                       Each inversion run is one assertion. The plan line is printed after the control runs.
                       Control runs are not part of the plan count and are not part of --max-runs.
                       faults runs QCV-F002, QCV-F003, and QCV-F004 and writes the report.
+                      QCV-F004 warns when every fault other than blank-app passed.
                       One fault runs at a time. The fault file is qa-core-verify.faults.json.
   --config <file>     Playwright config forwarded to the temp run and not rewritten.
                       A directory uses the playwright.config file inside that directory.
@@ -278,7 +280,7 @@ async function runLocatorEvidence(options: CliOptions, cwd: string): Promise<num
       configFile: options.configFile,
       cwd,
     });
-    for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);
+    for (const link of result.skippedLinks) console.error(`Copy note: Skipped symlink ${link}.`);
     const shown = consoleReportPaths([result.evidencePath], projectDir, options.outDir, cwd);
     const evidenceLine = escapeControls(shown[0] ?? result.evidencePath);
     process.stdout.write(
@@ -329,10 +331,10 @@ async function runLocatorCheck(options: CliOptions, cwd: string, now: () => Date
       cwd,
       now,
     });
-    for (const link of result.skippedLinks) console.error(`Skipped symlink ${link}.`);
     console.error(
       `Baseline: ${result.baseline.passed} passed, ${result.baseline.failed} failed, ${result.baseline.skipped} skipped.`,
     );
+    for (const link of result.skippedLinks) console.error(`Copy note: Skipped symlink ${link}.`);
     const written = writeReportFiles(result.report, outDir, options.formats);
     const shown = consoleReportPaths([...written, result.evidencePath], projectDir, options.outDir, cwd);
     if (options.json) {
@@ -465,6 +467,7 @@ async function runFaults(options: CliOptions, cwd: string, now: () => Date): Pro
       process.stdout.write(`${consoleText(result.report, shown)}\n`);
     }
     if (options.keepWorkspace) fs.writeSync(2, workspaceLine(result.runRoot));
+    if (result.locationDrift) return 2;
     const code = exitCodeFor(result.findings, options.failOn);
     if (code === 0 && result.unmatchedBaseline) return 1;
     return code;

@@ -463,7 +463,7 @@ The second check is the absence. The first check has already shown that the loca
 
 ### Severity
 
-warn. `--only faults` raises this to error when a `change-text` fault should show the selector and the selector still matches nothing.
+warn. `--only faults` raises this to error when a `change-text` fault should show the selector and the selector still matches nothing. The upgrade looks for `locator('<same selector>')` on the absence assertion. The SauceDemo demo and the live golden test do not exercise that upgrade. They show the warn from the locator check on an invented banner.
 
 ### Related Lint Rule
 
@@ -575,7 +575,28 @@ None. The check runs Playwright. It is not part of the static audit.
 
 A test that passed the baseline also passed when the page body was replaced with an empty element after load. A MutationObserver keeps the body empty when the app renders again. The fault id is `blank-app`. It is built in and runs for every suite.
 
-The blank is applied to every browser context the test opens, including `browser.newContext()` and `browser.newPage()`. A page opened in `beforeAll` or `afterAll`, or held by a worker scoped fixture, stays armed for each later test while that page is still open. A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body stops counting when that test ends, even if it is still open. The checker counts the carried pages that are still open when the test starts, plus any page armed during that test. A page that is already closed when the test starts does not count. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body of each open page the test used, not only the `page` fixture. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables for the Playwright process, so it still applies when no page is opened.
+The blank is applied to every browser context the test opens, including `browser.newContext()` and `browser.newPage()`. A page opened in `beforeAll` or `afterAll`, or held by a worker scoped fixture, stays armed for each later test while that page is still open. That includes a page `afterAll` leaves open: it counts for later tests in the worker, including tests outside that describe. A `beforeAll` page stays armed for tests outside its describe while the page is open. This checker does not limit those pages to the hook's describe block. A page or context opened in a test body, a `beforeEach` or `afterEach` hook, a test scoped fixture, or a `test.fail`, `test.fixme`, or `test.skip` body stops counting when that test ends, even if it is still open. A page left open by a hook or a test scoped fixture counts only for the test that used it.
+
+```ts
+test.beforeEach(async ({ page }) => {
+  await page.goto('https://www.saucedemo.com/');
+  await page.getByTestId('username').fill('standard_user');
+  await page.getByTestId('password').fill('secret_sauce');
+  await page.getByTestId('login-button').click();
+});
+
+test('login lands on the inventory page', async ({ page }) => {
+  await expect(page).toHaveURL(/inventory\.html/);
+});
+
+test('a later test does not inherit that page', async () => {
+  expect(1).toBe(1);
+});
+```
+
+The login test is checked against the page from `beforeEach`. The later test is not. The same rule applies to a page a test scoped fixture leaves open.
+
+The checker counts the carried pages that are still open when the test starts, plus any page armed during that test. A page that is already closed when the test starts does not count. `page.setContent` replaces the document, so the same script runs again after it. At the end of the test the checker looks at the body of each open page the test used, not only the `page` fixture. It also looks just before `page.close()`, because a page the test closes cannot be read after it is gone. A passing test whose page is not that single empty element is `not-run` for `blank-app`, with a reason, and QCV-F002 is not raised. A test that never opens a page, such as a `request` test, is also `not-run` for this fault. The row stays `trusted` when no warn or error was raised, and the report adds `Every fault was not-run, so the cannot-fail check did not exercise this test.` QCV-F003 and QCV-F004 are not raised for a fault that was not applied. `user-swap` sets environment variables on the Playwright process, so it still applies when no page is opened. Each blank check waits at most 1 second, so a stuck dialog does not add the project's full timeout at teardown. A timeout or an error is not a confirmed blank page. That cell is `not-run` with `The blank check did not finish, so the page was not confirmed blank.`
 
 ### Why
 
@@ -607,7 +628,7 @@ None. The check runs Playwright.
 
 ### What
 
-`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003. The fault must have been applied. A page that is still open from `beforeAll` or a worker scoped fixture counts as the fault reaching that test. A page left open by an earlier test, hook, or test scoped fixture does not. `block-request` uses `context.route`, so a popup in that context is blocked, and a context from `browser.newContext()` gets the same route. A cell that is `not-run` because the fault never reached a page does not raise QCV-F003.
+`qa-core-verify.faults.json` lists `expectedToBreak` as JavaScript regular expressions. A pattern matches the title path (`Describe > title`) or the test title. A pattern that matches no inventoried test prints `Fault <id> expectedToBreak pattern "<pattern>" matched no test.` on stderr. A test that passed the baseline and is listed for a fault, and still passes under that fault, is QCV-F003. The fault must have been applied. A page that is still open from `beforeAll` or a worker scoped fixture counts as the fault reaching that test. A page left open by an earlier test, hook, or test scoped fixture does not. `block-request` uses `context.route`, so a popup in that context is blocked, and a context from `browser.newContext()` gets the same route. It does not abort the Playwright `request` fixture, and it does not abort a service worker. A test that only uses `request` can still be `pass` for that fault when the context was armed, and a listed test then gets QCV-F003 even though the request itself was not blocked. A cell that is `not-run` because the fault never reached a page does not raise QCV-F003.
 
 ### Why
 
@@ -641,7 +662,7 @@ None.
 
 ### What
 
-A test that passed the baseline also passed under every fault in the run, including `blank-app`. The evidence lists the fault ids. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. A `not-run` cell means that fault was not applied, so the test does not get this warn.
+A test that passed the baseline also passed under every fault other than `blank-app`, and the run had at least one such fault. The evidence lists those fault ids, not `blank-app`. The spec for this check asks for that warn and does not assign a rule id. This checker uses QCV-F004. `blank-app` does not decide it. A test can have both QCV-F002 and QCV-F004. The SauceDemo seeded constant test does: it stays green on a blank page and under the other demo faults. A `not-run` or `fail` cell on a non-blank fault means this warn is not raised. A suite whose only fault is `blank-app` does not get QCV-F004.
 
 ### Why
 
@@ -657,7 +678,7 @@ The constant assertion in QCV-F002 stays green under every DOM fault and every u
 await expect(page.getByTestId('shopping-cart-badge')).toHaveText('1');
 ```
 
-A `change-text` fault on that badge fails the test, so the test did not stay green under every fault.
+A `change-text` fault on that badge fails the test, so the test did not stay green under every fault. If the test already asserts the right thing and no listed fault changes it, add a fault in `qa-core-verify.faults.json` that this test should catch. The SauceDemo file does that for the locked-out error text.
 
 ### Severity
 
@@ -670,6 +691,20 @@ None.
 ## Known Limits
 
 An `expect` in `beforeEach`, `afterEach`, `beforeAll`, or `afterAll` does not count as an assertion for the test. The hook is not part of the test body. A test that only asserts in `beforeEach` is still QCV-W001.
+
+Under any fault the `page` fixture sets the action timeout to 8 seconds and the navigation timeout to 15 seconds. The baseline keeps the project's timeouts. Other pages keep the project timeouts. A test that needs longer than 8 seconds fails under every fault and counts as broken, which hides QCV-F002 and QCV-F004 for it. `qa-core-verify.faults.json` does not set these timeouts.
+
+`user-swap` puts the named variables on the Playwright process. A name that starts with `QCV_` is rejected, so the file cannot replace `QCV_FAULT` or `QCV_FAULT_LOG`. Other names, including `PATH` and `NODE_OPTIONS`, are passed through.
+
+The QCV-L002 upgrade from warn to error is not shown in the SauceDemo demo or in the live golden test. It applies when a `change-text` fault names a selector, that selector still matches nothing, and an absence assertion uses `locator()` with that same selector. The demo's QCV-L002 finding is the locator check on an invented banner.
+
+A failed fault cell includes a short reason, the first line of the Playwright error. A timeout, an assertion failure, and a load error are not the same word `fail` with no reason.
+
+Fault ids that match when case is ignored are rejected. `Blank-App` does not run beside the built-in `blank-app`.
+
+When the baseline ran tests and none of those locations match the inventory, stderr says `Baseline locations match no inventoried test. Fault cells are not-run. This run exits 2.` The cells get that reason. The run does not say the fault broke no test. The fault run uses the project's own Playwright from its `node_modules`, not a second copy of the tool's pin. On Playwright 1.58.2, 1.59.1, 1.60.0, 1.61.1, 1.62.1, and 1.64.1 the generated fixture kept spec lines for `test`, `test.extend`, `test.describe`, `mergeTests`, `test.fail`, and `extend` on a `mergeTests` result. That list is from the PR 08 review, not from a new run in this change.
+
+`QCV_TEST_LOCATION_DRIFT=1` is a test-only environment variable. It forces the generated fixture to report the wrong test locations, so the drift guard above can be tested. Do not set it for a real suite. A fault run then exits 2. `user-swap` cannot set it, because names that start with `QCV_` are refused. The worker restores `Error.captureStackTrace` and `Error.prepareStackTrace` on process exit. That restore runs as the worker process ends, so it does not change the fault results of the run. The spec line of a plain test in a fault run is the check that the wrapper kept the call site.
 
 Imports are followed one level, into a helper or a page object in a local file. A call that needs a second import is QCV-W000 when that call could be an assertion or a locator. A call used only as an argument to a Playwright action, such as a user name passed to `fill`, is not reported.
 

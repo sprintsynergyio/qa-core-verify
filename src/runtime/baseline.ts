@@ -21,6 +21,11 @@ export interface BaselineSummary {
    */
   skippedKeys?: Set<string>;
   /**
+   * First line of the Playwright error for a failed test, keyed like `failedKeys`.
+   * Omitted by fixtures that predate this field.
+   */
+  failReasons?: Map<string, string>;
+  /**
    * Set when Playwright exited without running a test, or reported a load error and ran nothing.
    * The baseline is not green in that case.
    */
@@ -41,9 +46,14 @@ interface JsonSpec {
   tests?: JsonTest[];
 }
 
+interface JsonResult {
+  status?: string;
+  error?: { message?: unknown } | string;
+}
+
 interface JsonTest {
   status?: string;
-  results?: Array<{ status?: string }>;
+  results?: JsonResult[];
 }
 
 interface ReportRoots {
@@ -65,6 +75,7 @@ export function parseBaseline(
   const failedKeys = new Set<string>();
   const seenKeys = new Set<string>();
   const skippedKeys = new Set<string>();
+  const failReasons = new Map<string, string>();
   const summary: BaselineSummary = {
     ok: false,
     exitCode,
@@ -74,6 +85,7 @@ export function parseBaseline(
     failedKeys,
     seenKeys,
     skippedKeys,
+    failReasons,
     stdout,
     stderr,
   };
@@ -219,8 +231,37 @@ function classifySpec(
     if (kind === 'failed') summary.failed += 1;
     else if (kind === 'skipped') summary.skipped += 1;
     else summary.passed += 1;
-    if (file && typeof line === 'number') noteLocation(states, file, line, column, kind);
+    if (file && typeof line === 'number') {
+      noteLocation(states, file, line, column, kind);
+      if (kind === 'failed') noteFailureReason(summary, file, line, column, test);
+    }
   }
+}
+
+/** One short line from the Playwright error, with ANSI color codes removed. */
+export function failureLine(test: { results?: ReadonlyArray<{ error?: { message?: unknown } | string }> }): string | undefined {
+  for (const result of test.results ?? []) {
+    const raw = result.error;
+    const message = typeof raw === 'string' ? raw : raw && typeof raw.message === 'string' ? raw.message : '';
+    const stripped = stripAnsi(message);
+    for (const line of stripped.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      return trimmed.length > 180 ? `${trimmed.slice(0, 177)}...` : trimmed;
+    }
+  }
+  return undefined;
+}
+
+function noteFailureReason(summary: BaselineSummary, file: string, line: number, column: number, test: JsonTest): void {
+  const reason = failureLine(test);
+  if (!reason) return;
+  const key = `${baselineKey(file, line)}:${column}`;
+  if (!summary.failReasons?.has(key)) summary.failReasons?.set(key, reason);
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
 function outcomeKind(status: string | undefined): 'failed' | 'skipped' | 'ran' {

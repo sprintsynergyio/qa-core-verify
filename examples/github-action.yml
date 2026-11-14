@@ -1,0 +1,86 @@
+# Example only. qa-core-verify is a private internal review build. Not released.
+# Static checks run on every pull request. Runtime checks run on a schedule or a manual trigger.
+# QA_CORE_VERIFY_TOKEN needs read access to github.com/sprintsynergyio/qa-core-verify.
+# This file is not a workflow in this repository. Copy it into the suite repository.
+
+name: qa-core-verify
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static Checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout The Suite
+        uses: actions/checkout@v4
+
+      - name: Checkout qa-core-verify
+        uses: actions/checkout@v4
+        with:
+          repository: sprintsynergyio/qa-core-verify
+          path: .qa-core-verify
+          token: ${{ secrets.QA_CORE_VERIFY_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build qa-core-verify
+        working-directory: .qa-core-verify
+        run: npm ci && npm run build
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      - name: Static Checks
+        run: node .qa-core-verify/dist/cli.js .
+
+  runtime:
+    name: Runtime Checks
+    if: github.event_name != 'pull_request'
+    # Playwright 1.60.0 refuses Chromium on Ubuntu 26.04, which is ubuntu-latest.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout The Suite
+        uses: actions/checkout@v4
+
+      - name: Checkout qa-core-verify
+        uses: actions/checkout@v4
+        with:
+          repository: sprintsynergyio/qa-core-verify
+          path: .qa-core-verify
+          token: ${{ secrets.QA_CORE_VERIFY_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install The Suite
+        run: npm ci
+
+      - name: Install Chromium For The Suite
+        run: npx playwright install --with-deps chromium
+
+      - name: Build qa-core-verify
+        working-directory: .qa-core-verify
+        run: npm ci && npm run build
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      - name: Locator Check
+        run: node .qa-core-verify/dist/cli.js . --only locator
+
+      - name: Fault Check
+        run: node .qa-core-verify/dist/cli.js . --only faults

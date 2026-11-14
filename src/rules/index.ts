@@ -14,6 +14,21 @@ import type { Finding } from './types.js';
 
 export const CHECKS_RUN = ['weak-assertion'] as const;
 
+/** Static rule ids, in the order the README lists them. */
+export const STATIC_RULE_IDS = [
+  'QCV-W000',
+  'QCV-W001',
+  'QCV-W002',
+  'QCV-W003',
+  'QCV-W004',
+  'QCV-W005',
+  'QCV-W006',
+  'QCV-W007',
+  'QCV-W008',
+  'QCV-W009',
+  'QCV-W010',
+] as const;
+
 export function collectFindings(
   tests: readonly InventoryTest[],
   skippedDescribes: readonly SkippedDescribe[] = [],

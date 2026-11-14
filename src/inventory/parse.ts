@@ -241,7 +241,7 @@ function walkSuite(
       if (kind.modifiers.includes('skip')) {
         const pos = positionOf(node, sourceFile);
         skippedDescribes.push({
-          titlePath: titlePath.length > 0 ? titlePath : [''],
+          titlePath: titlePath.length > 0 ? titlePath : ['(anonymous describe)'],
           file: sourceFile.fileName,
           line: pos.line,
           column: pos.column,
@@ -737,9 +737,9 @@ function collectBindings(sourceFile: ts.SourceFile, depth = 0): Bindings {
   const bindings: Bindings = { testLocals, expectLocals, softLocals, namespaces, mergeLocals };
 
   const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && node.importClause && isTestSpecifier(node.moduleSpecifier)) {
-      bindImport(node.importClause, isPlaywrightSpecifier(node.moduleSpecifier), testLocals, expectLocals, namespaces, mergeLocals);
-      if (depth < 1 && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
+    if (ts.isImportDeclaration(node) && node.importClause && ts.isStringLiteral(node.moduleSpecifier)) {
+      bindImport(node.importClause, node.moduleSpecifier.text, testLocals, expectLocals, namespaces, mergeLocals);
+      if (depth < 1 && node.moduleSpecifier.text.startsWith('.') && isTestModule(node.moduleSpecifier.text)) {
         bindImportedFixtures(sourceFile, node, testLocals, depth);
       }
     }
@@ -926,14 +926,17 @@ function isExpectReceiver(expr: ts.Expression, bindings: Bindings): boolean {
 
 function bindImport(
   clause: ts.ImportClause,
-  playwright: boolean,
+  specifier: string,
   testLocals: Set<string>,
   expectLocals: Set<string>,
   namespaces: Set<string>,
   mergeLocals: Set<string>,
 ): void {
-  // A default or namespace import is the Playwright test object only for the Playwright package.
-  // A named import from a relative fixture file is still the test binding. The import is not loaded.
+  const playwright = isPlaywrightModule(specifier);
+  const relative = specifier.startsWith('./') || specifier.startsWith('../');
+  // A namespace import is the Playwright test object only for @playwright/test (and the other
+  // Playwright module names this parser already accepts) or a relative module. `import * as chai from 'chai'` is not a namespace here.
+  if (!playwright && !relative) return;
   if (playwright && clause.name) testLocals.add(clause.name.text);
   const named = clause.namedBindings;
   if (!named) return;
@@ -988,14 +991,6 @@ function isRequireFrom(expr: ts.Expression, accept: (specifier: string) => boole
   if (!ts.isIdentifier(expr.expression) || expr.expression.text !== 'require') return false;
   const arg = expr.arguments[0];
   return !!arg && ts.isStringLiteral(arg) && accept(arg.text);
-}
-
-function isPlaywrightSpecifier(expr: ts.Expression): boolean {
-  return ts.isStringLiteral(expr) && isPlaywrightModule(expr.text);
-}
-
-function isTestSpecifier(expr: ts.Expression): boolean {
-  return ts.isStringLiteral(expr) && isTestModule(expr.text);
 }
 
 function isTestModule(specifier: string): boolean {

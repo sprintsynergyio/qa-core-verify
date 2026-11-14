@@ -193,6 +193,40 @@ test('does not treat an unbound test function as a Playwright test', () => {
   assert.equal(inventory.tests.length, 0);
 });
 
+test('a namespace import from chai is not a Playwright test', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-chai-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chai.spec.ts');
+  fs.writeFileSync(
+    file,
+    `import * as chai from 'chai';
+import * as nodeFs from 'node:fs';
+import { test, expect } from '@playwright/test';
+chai.test('not a row', () => {});
+nodeFs.test('not a node row', () => {});
+test('real', () => { expect(1).toBe(1); });
+`,
+  );
+  const inventory = parseSpecFile(file, config);
+  assert.deepEqual(inventory.tests.map((entry) => entry.title), ['real']);
+});
+
+test('an anonymous describe.skip prints a placeholder title', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-anon-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'skip.spec.ts');
+  fs.writeFileSync(
+    file,
+    `import { test } from '@playwright/test';
+test.describe.skip(() => {
+  test('inside', () => {});
+});
+`,
+  );
+  const inventory = parseSpecFile(file, config);
+  assert.deepEqual(inventory.skippedDescribes[0].titlePath, ['(anonymous describe)']);
+});
+
 test('does not execute spec source', () => {
   const inventory = parseSpecFile(path.join(parserDir, 'side-effect.spec.ts'), config);
   assert.equal(byTitle(inventory, 'parsed without running').title, 'parsed without running');

@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { emptyConfig } from '../dist/config.js';
 import { parseSpecFile } from '../dist/inventory/parse.js';
 import { classifyFindings, ownerForTest } from '../dist/runtime/faults/findings.js';
@@ -65,6 +65,11 @@ test('fault fixture source applies DOM faults and blocked requests', () => {
   assert.equal(source.includes('data-qcv-blank'), true);
   assert.equal(source.includes('route.abort'), true);
   assert.equal(source.includes("export * from '@playwright/test'"), true);
+  assert.equal(source.includes('export function mergeTests'), true);
+  assert.equal(source.includes("process.on('exit'"), true);
+  assert.equal(source.includes('originalPrepareStackTrace'), true);
+  assert.equal(source.includes('page.close'), true);
+  assert.equal(source.includes('qcv blank check timed out'), true);
   assert.equal(source.includes("line + '\\n'"), true);
   assert.equal(source.includes("line + '\\\\n'"), false);
 });
@@ -109,6 +114,19 @@ test('fault file schema accepts the six types and rejects a bad file', (t) => {
   assert.throws(() => validateFaultFile([entry({ type: 'change-text', params: { selector: '#c' } })]), /missing param text/);
   assert.throws(() => validateFaultFile([entry({ type: 'user-swap', params: { env: {} } })]), /at least one variable/);
   assert.throws(() => validateFaultFile([entry({ type: 'user-swap', params: { env: { '1bad': 'x' } } })]), /bad env name/);
+  assert.throws(() => validateFaultFile([entry({ type: 'user-swap', params: { env: { QCV_FAULT: 'x' } } })]), /must not start with QCV_/);
+  assert.throws(() => validateFaultFile([entry({ type: 'user-swap', params: { env: { QCV_FAULT_LOG: 'x' } } })]), /must not start with QCV_/);
+  assert.throws(
+    () => validateFaultFile([entry({ id: 'Blank-App', type: 'remove-element', params: { selector: 'h1' } })]),
+    /matches the built-in id "blank-app"/,
+  );
+  assert.throws(
+    () => validateFaultFile([
+      entry({ id: 'Hide-Note', type: 'hide-element', params: { selector: 'h1' } }),
+      entry({ id: 'hide-note', type: 'hide-element', params: { selector: 'h1' } }),
+    ]),
+    /when case is ignored/,
+  );
   fs.writeFileSync(path.join(dir, 'qa-core-verify.faults.json'), '{');
   assert.throws(() => loadFaultFile(dir), /Cannot read qa-core-verify\.faults\.json/);
 });
@@ -171,6 +189,13 @@ test('shows the original text', async ({ page }) => {
   assert.deepEqual(ids('checks a constant'), ['QCV-F002', 'QCV-F003', 'QCV-F004']);
   assert.deepEqual(ids('absent banner stays hidden'), ['QCV-F002', 'QCV-F003', 'QCV-F004', 'QCV-L002']);
   assert.deepEqual(ids('shows the original text'), []);
+  const renameOnly = faults.filter((fault) => fault.id === 'rename-note');
+  const constantRow = rows.find((row) => row.test.title === 'checks a constant');
+  const withoutBlank = classifyFindings(dir, renameOnly, [{
+    ...constantRow,
+    cells: [{ id: 'rename-note', result: 'pass' }],
+  }]);
+  assert.deepEqual(withoutBlank.map((finding) => finding.ruleId), ['QCV-F003', 'QCV-F004']);
   const l002 = findings.find((finding) => finding.ruleId === 'QCV-L002');
   assert.equal(l002.severity, 'error');
   assert.match(l002.evidence, /#absent/);
@@ -197,6 +222,7 @@ test('a local page proves each fault type', { timeout: 300000 }, async (t) => {
   const byTitle = (title) => report.tests.find((entry) => entry.titlePath.at(-1) === title);
   const cell = (title, id) => byTitle(title).faults.find((entry) => entry.id === id);
   assert.equal(cell('shows the page title', 'blank-app').result, 'fail');
+  assert.match(cell('shows the page title', 'blank-app').reason, /\S/);
   assert.equal(cell('shows the removable text', 'remove-title').result, 'fail');
   assert.equal(cell('shows the hidden text', 'hide-note').result, 'fail');
   assert.equal(cell('shows the original text', 'rename-note').result, 'fail');
@@ -488,7 +514,7 @@ test('api only returns widget', async ({ request }) => {
   const rules = (title) => row(title).findings.map((finding) => finding.ruleId);
   assert.equal(cell('shared page reads title', 'blank-app').result, 'fail');
   assert.equal(cell('shared page reads title', 'no-h1').result, 'fail');
-  assert.equal(cell('shared page reads title', 'blank-app').reason, undefined);
+  assert.match(cell('shared page reads title', 'blank-app').reason, /\S/);
   assert.equal(rules('shared page reads title').includes('QCV-F002'), false);
   assert.equal(rules('shared page reads title').includes('QCV-F003'), false);
   assert.equal(cell('shared page vacuous', 'blank-app').result, 'pass');
@@ -498,13 +524,18 @@ test('api only returns widget', async ({ request }) => {
   assert.equal(rules('worker page vacuous').includes('QCV-F002'), true);
   assert.equal(cell('worker page reads title', 'blank-app').result, 'fail');
   assert.equal(cell('worker page reads title', 'no-h1').result, 'fail');
-  assert.equal(cell('worker page reads title', 'blank-app').reason, undefined);
+  assert.match(cell('worker page reads title', 'blank-app').reason, /\S/);
   assert.equal(rules('worker page reads title').includes('QCV-F002'), false);
   assert.equal(cell('api only returns widget', 'blank-app').result, 'not-run');
   assert.match(cell('api only returns widget', 'blank-app').reason, /not applied to a page/);
   assert.equal(cell('api only returns widget', 'no-h1').result, 'not-run');
   assert.equal(rules('api only returns widget').includes('QCV-F002'), false);
   assert.equal(rules('api only returns widget').includes('QCV-F004'), false);
+  assert.equal(row('api only returns widget').verdict, 'trusted');
+  assert.equal(
+    row('api only returns widget').reason,
+    'Every fault was not-run, so the cannot-fail check did not exercise this test.',
+  );
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
 });
 
@@ -671,6 +702,7 @@ test('page less after merged', async () => { expect(1).toBe(1); });
 
 test('test, test.fail, and mergeTests keep the spec line', () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-loc-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-loc-tmp-'));
   try {
     fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(project, 'node_modules'));
     fs.writeFileSync(path.join(project, 'fixture.mjs'), faultFixtureSource());
@@ -706,15 +738,75 @@ export default defineConfig({ testDir: '.', retries: 0 });
         '--config',
         path.join(project, 'playwright.config.ts'),
       ],
-      { encoding: 'utf8', cwd: project },
+      { encoding: 'utf8', cwd: project, env: { ...process.env, TMPDIR: tmp, TMP: tmp, TEMP: tmp } },
     );
     assert.equal(listed.status, 0, `${listed.stdout}\n${listed.stderr}`);
     assert.equal(listed.stdout.includes('index.js'), false, listed.stdout);
-    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › merged/);
-    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › fails/);
-    assert.match(listed.stdout, /probe\.spec\.ts:\d+:\d+ › plain/);
+    assert.match(listed.stdout, /probe\.spec\.ts:4:\d+ › merged/);
+    assert.match(listed.stdout, /probe\.spec\.ts:5:\d+ › fails/);
+    assert.match(listed.stdout, /probe\.spec\.ts:6:\d+ › plain/);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a plain test in a fault run keeps its spec line', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-loc-run-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qcv-loc-run-tmp-'));
+  try {
+    fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(project, 'node_modules'));
+    fs.writeFileSync(path.join(project, 'fixture.mjs'), faultFixtureSource());
+    const spec = [
+      "import { test, expect } from './fixture.mjs';",
+      "test('plain located', async () => { expect(1).toBe(1); });",
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(project, 'probe.spec.ts'), spec);
+    fs.writeFileSync(
+      path.join(project, 'playwright.config.ts'),
+      `import { defineConfig } from '@playwright/test';
+export default defineConfig({ testDir: '.', retries: 0 });
+`,
+    );
+    const run = spawnSync(
+      process.execPath,
+      [
+        path.join(repoRoot, 'node_modules', '@playwright/test', 'cli.js'),
+        'test',
+        '--retries=0',
+        '--reporter=json',
+        '--config',
+        path.join(project, 'playwright.config.ts'),
+      ],
+      {
+        encoding: 'utf8',
+        cwd: project,
+        env: {
+          ...process.env,
+          TMPDIR: tmp,
+          TMP: tmp,
+          TEMP: tmp,
+          QCV_FAULT: JSON.stringify({ id: 'blank-app', type: 'blank-app', params: {}, expectedToBreak: [] }),
+        },
+      },
+    );
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    const start = run.stdout.indexOf('{');
+    const report = JSON.parse(run.stdout.slice(start));
+    const specs = [];
+    const walk = (suite) => {
+      for (const spec of suite.specs ?? []) specs.push(spec);
+      for (const child of suite.suites ?? []) walk(child);
+    };
+    for (const suite of report.suites ?? []) walk(suite);
+    const plain = specs.find((spec) => (spec.title ?? '').includes('plain located') || (spec.tests ?? []).some((entry) => entry.title === 'plain located'));
+    assert.ok(plain, JSON.stringify(specs.map((spec) => spec.title)));
+    assert.equal(plain.line, 2, JSON.stringify(plain));
+    assert.equal(String(plain.file).endsWith('probe.spec.ts'), true, plain.file);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
@@ -844,6 +936,251 @@ test('page less after merged', async () => { expect(1).toBe(1); });
   assert.equal(result.stderr.includes('0 fail, 0 pass, 0 skipped, 0 not-run'), false, result.stderr);
   assert.equal(result.stderr.includes('did not include every test'), false, result.stderr);
   assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+test('a closed page is judged from the body it had before close', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-close-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('replaces the body then closes', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  await p.evaluate(() => {
+    document.open();
+    document.write('<html><body><h1>Replaced</h1></body></html>');
+    document.close();
+  });
+  await expect(p.locator('h1')).toHaveText('Replaced');
+  await p.close();
+});
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules, row } = faultView(report);
+  assert.equal(cell('replaces the body then closes', 'blank-app').result, 'not-run');
+  assert.match(cell('replaces the body then closes', 'blank-app').reason, /blank page was not present/);
+  assert.equal(rules('replaces the body then closes').includes('QCV-F002'), false);
+  assert.equal(row('replaces the body then closes').verdict, 'trusted');
+});
+
+test('an expectedToBreak pattern that matches nothing is printed', { timeout: 120000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-miss-');
+  const scratch = tempDir(t, 'qcv-fault-miss-tmp-');
+  const out = tempDir(t, 'qcv-fault-miss-out-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({ retries: 0, timeout: 15000, testDir: '.' });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('alpha', async () => { expect(1).toBe(1); });
+`,
+  );
+  writeFaults(project, [
+    { id: 'blank-app', type: 'blank-app', params: {}, expectedToBreak: ['no such test'] },
+  ]);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status === 0 || result.status === 1, true, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Fault blank-app expectedToBreak pattern "no such test" matched no test\./);
+});
+
+test('baseline locations that match no inventoried test exit 2', { timeout: 120000 }, async (t) => {
+  const project = tempDir(t, 'qcv-fault-drift-');
+  const scratch = tempDir(t, 'qcv-fault-drift-tmp-');
+  const out = tempDir(t, 'qcv-fault-drift-out-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({ retries: 0, timeout: 15000, testDir: '.' });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('alpha', async () => { expect(1).toBe(1); });
+`,
+  );
+  const result = runCli([project, '--only', 'faults', '--out', out], {
+    ...privateEnv(scratch),
+    QCV_TEST_LOCATION_DRIFT: '1',
+  });
+  assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Baseline locations match no inventoried test/);
+  assert.equal(result.stderr.includes('broke no test'), false, result.stderr);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const row = report.tests.find((entry) => entry.titlePath.at(-1) === 'alpha');
+  assert.equal(row.verdict, 'not-run');
+  assert.equal(row.reason, 'The baseline locations do not match the inventoried tests.');
+  assert.equal(row.faults[0].result, 'not-run');
+  assert.equal(row.faults[0].reason, 'The baseline locations do not match the inventoried tests.');
+});
+
+test('a worker fixture on mergeTests().extend counts for a later test', { timeout: 180000 }, async (t) => {
+  const port = await reservePort();
+  const project = tempDir(t, 'qcv-fault-merge-worker-');
+  const scratch = tempDir(t, 'qcv-fault-merge-worker-tmp-');
+  const out = tempDir(t, 'qcv-fault-merge-worker-out-');
+  writeBlankServer(project, port);
+  fs.writeFileSync(path.join(project, 'playwright.config.ts'), blankConfig(port));
+  fs.writeFileSync(
+    path.join(project, 'fx.ts'),
+    `import { test as base } from '@playwright/test';
+export const a = base.extend<{ one: number }>({ one: async ({}, use) => { await use(1); } });
+export const b = base.extend<{ two: number }>({ two: async ({}, use) => { await use(2); } });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { mergeTests, expect } from '@playwright/test';
+import { a, b } from './fx';
+const test = mergeTests(a, b).extend({
+  wapp: [async ({ browser }, use) => {
+    const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+    await p.goto('/');
+    await use(p);
+  }, { scope: 'worker' }],
+});
+test('before the worker page', async () => { expect(1).toBe(1); });
+test('uses the worker page', async ({ wapp }) => { void wapp; expect(1).toBe(1); });
+test('after the worker page', async () => { expect(1).toBe(1); });
+`,
+  );
+  writeFaults(project, []);
+  const result = runCli([project, '--only', 'faults', '--out', out], privateEnv(scratch));
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('before the worker page', 'blank-app').result, 'not-run');
+  assert.equal(cell('uses the worker page', 'blank-app').result, 'pass');
+  assert.equal(rules('uses the worker page').includes('QCV-F002'), true);
+  assert.equal(cell('after the worker page', 'blank-app').result, 'pass');
+  assert.equal(rules('after the worker page').includes('QCV-F002'), true);
+  assert.equal(fs.readdirSync(scratch).length, 0, fs.readdirSync(scratch).join(','));
+});
+
+test('a closed blank page still gets QCV-F002', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-close-blank-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('closes a blank page', async ({ browser }) => {
+  const p = await browser.newPage({ baseURL: 'http://127.0.0.1:${port}' });
+  await p.goto('/');
+  await p.close();
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('closes a blank page', 'blank-app').result, 'pass');
+  assert.equal(rules('closes a blank page').includes('QCV-F002'), true);
+});
+
+test('a blank check that errors is not a confirmed blank page', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-blank-err-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('hides the body then stays green', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'body', {
+      configurable: true,
+      get() { throw new Error('blocked'); },
+    });
+  });
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('hides the body then stays green', 'blank-app').result, 'not-run');
+  assert.match(cell('hides the body then stays green', 'blank-app').reason, /blank check did not finish/);
+  assert.equal(rules('hides the body then stays green').includes('QCV-F002'), false);
+});
+
+test('a blank check that exceeds one second is not a confirmed blank page', { timeout: 120000 }, async (t) => {
+  const port = await reservePort();
+  const { result, report } = await runBlankSuite(
+    t,
+    'qcv-fault-blank-slow-',
+    port,
+    `import { test, expect } from '@playwright/test';
+test('blocks the page then stays green', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    setTimeout(() => {
+      const start = Date.now();
+      while (Date.now() - start < 4000) {}
+    }, 0);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(1).toBe(1);
+});
+`,
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const { cell, rules } = faultView(report);
+  assert.equal(cell('blocks the page then stays green', 'blank-app').result, 'not-run');
+  assert.match(cell('blocks the page then stays green', 'blank-app').reason, /blank check did not finish/);
+  assert.equal(rules('blocks the page then stays green').includes('QCV-F002'), false);
+});
+
+test('a copy note is printed after the baseline line', { timeout: 180000 }, (t) => {
+  const project = tempDir(t, 'qcv-fault-link-');
+  const scratch = tempDir(t, 'qcv-fault-link-tmp-');
+  fs.writeFileSync(
+    path.join(project, 'playwright.config.ts'),
+    `import { defineConfig } from '@playwright/test';
+export default defineConfig({ retries: 0, timeout: 15000, testDir: '.' });
+`,
+  );
+  fs.writeFileSync(
+    path.join(project, 'probe.spec.ts'),
+    `import { test, expect } from '@playwright/test';
+test('alpha', async () => { expect(1).toBe(1); });
+`,
+  );
+  fs.symlinkSync(path.join(project, 'missing-target'), path.join(project, 'dangling-link'));
+  for (const mode of ['faults', 'inversion', 'locator']) {
+    const out = tempDir(t, `qcv-link-${mode}-`);
+    const result = runCli([project, '--only', mode, '--out', out], privateEnv(scratch));
+    assert.equal(result.status === 0 || result.status === 1, true, `${mode}\n${result.stdout}\n${result.stderr}`);
+    const baselineAt = result.stderr.indexOf('Baseline:');
+    const noteAt = result.stderr.indexOf('Copy note: Skipped symlink dangling-link (dangling).');
+    assert.equal(baselineAt >= 0 && noteAt > baselineAt, true, `${mode}\n${result.stderr}`);
+  }
+});
+
+test('restoreStackHooks puts the original stack hooks back', async (t) => {
+  const dir = tempDir(t, 'qcv-restore-');
+  fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(dir, 'node_modules'));
+  const file = path.join(dir, 'fixture.mjs');
+  fs.writeFileSync(file, faultFixtureSource());
+  const savedCapture = Error.captureStackTrace;
+  const savedPrepare = Error.prepareStackTrace;
+  const loaded = await import(pathToFileURL(file).href);
+  try {
+    assert.notEqual(Error.captureStackTrace, savedCapture);
+    loaded.restoreStackHooks();
+    assert.equal(Error.captureStackTrace, savedCapture);
+    assert.equal(Error.prepareStackTrace, savedPrepare);
+  } finally {
+    Error.captureStackTrace = savedCapture;
+    Error.prepareStackTrace = savedPrepare;
+  }
 });
 
 function assertLeak(result, report, leaker, follower) {
@@ -1014,7 +1351,7 @@ test('reads the blocked file', async ({ page }) => {
 });
 
 test('reads the marker env', () => {
-  expect(process.env.QCV_DEMO_MARKER ?? 'plain').toBe('plain');
+  expect(process.env.DEMO_MARKER ?? 'plain').toBe('plain');
 });
 
 test('checks a constant', async ({ page }) => {
@@ -1040,7 +1377,7 @@ test('absent banner stays hidden', async ({ page }) => {
       expectedToBreak: ['shows the original text', 'checks a constant'],
     },
     { id: 'block-file', type: 'block-request', params: { urlPattern: '**/blocked.txt' }, expectedToBreak: ['reads the blocked file'] },
-    { id: 'swap-marker', type: 'user-swap', params: { env: { QCV_DEMO_MARKER: 'swapped' } }, expectedToBreak: ['reads the marker env'] },
+    { id: 'swap-marker', type: 'user-swap', params: { env: { DEMO_MARKER: 'swapped' } }, expectedToBreak: ['reads the marker env'] },
     {
       id: 'show-absent',
       type: 'change-text',

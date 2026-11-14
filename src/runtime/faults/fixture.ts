@@ -2,7 +2,7 @@
 export function faultFixtureSource(): string {
   return `import fs from 'node:fs';
 import path from 'node:path';
-import { test as base, expect as baseExpect } from '@playwright/test';
+import { test as base, expect as baseExpect, mergeTests as baseMergeTests } from '@playwright/test';
 
 export * from '@playwright/test';
 
@@ -24,8 +24,11 @@ let skipProxyFrame = false;
 let state = null;
 
 const originalCaptureStackTrace = Error.captureStackTrace;
+const originalPrepareStackTrace = Error.prepareStackTrace;
 function qcvCaptureStackTrace(targetObject, constructorOpt) {
-  const hideWrapper = skipProxyFrame;
+  // QCV_TEST_LOCATION_DRIFT is test-only. It forces wrong locations so the drift guard can be tested.
+  // Do not set it. A fault run then exits 2. user-swap cannot set it, because QCV_ names are refused.
+  const hideWrapper = process.env.QCV_TEST_LOCATION_DRIFT === '1' || skipProxyFrame;
   skipProxyFrame = false;
   const limit = Error.stackTraceLimit;
   const prepare = Error.prepareStackTrace;
@@ -43,9 +46,17 @@ function qcvCaptureStackTrace(targetObject, constructorOpt) {
     return originalCaptureStackTrace(targetObject, constructorOpt || qcvCaptureStackTrace);
   } finally {
     Error.stackTraceLimit = limit;
+    // prepareStackTrace stays until the caller reads error.stack. The worker exit handler restores it.
   }
 }
 Error.captureStackTrace = qcvCaptureStackTrace;
+function restoreStackHooks() {
+  Error.captureStackTrace = originalCaptureStackTrace;
+  Error.prepareStackTrace = originalPrepareStackTrace;
+}
+// The worker process is already finished when this runs. It does not change fault results.
+process.on('exit', restoreStackHooks);
+export { restoreStackHooks };
 
 function readFault() {
   const raw = process.env.QCV_FAULT;
@@ -92,7 +103,7 @@ function beginTestScope() {
   carriedContexts = new Set(armedContexts);
   seenPages = new Set(armedPages);
   seenContexts = new Set(armedContexts);
-  state = readFault() ? { blankChecks: 0, blankMisses: 0, counts: {} } : null;
+  state = readFault() ? { blankChecks: 0, blankMisses: 0, blankUnknown: 0, counts: {} } : null;
 }
 
 function endTestScope() {
@@ -169,6 +180,15 @@ function trackPage(page, fault) {
   if (trackedPages.has(page)) return;
   trackedPages.add(page);
   if (ownedByThisTest(carriedPages, page)) testLocalPages.add(page);
+  const originalClose = page.close.bind(page);
+  page.close = async (options) => {
+    try {
+      await rememberPage(page, fault);
+    } catch {
+      // The page is closing. The snapshot above is the last look at the body.
+    }
+    return originalClose(options);
+  };
   if (!isDom(fault)) return;
   const script = domScript(fault);
   const original = page.setContent.bind(page);
@@ -222,8 +242,9 @@ async function rememberSeen(fault) {
 async function rememberPage(page, fault) {
   if (!state || !isDom(fault) || !page || page.isClosed()) return;
   let snap;
+  let timer;
   try {
-    snap = await page.evaluate(() => {
+    const check = page.evaluate(() => {
       const body = document.body;
       const node = body && body.firstElementChild;
       const blank = !!(
@@ -235,8 +256,19 @@ async function rememberPage(page, fault) {
       );
       return { counts: window.__qcvFaultCounts || {}, blank };
     });
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('qcv blank check timed out')), 1000);
+    });
+    void check.catch(() => undefined);
+    snap = await Promise.race([check, timeout]);
   } catch {
+    if (state && fault && fault.type === 'blank-app') {
+      state.blankChecks += 1;
+      state.blankUnknown += 1;
+    }
     return;
+  } finally {
+    clearTimeout(timer);
   }
   if (snap.counts && typeof snap.counts === 'object') {
     for (const key of Object.keys(snap.counts)) {
@@ -263,6 +295,7 @@ function writeLog(testInfo, fault) {
     armedContexts: seenContexts.size,
     blankChecks: state.blankChecks,
     blankMisses: state.blankMisses,
+    blankUnknown: state.blankUnknown,
     counts: state.counts,
   });
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
@@ -344,6 +377,10 @@ function installExtend(inner) {
     }
   };
   return inner;
+}
+
+export function mergeTests(...args) {
+  return installExtend(baseMergeTests(...args));
 }
 
 export const test = installExtend(base.extend(wrapFixtureBag({

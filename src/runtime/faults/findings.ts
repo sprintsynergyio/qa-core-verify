@@ -7,7 +7,7 @@ import { titleMatches, type Fault, type FaultResultName } from './types.js';
 export interface FaultCell {
   id: string;
   result: FaultResultName;
-  /** Set when result is not-run because the fault did not reach the page. */
+  /** Short reason for not-run, or the first line of the Playwright error when result is fail. */
   reason?: string;
 }
 
@@ -25,15 +25,17 @@ export function classifyFindings(projectDir: string, faults: readonly Fault[], r
   for (const row of rows) {
     if (row.baseline !== 'pass') continue;
     const blank = row.cells.find((cell) => faults.find((fault) => fault.id === cell.id)?.type === 'blank-app');
-    if (blank?.result === 'pass') findings.push(f002(projectDir, row));
+    const blankPassed = blank?.result === 'pass';
+    if (blankPassed) findings.push(f002(projectDir, row));
     for (const fault of faults) {
       const cell = row.cells.find((entry) => entry.id === fault.id);
       if (!cell || cell.result !== 'pass') continue;
       if (!fault.expectedToBreak.some((pattern) => titleMatches(pattern, row.test.titlePath))) continue;
       findings.push(f003(projectDir, row, fault));
     }
-    if (row.cells.length > 0 && row.cells.every((cell) => cell.result === 'pass')) {
-      findings.push(f004(projectDir, row));
+    const nonBlank = row.cells.filter((cell) => faults.find((fault) => fault.id === cell.id)?.type !== 'blank-app');
+    if (nonBlank.length > 0 && nonBlank.every((cell) => cell.result === 'pass')) {
+      findings.push(f004(projectDir, row, nonBlank));
     }
     findings.push(...upgradedAbsence(projectDir, faults, row));
   }
@@ -80,9 +82,9 @@ function f003(projectDir: string, row: ClassifiedTest, fault: Fault): Finding {
   };
 }
 
-function f004(projectDir: string, row: ClassifiedTest): Finding {
+function f004(projectDir: string, row: ClassifiedTest, cells: readonly FaultCell[]): Finding {
   const site = siteOf(row.test);
-  const ids = row.cells.map((cell) => cell.id).join(', ');
+  const ids = cells.map((cell) => cell.id).join(', ');
   return {
     ruleId: 'QCV-F004',
     check: 'cannot-fail',
@@ -91,9 +93,9 @@ function f004(projectDir: string, row: ClassifiedTest): Finding {
     line: site.line,
     column: site.column,
     testTitle: row.test.titlePath.join(' > '),
-    message: 'This test stayed green under every fault.',
-    evidence: `Faults: ${ids}.`,
-    fixHint: 'Add an assertion that fails when one of these faults is applied.',
+    message: 'This test stayed green under every fault other than blank-app.',
+    evidence: `Faults other than blank-app: ${ids}.`,
+    fixHint: 'Add an assertion that fails when one of these faults is applied, or add a fault in qa-core-verify.faults.json that this test should catch.',
     ownerId: row.ownerId,
   };
 }

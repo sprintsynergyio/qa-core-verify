@@ -101,6 +101,25 @@ export function classifyMutantOutput(
   return { outcome: 'error', reason: `The inverted test ended as ${described.join(', ')}.` };
 }
 
+/**
+ * First Playwright error line from a control run, or an empty string when the report has none.
+ * The JSON reporter's stdout is not scanned. A line of that JSON can contain the word failed.
+ */
+export function controlFailureDetail(stdout: string, stderr: string, exitCode: number, workspaceDir: string): string {
+  const parsed = parseBaseline(stdout, stderr, exitCode, workspaceDir);
+  const reason = parsed.failReasons ? [...parsed.failReasons.values()][0] : undefined;
+  if (reason) return ` ${reason}.`;
+  for (const line of stderr.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('at ') || trimmed.startsWith('at\t')) continue;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) continue;
+    if (/^Error:|^TimeoutError:|Timeout \d+ms exceeded/.test(trimmed)) {
+      return ` ${trimmed.length > 180 ? `${trimmed.slice(0, 177)}...` : trimmed}.`;
+    }
+  }
+  return '';
+}
+
 /** Playwright's test status, or the status implied by `expectedStatus` when the reporter omitted it. */
 function levelStatus(test: JsonTest): string | undefined {
   if (typeof test.status === 'string' && test.status.length > 0) return test.status;
@@ -158,7 +177,6 @@ export async function collectInversion(options: {
     projectDir,
     { keep: options.keepWorkspace, configFile: inventory.forwardedConfig },
     async (session) => {
-      for (const link of session.skippedLinks) console.error(`Skipped symlink ${link}.`);
       const baseline = await session.run([
         'test',
         '--retries=0',
@@ -171,11 +189,12 @@ export async function collectInversion(options: {
       if (!parsed.ok) throw new BaselineStartError(baseline, session.workspaceDir, projectDir, parsed.loadError ?? '');
       baselineSummary = parsed;
       console.error(`Baseline: ${parsed.passed} passed, ${parsed.failed} failed, ${parsed.skipped} skipped.`);
+      for (const link of session.skippedLinks) console.error(`Copy note: Skipped symlink ${link}.`);
       noteStaticAssertions(projectDir, inventory.tests, plans, parsed, collected);
       const work = mutantWork(projectDir, inventory.tests, plans, parsed);
       const controls = new Map<string, Promise<PlaywrightRun>>();
       const passedControl = new Set<string>();
-      const failedControl = new Set<string>();
+      const failedControl = new Map<string, string>();
       let controlIndex = 0;
       const ready: WorkItem[] = [];
       for (const item of work) {
@@ -200,12 +219,21 @@ export async function collectInversion(options: {
           );
           if (classified.outcome === 'survived') passedControl.add(owner);
           else {
-            failedControl.add(owner);
-            console.error(`Control run did not pass for ${item.testRelative}:${item.test.line}. Its assertions were not inverted.`);
+            const detail = controlFailureDetail(control.stdout, control.stderr, control.exitCode, session.workspaceDir);
+            failedControl.set(owner, detail);
+            console.error(
+              `Control run did not pass for ${item.testRelative}:${item.test.line}.${detail} Its assertions were not inverted.`,
+            );
           }
         }
         if (failedControl.has(owner)) {
-          addAssertion(collected, item, 'not-run', 'The test did not pass when run on its own, so its assertions were not inverted.');
+          const detail = failedControl.get(owner) ?? '';
+          addAssertion(
+            collected,
+            item,
+            'not-run',
+            `The test did not pass when run on its own, so its assertions were not inverted.${detail}`,
+          );
           continue;
         }
         ready.push(item);

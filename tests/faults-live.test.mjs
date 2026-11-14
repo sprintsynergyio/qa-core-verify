@@ -57,7 +57,16 @@ test('SauceDemo fault injection is skipped unless QCV_LIVE=1', { skip: !live, ti
   for (const entry of good) {
     const blank = entry.faults.find((cell) => cell.id === 'blank-app');
     assert.equal(blank.result, 'fail', entry.titlePath.join(' > '));
-    assert.equal(entry.verdict, 'trusted', `${entry.titlePath.join(' > ')} ${entry.findings.map((finding) => finding.ruleId).join(',')}`);
+    const nonBlank = entry.faults.filter((cell) => cell.id !== 'blank-app');
+    const allNonBlankPass = nonBlank.length > 0 && nonBlank.every((cell) => cell.result === 'pass');
+    const title = entry.titlePath.join(' > ');
+    if (allNonBlankPass) {
+      assert.equal(entry.verdict, 'review', title);
+      assert.equal(entry.findings.some((finding) => finding.ruleId === 'QCV-F004'), true, title);
+    } else {
+      assert.equal(entry.verdict, 'trusted', `${title} ${entry.findings.map((finding) => finding.ruleId).join(',')}`);
+      assert.equal(entry.findings.some((finding) => finding.ruleId === 'QCV-F004'), false, title);
+    }
   }
   const seeded = report.tests.find((entry) => entry.titlePath.includes('does not read the page'));
   assert.deepEqual(seeded.findings.map((finding) => finding.ruleId).sort(), ['QCV-F002', 'QCV-F003', 'QCV-F004']);
