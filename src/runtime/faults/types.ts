@@ -96,6 +96,13 @@ export function validateFault(value: unknown, seen: Set<string>): Fault {
     throw new ToolError(`${FAULT_FILE_NAME} fault id must be letters, digits, ".", "_", or "-".`);
   }
   if (seen.has(id)) throw new ToolError(`${FAULT_FILE_NAME} repeats fault id "${id}".`);
+  const folded = id.toLowerCase();
+  if ([...seen].some((existing) => existing.toLowerCase() === folded)) {
+    throw new ToolError(`${FAULT_FILE_NAME} fault id "${id}" matches another id when case is ignored.`);
+  }
+  if (folded === 'blank-app' && id !== 'blank-app') {
+    throw new ToolError(`${FAULT_FILE_NAME} fault id "${id}" matches the built-in id "blank-app" when case is ignored.`);
+  }
   seen.add(id);
   const type = record.type;
   if (typeof type !== 'string' || !isFaultType(type)) {
@@ -167,6 +174,9 @@ function validateParams(id: string, type: FaultType, value: unknown): FaultParam
   const vars: Record<string, string> = {};
   for (const [name, entry] of Object.entries(env)) {
     if (!ENV_NAME.test(name)) throw new ToolError(`${FAULT_FILE_NAME} fault "${id}" has a bad env name "${name}".`);
+    if (name.startsWith('QCV_')) {
+      throw new ToolError(`${FAULT_FILE_NAME} fault "${id}" env name "${name}" must not start with QCV_.`);
+    }
     if (typeof entry !== 'string') throw new ToolError(`${FAULT_FILE_NAME} fault "${id}" env ${name} must be a string.`);
     vars[name] = entry;
   }

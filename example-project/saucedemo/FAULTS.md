@@ -32,6 +32,8 @@ The login, cart badge, and locked out tests passed.
 
 4 passed.
 
+The PR 08 review re-run saw the login based tests take about 5.5 seconds each for this user and about 0.4 seconds for `standard_user`. A fault run sets the `page` fixture action timeout to 8 seconds. A login that is that slow can fail under a fault even though this observed run passed.
+
 ## error_user
 
 4 passed.

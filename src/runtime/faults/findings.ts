@@ -7,7 +7,7 @@ import { titleMatches, type Fault, type FaultResultName } from './types.js';
 export interface FaultCell {
   id: string;
   result: FaultResultName;
-  /** Set when result is not-run because the fault did not reach the page. */
+  /** Short reason for not-run, or the first line of the Playwright error when result is fail. */
   reason?: string;
 }
 
@@ -25,14 +25,17 @@ export function classifyFindings(projectDir: string, faults: readonly Fault[], r
   for (const row of rows) {
     if (row.baseline !== 'pass') continue;
     const blank = row.cells.find((cell) => faults.find((fault) => fault.id === cell.id)?.type === 'blank-app');
-    if (blank?.result === 'pass') findings.push(f002(projectDir, row));
+    const blankPassed = blank?.result === 'pass';
+    if (blankPassed) findings.push(f002(projectDir, row));
     for (const fault of faults) {
       const cell = row.cells.find((entry) => entry.id === fault.id);
       if (!cell || cell.result !== 'pass') continue;
       if (!fault.expectedToBreak.some((pattern) => titleMatches(pattern, row.test.titlePath))) continue;
       findings.push(f003(projectDir, row, fault));
     }
-    if (row.cells.length > 0 && row.cells.every((cell) => cell.result === 'pass')) {
+    // blank-app is always in the run. A test that stays green under every fault already has QCV-F002.
+    // QCV-F004 is not added on top of that error. It still applies when blank-app did not pass.
+    if (row.cells.length > 0 && row.cells.every((cell) => cell.result === 'pass') && !blankPassed) {
       findings.push(f004(projectDir, row));
     }
     findings.push(...upgradedAbsence(projectDir, faults, row));

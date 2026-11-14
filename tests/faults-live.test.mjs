@@ -60,7 +60,7 @@ test('SauceDemo fault injection is skipped unless QCV_LIVE=1', { skip: !live, ti
     assert.equal(entry.verdict, 'trusted', `${entry.titlePath.join(' > ')} ${entry.findings.map((finding) => finding.ruleId).join(',')}`);
   }
   const seeded = report.tests.find((entry) => entry.titlePath.includes('does not read the page'));
-  assert.deepEqual(seeded.findings.map((finding) => finding.ruleId).sort(), ['QCV-F002', 'QCV-F003', 'QCV-F004']);
+  assert.deepEqual(seeded.findings.map((finding) => finding.ruleId).sort(), ['QCV-F002', 'QCV-F003']);
   assert.equal(seeded.verdict, 'untrusted');
   const ids = report.faultRun.faults.map((fault) => fault.id);
   for (const id of ids) {
