@@ -1,6 +1,6 @@
 # CI
 
-Private, internal review build. Not released. This page is an example a team can copy. It is not a claim that a package is on a registry.
+This page is an example a team can copy.
 
 Static checks do not open a browser. Run them on every pull request. Runtime checks open a browser. Run those on a schedule or from a manual trigger, not on every pull request. The example workflow is [examples/github-action.yml](../examples/github-action.yml).
 
@@ -34,12 +34,12 @@ A schedule or `workflow_dispatch` is the right place for these commands. A pull 
 
 ## Checkout
 
-This repository is private. A workflow in another repository checks it out with a token that can read `github.com/sprintsynergyio/qa-core-verify`. `GITHUB_TOKEN` from the other repository cannot read this one. The example calls that secret `QA_CORE_VERIFY_TOKEN`.
+The simplest setup is `npm install --save-dev qa-core-verify` in the suite, then `npx qa-core-verify .` in the workflow. The example instead checks out this public repository next to the suite and builds it, so a job can pin a tag or a commit. No token is needed for that checkout.
 
-Build from the checkout and call `node .qa-core-verify/dist/cli.js`. Do not `npm install qa-core-verify`. The package is not published. `package.json` keeps `"private": true`.
+Build from the checkout and call `node .qa-core-verify/dist/cli.js`.
 
 ## This Repository
 
 The workflow in `.github/workflows/ci.yml` typechecks and tests this repo on Node 22 and Node 24, on Ubuntu 24.04. `ubuntu-latest` is Ubuntu 26.04, and Playwright 1.60.0 refuses to install Chromium there. The job installs Chromium for the local fixture tests. It does not call SauceDemo. The live SauceDemo job runs only from `workflow_dispatch`.
 
-`.github/workflows/publish.yml` is prepared for a later tag push. It is not used while `"private": true` stays set. It refuses to publish while the repository is private, so `npm publish --provenance` does not run. No sibling repository has this workflow. qa-core-heal, qa-core-flaky, and qa-core-prcheck only have CI.
+`.github/workflows/publish.yml` runs on a `v*` tag push. It checks that the tag matches the `package.json` version, refuses to publish from a private repository, and runs `npm publish --provenance --access public` with the `NPM_TOKEN` secret. No sibling repository has this workflow. qa-core-heal, qa-core-flaky, and qa-core-prcheck only have CI.

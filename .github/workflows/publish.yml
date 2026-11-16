@@ -1,4 +1,4 @@
-# Prepared for a later public release. It does not run on pull requests.
+# Publishes to npm when a v* tag is pushed. It does not run on pull requests.
 # No sibling repository (qa-core-heal, qa-core-flaky, qa-core-prcheck) has an npm publish workflow.
 # Those repositories only have CI. This file is not copied from them.
 # npm publish --provenance refuses a private repository, and it can write a public

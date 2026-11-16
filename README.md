@@ -2,7 +2,7 @@
 
 qa-core-verify audits a Playwright test suite, often one written by an AI, and reports whether each test can be trusted to go red when the feature breaks.
 
-Private, internal review build. Not released.
+Open source, MIT licensed. Install it from npm as `qa-core-verify`.
 
 No LLM, no API key. The checker is deterministic: same suite, same app state, same findings, when the live site does not change a result.
 
@@ -58,7 +58,14 @@ Static rules, QCV-W000 through QCV-W010, read the spec files. They do not open a
 
 ## Quick Start
 
-Clone this repository and run the checker from that clone. This build is not published and is not installed from a registry.
+Install it in the suite you want to audit, then run it from that suite's folder:
+
+```sh
+npm install --save-dev qa-core-verify
+npx qa-core-verify .
+```
+
+To try the SauceDemo demo suite, run the checker from a clone of this repository:
 
 ```sh
 git clone https://github.com/sprintsynergyio/qa-core-verify.git
