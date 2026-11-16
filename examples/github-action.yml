@@ -1,6 +1,6 @@
-# Example only. qa-core-verify is a private internal review build. Not released.
+# Example only.
 # Static checks run on every pull request. Runtime checks run on a schedule or a manual trigger.
-# QA_CORE_VERIFY_TOKEN needs read access to github.com/sprintsynergyio/qa-core-verify.
+# qa-core-verify is public, so the checkout needs no token. Add ref: v0.1.0 to pin a release.
 # This file is not a workflow in this repository. Copy it into the suite repository.
 
 name: qa-core-verify
@@ -29,7 +29,6 @@ jobs:
         with:
           repository: sprintsynergyio/qa-core-verify
           path: .qa-core-verify
-          token: ${{ secrets.QA_CORE_VERIFY_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -60,7 +59,6 @@ jobs:
         with:
           repository: sprintsynergyio/qa-core-verify
           path: .qa-core-verify
-          token: ${{ secrets.QA_CORE_VERIFY_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4

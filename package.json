@@ -1,7 +1,7 @@
 {
   "name": "qa-core-verify",
   "version": "0.1.0",
-  "description": "Private internal review build. Audits a Playwright suite and reports whether each test can be trusted to go red when the feature breaks.",
+  "description": "Audits a Playwright suite and reports whether each test can be trusted to go red when the feature breaks.",
   "keywords": [
     "playwright",
     "playwright-test",
@@ -25,7 +25,6 @@
   },
   "type": "module",
   "license": "MIT",
-  "private": true,
   "engines": {
     "node": ">=22.6"
   },

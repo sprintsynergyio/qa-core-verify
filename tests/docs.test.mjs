@@ -25,9 +25,9 @@ test('the README static rule list matches src/rules/index.ts', () => {
   assert.equal(uniqueInOrder(listed).length, listed.length);
 });
 
-test('package.json stays private at 0.1.0 and points at this repository', () => {
+test('package.json is publishable at 0.1.0 and points at this repository', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
-  assert.equal(pkg.private, true);
+  assert.equal(pkg.private, undefined);
   assert.equal(pkg.version, '0.1.0');
   assert.equal(pkg.repository.url, 'git+https://github.com/sprintsynergyio/qa-core-verify.git');
   assert.equal(pkg.homepage, 'https://github.com/sprintsynergyio/qa-core-verify#readme');
