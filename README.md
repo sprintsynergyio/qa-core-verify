@@ -1,4 +1,24 @@
-# qa-core-verify
+<h1 align="center">qa-core-verify</h1>
+
+<p align="center">
+  <strong>Will your green tests go red when the feature breaks?</strong><br/>
+  <strong>Static rules • Locator evidence • Assertion inversion • Fault injection</strong><br/>
+  <sub>Audit a Playwright suite, often one written by an AI, and get a verdict per test: trusted, review, untrusted, baseline-red or not-run. Deterministic: no LLM, no API key.</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sprintsynergyio/qa-core-verify/actions/workflows/ci.yml"><img src="https://github.com/sprintsynergyio/qa-core-verify/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/qa-core-verify"><img src="https://img.shields.io/npm/v/qa-core-verify.svg" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/qa-core-verify"><img src="https://img.shields.io/npm/dm/qa-core-verify.svg" alt="npm downloads" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license" /></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22.6-339933?logo=node.js&logoColor=white" alt="Node 22.6 or newer" />
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#how-it-works">How it works</a> · <a href="#what-it-checks">Rules</a> · <a href="#configuration">Configuration</a> · <a href="#ci">CI</a> · <a href="https://www.npmjs.com/package/qa-core-verify">npm</a>
+</p>
+
+---
 
 qa-core-verify audits a Playwright test suite, often one written by an AI, and reports whether each test can be trusted to go red when the feature breaks.
 
@@ -23,6 +43,81 @@ Reports: .qa-core/verify/report.json, .qa-core/verify/report.md, .qa-core/verify
 ```
 
 Copied from `node dist/cli.js example-project/saucedemo` on 2026-11-14. Other test lines from that run are left out. The summary line is the full run. Exit code was 1.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### Catches tests that cannot fail
+
+Static rules find tests with no assertion, unawaited assertions, values compared with themselves, swallowed failures and generic matchers, without opening a browser.
+
+</td>
+<td width="33%" valign="top">
+
+### Proves it at runtime
+
+Optional checks run the suite in a temp copy: locator evidence for selectors that never matched, assertion inversion for assertions that survive `.not`, and faults such as a blank app.
+
+</td>
+<td width="33%" valign="top">
+
+### Ready for CI
+
+Console, JSON, Markdown and a single-file HTML report, exit codes 0, 1 and 2, and a GitHub Actions example. The suite itself is never modified.
+
+</td>
+</tr>
+</table>
+
+<!-- A screenshot of .qa-core/verify/report.html from the SauceDemo demo suite would help here. Capture a real run; do not use a generated image. -->
+
+---
+
+## Quick Start
+
+Install it in the suite you want to audit, then run it from that suite's folder:
+
+```sh
+npm install --save-dev qa-core-verify
+npx qa-core-verify .
+```
+
+To try the SauceDemo demo suite, run the checker from a clone of this repository:
+
+```sh
+git clone https://github.com/sprintsynergyio/qa-core-verify.git
+cd qa-core-verify
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
+npm run build
+node dist/cli.js example-project/saucedemo
+```
+
+`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the static scan. Runtime checks (`--only locator`, `--only inversion`, `--only faults`) run the whole Playwright project and refuse spec paths.
+
+The static command does not run the tests and does not open a browser. Locator, inversion, and fault checks do. Install Chromium first:
+
+```sh
+npx playwright install chromium
+npm run build
+node dist/cli.js example-project/saucedemo --only locator
+node dist/cli.js example-project/saucedemo --only faults
+```
+
+Node.js 22.6 or later is required. `@playwright/test` and `playwright` are pinned to 1.60.0 in this package. A suite under test uses its own Playwright from its `node_modules`.
+
+---
+
+## Features
+
+- **One verdict per test:** trusted, review, untrusted, baseline-red or not-run. See [What It Checks](#what-it-checks).
+- **Static rules (QCV-W000 to QCV-W010):** the TypeScript compiler API reads each spec without running it; helpers and page objects are followed one import level.
+- **Hallucinated locators (`--only locator`):** a baseline run, then a run that records how many elements each locator matched.
+- **Assertion inversion (`--only inversion`):** one mutant per assertion in a green test, after a control run; a surviving mutant is QCV-F001.
+- **Fault injection (`--only faults`):** `blank-app` built in, plus your own faults in `qa-core-verify.faults.json`.
+- **Assertion helpers:** name your own helpers in `qa-core-verify.config.json` so they count as assertions.
+- **Reports:** `.qa-core/verify/report.json` (`schemaVersion: 1`), `report.md` and a single-file `report.html`. See [Output](#output).
+- **Non-destructive:** runtime work uses a temp copy, and the suite is never modified.
 
 ## What It Checks
 
@@ -56,37 +151,22 @@ Static rules, QCV-W000 through QCV-W010, read the spec files. They do not open a
 
 `--only locator` adds QCV-L001 through QCV-L004. `--only inversion` adds QCV-F001. `--only faults` adds QCV-F002, QCV-F003, and QCV-F004. Each rule is described in [docs/rules.md](docs/rules.md).
 
-## Quick Start
+---
 
-Install it in the suite you want to audit, then run it from that suite's folder:
+## How it works
 
-```sh
-npm install --save-dev qa-core-verify
-npx qa-core-verify .
+```
+  npx qa-core-verify <project> [spec paths or globs]
+        │
+  discover   find the Playwright config, testDir and testMatch
+  static     parse each spec with the TypeScript compiler API (no browser, no execution)
+  runtime    optional, one per run: --only locator, --only inversion or --only faults,
+             each in a temp copy, after a baseline (and, for inversion, control) run
+  verdict    the most severe finding from the checks that ran decides each test
+  report     console, report.json, report.md and report.html; exit code from --fail-on
 ```
 
-To try the SauceDemo demo suite, run the checker from a clone of this repository:
-
-```sh
-git clone https://github.com/sprintsynergyio/qa-core-verify.git
-cd qa-core-verify
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
-npm run build
-node dist/cli.js example-project/saucedemo
-```
-
-`node dist/cli.js --help` prints the options. Pass spec paths or globs after the project directory to limit the static scan. Runtime checks (`--only locator`, `--only inversion`, `--only faults`) run the whole Playwright project and refuse spec paths.
-
-The static command does not run the tests and does not open a browser. Locator, inversion, and fault checks do. Install Chromium first:
-
-```sh
-npx playwright install chromium
-npm run build
-node dist/cli.js example-project/saucedemo --only locator
-node dist/cli.js example-project/saucedemo --only faults
-```
-
-Node.js 22.6 or later is required. `@playwright/test` and `playwright` are pinned to 1.60.0 in this package. A suite under test uses its own Playwright from its `node_modules`.
+The detail behind each step is in [How It Decides](#how-it-decides).
 
 ## How It Decides
 
@@ -151,6 +231,8 @@ Copy notes such as `Copy note: Skipped symlink ...` are printed after the `Basel
 
 When the baseline ran tests and none of the inventory locations match, stderr says `Baseline locations match no inventoried test. Fault cells are not-run. This run exits 2.` The run does not say the fault broke no test.
 
+---
+
 ## Output
 
 A default run prints one line per test, indented findings, a summary, the checks that ran, and the report paths. Paths inside the project are relative to the project folder. `--out <dir>` writes the files in another directory. When that directory is outside the project, the console prints the `--out` path as it was typed.
@@ -188,6 +270,8 @@ Run the static command on every pull request. Run locator, inversion, and fault 
 
 This repository's own CI typechecks and tests on Node 22 and Node 24, on Ubuntu 24.04. `ubuntu-latest` is Ubuntu 26.04, and Playwright 1.60.0 refuses Chromium there. It does not call SauceDemo unless someone starts the live demo workflow by hand.
 
+---
+
 ## Limits
 
 A clean report does not prove a suite is complete or correct. It only reports the checks that ran.
@@ -202,6 +286,15 @@ A clean report does not prove a suite is complete or correct. It only reports th
 - The QCV-L002 upgrade to error is not shown in the SauceDemo demo.
 - On a live site, one slow response can make a baseline or a control run fail. The row is `baseline-red`, or the control line names the test. Repeating a SauceDemo command does not promise byte-identical stdout when the site flakes.
 - The tool does not modify the suite. Runtime work uses a temp copy. `.qa-core/` is gitignored.
+
+## Platform notes
+
+- **Node.js 22.6 or later.** CI typechecks and tests on Node 22 and 24, on Ubuntu 24.04.
+- **Playwright:** this package pins `@playwright/test` and `playwright` to 1.60.0. A suite under test uses its own Playwright from its `node_modules`.
+- **Browsers:** the static command needs none. Runtime checks need Chromium: `npx playwright install chromium`. Playwright 1.60.0 refuses Chromium on Ubuntu 26.04 (today's `ubuntu-latest`).
+- **Live sites:** a slow response can make a baseline or control run fail; see [Limits](#limits).
+
+---
 
 ## Demo Suite
 
@@ -222,6 +315,29 @@ npm run demo:saucedemo -- tests/good
 
 [qa-core-heal](https://github.com/sprintsynergyio/qa-core-heal) repairs a broken Playwright locator and re-runs the test. It answers a different question: the locator is already red, what should replace it. This checker asks whether a green test would go red.
 
+## Documentation
+
+| Doc | For |
+|---|---|
+| [docs/rules.md](docs/rules.md) | every rule, with overlapping lint rules named |
+| [docs/report-schema.md](docs/report-schema.md) | the JSON report shape |
+| [schema/report.schema.json](schema/report.schema.json) | the report JSON Schema |
+| [docs/ci.md](docs/ci.md) | CI steps |
+| [examples/github-action.yml](examples/github-action.yml) | a GitHub Actions example |
+| [example-project/saucedemo/README.md](example-project/saucedemo/README.md) | the demo suite |
+| [CHANGELOG.md](CHANGELOG.md) | release notes |
+
+## Contributing
+
+Found a bug or have an idea? Open an issue. We review pull requests case by case.
+
 ## License
 
 MIT. Copyright 2026 Muhammad Usman. See [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <strong>Built by <a href="https://sprintsynergy.com">SprintSynergy</a></strong><br/>
+  <sub>SprintSynergy is an AI-based QA automation company: AI testing agents plus our QA team.</sub>
+</p>
